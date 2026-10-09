@@ -14,10 +14,8 @@ use std::{
 pub struct State {
     pub version: u32,
     pub source_uuid: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_plugin: Option<String>,
+    pub source_id: String,
+    pub source_plugin: String,
     pub file: String,
     pub position: u64,
     pub tables: Vec<TableMeta>,
@@ -34,6 +32,8 @@ impl State {
             || self.position < 4
             || self.position > u64::from(u32::MAX)
             || self.source_uuid.is_empty()
+            || self.source_id.is_empty()
+            || self.source_plugin.is_empty()
             || self.tables.is_empty()
         {
             return Err(invalid("invalid state version/source/file/position/tables"));

@@ -19,7 +19,7 @@ fn feed(
     ty: u8,
     pos: u32,
     data: &[u8],
-    out: &mut impl Write,
+    out: &mut (impl Write + Send),
 ) -> pikachu_rs::Result<()> {
     p.process(
         EventView {
@@ -34,7 +34,7 @@ fn feed(
 fn setup() -> Processor {
     Processor::new(state(), None, 1024 * 1024).unwrap()
 }
-fn start(p: &mut Processor, out: &mut impl Write) {
+fn start(p: &mut Processor, out: &mut (impl Write + Send)) {
     feed(p, FORMAT_DESCRIPTION_EVENT, 100, &format(), out).unwrap();
     feed(p, QUERY_EVENT, 150, &query("BEGIN"), out).unwrap();
     feed(
@@ -67,6 +67,7 @@ fn invisible_until_commit_and_rollback_discards() {
     feed(&mut p, XID_EVENT, 300, &1u64.to_le_bytes(), &mut out).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(json["schema"], "app");
+    assert_eq!(json["source"], "test");
     assert_eq!(json["pk"]["value"], 1);
     assert_eq!(json["changed"], serde_json::json!([]));
     assert_eq!(json["operation"], "delete");
@@ -112,6 +113,30 @@ fn incomplete_transaction_and_unsupported_events_stop() {
         &mut out,
     )
     .unwrap();
+}
+
+#[test]
+fn checkpoint_requires_complete_nonempty_source_identity() {
+    let path = temporary("source-identity");
+    let valid = serde_json::to_value(state()).unwrap();
+    for field in ["source_uuid", "source_id", "source_plugin"] {
+        for value in [None, Some(serde_json::Value::Null), Some("".into())] {
+            let mut invalid = valid.clone();
+            if let Some(value) = value {
+                invalid[field] = value;
+            } else {
+                invalid.as_object_mut().unwrap().remove(field);
+            }
+            fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            let error = State::read(&path).expect_err("checkpoint needs explicit source identity");
+            assert!(matches!(error, Error::Json(_) | Error::Invalid(_)));
+        }
+    }
+    state().save(&path).unwrap();
+    let saved = State::read(&path).unwrap();
+    assert_eq!(saved.source_id, "test");
+    assert_eq!(saved.source_plugin, "mysql");
+    fs::remove_file(path).unwrap();
 }
 
 #[test]

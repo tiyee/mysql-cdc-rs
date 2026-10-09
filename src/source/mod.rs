@@ -11,11 +11,8 @@ use crate::{
 };
 use std::sync::Arc;
 
-pub use crate::engine::checkpoint::{State, StateLock};
-pub use mysql::{
-    MysqlSource, connect, initialize, initialize_with_adapter, inspect_server, load_tables,
-    validate_server,
-};
+use crate::engine::checkpoint::State;
+pub use mysql::MysqlSource;
 
 #[derive(Debug, Clone)]
 pub struct ServerInfo {
@@ -30,7 +27,8 @@ pub trait EventStream: Send {
 pub trait SourceSession: Send {
     fn info(&self) -> &ServerInfo;
     fn load_tables(&mut self, config: &Config) -> Result<Vec<TableMeta>>;
-    fn initialize(&mut self, config: &Config) -> Result<State>;
+    /// Capture a checkpoint with this ID, the configured plugin and the server UUID.
+    fn initialize(&mut self, source_id: &str, config: &Config) -> Result<State>;
     fn start(
         self: Box<Self>,
         config: &Config,

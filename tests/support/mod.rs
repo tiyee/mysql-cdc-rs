@@ -107,8 +107,8 @@ pub fn format() -> Vec<u8> {
 pub fn state() -> State {
     State {
         version: 1,
-        source_id: None,
-        source_plugin: None,
+        source_id: "test".into(),
+        source_plugin: "mysql".into(),
         source_uuid: "test-source".into(),
         file: "binlog.000001".into(),
         position: 4,

@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Settings owned by one entry in the application's source list.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -17,7 +18,6 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
-    #[serde(default = "url_env")]
     pub url_env: String,
     pub server_id: u32,
     pub tls_ca: Option<PathBuf>,
@@ -34,19 +34,11 @@ pub struct WhitelistTable {
 fn mysql_plugin() -> String {
     "mysql".into()
 }
-fn url_env() -> String {
-    "MYSQL_URL".into()
-}
 fn transaction_budget() -> usize {
     64 * 1024 * 1024
 }
 
 impl Config {
-    pub fn read(path: &Path) -> Result<Self> {
-        let mut value: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
-        value.resolve(path)?;
-        Ok(value)
-    }
     pub fn validate(&self) -> Result<()> {
         let value = self;
         if value.source.server_id == 0
@@ -90,8 +82,7 @@ impl Config {
     }
 }
 
-/// Each source owns its schema, connection and checkpoint. Legacy single-source
-/// TOML remains accepted with the stable ID "default".
+/// Each named source owns its schema, connection and checkpoint.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEntry {
@@ -107,17 +98,7 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn read(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        let raw: toml::Value = toml::from_str(&text)?;
-        let mut app = if raw.get("sources").is_some() {
-            toml::from_str::<Self>(&text)?
-        } else {
-            Self {
-                sources: vec![SourceEntry {
-                    id: "default".into(),
-                    config: toml::from_str(&text)?,
-                }],
-            }
-        };
+        let mut app: Self = toml::from_str(&text)?;
         for entry in &mut app.sources {
             entry.config.resolve(path)?;
         }

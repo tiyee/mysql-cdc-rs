@@ -1,5 +1,5 @@
 use crate::{Change, Error, OwnedChange, Result, engine::checkpoint::State};
-use std::{io::Write, path::Path};
+use std::path::Path;
 
 /// Failures must abort consumption; retry from the last persisted commit boundary.
 /// Stdout cannot provide exactly-once delivery. A durable custom sink should ack a
@@ -67,21 +67,6 @@ impl TransactionBuffer {
         self.changes.clear();
         self.bytes = 0;
         self.active = false;
-    }
-    pub fn commit(
-        &mut self,
-        output: &mut impl Write,
-        state: &State,
-        state_path: Option<&Path>,
-    ) -> Result<()> {
-        self.commit_with(state, state_path, |changes| {
-            for change in changes {
-                serde_json::to_writer(&mut *output, change)?;
-                output.write_all(b"\n")?;
-            }
-            output.flush()?;
-            Ok(())
-        })
     }
     pub fn commit_with(
         &mut self,

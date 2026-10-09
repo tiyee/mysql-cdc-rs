@@ -31,7 +31,7 @@ fn offline_cli_replays_from_snapshot_boundary_and_rejects_truncation() {
         &query("CREATE TABLE historical_schema_not_replayed (id INT)"),
     );
     let mut snapshot = state();
-    snapshot.source_id = Some("east".into());
+    snapshot.source_id = "east".into();
     snapshot.position = bytes.len() as u64;
     let state_path = directory.join("state.json");
     snapshot.save(&state_path).unwrap();
@@ -72,6 +72,16 @@ fn offline_cli_replays_from_snapshot_boundary_and_rejects_truncation() {
             .position,
         snapshot.position
     );
+    for field in ["source_id", "source_plugin"] {
+        let mut invalid = serde_json::to_value(&snapshot).unwrap();
+        invalid.as_object_mut().unwrap().remove(field);
+        fs::write(&state_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let result = execute();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(field));
+    }
+    snapshot.save(&state_path).unwrap();
     fs::write(&binlog_path, &bytes[..bytes.len() - 1]).unwrap();
     let result = execute();
     assert!(!result.status.success());

@@ -132,9 +132,7 @@ impl Fixture {
                 "wrong MySQL image series"
             );
         }
-        let mut initial = session.initialize(&config).unwrap();
-        initial.source_id = Some(SOURCE_ID.into());
-        initial.source_plugin = Some("mysql".into());
+        let initial = session.initialize(SOURCE_ID, &config).unwrap();
         initial.save(&config.state_file).unwrap();
         Self {
             schema,
@@ -174,7 +172,7 @@ impl Fixture {
         let mut processor = self.processor(checkpoint);
         let mut stream = self.stream(checkpoint, true);
         while let Some(event) = stream.next_event()? {
-            processor.process_to(event, SOURCE_ID, sink)?;
+            processor.process_to(event, sink)?;
         }
         processor.finish()?;
         Ok(self.saved())

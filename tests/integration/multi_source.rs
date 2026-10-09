@@ -193,10 +193,12 @@ impl SourceSession for FakeSession {
         }
         Ok(vec![meta])
     }
-    fn initialize(&mut self, _config: &Config) -> Result<State> {
+    fn initialize(&mut self, source_id: &str, config: &Config) -> Result<State> {
         let mut s = state();
+        s.source_id = source_id.into();
+        s.source_plugin.clone_from(&config.source.plugin);
         s.source_uuid.clone_from(&self.info.uuid);
-        s.tables = self.load_tables(_config)?;
+        s.tables = self.load_tables(config)?;
         Ok(s)
     }
     fn start(
@@ -288,7 +290,8 @@ fn concurrent_instances_have_independent_table_maps_commits_and_source_output() 
     for (path, id) in [(east_path, "east"), (west_path, "west")] {
         let state = State::read(&path).unwrap();
         assert_eq!(state.position, 240);
-        assert_eq!(state.source_id.as_deref(), Some(id));
+        assert_eq!(state.source_id, id);
+        assert_eq!(state.source_plugin, "fake");
         assert_eq!(state.source_uuid, id);
     }
 }
@@ -365,7 +368,7 @@ fn broken_stream_stops_and_keeps_all_checkpoints_at_last_commit() {
     }
 }
 #[test]
-fn config_accepts_multi_and_legacy_rejects_duplicates_aliases_and_typos() {
+fn config_requires_named_sources_and_rejects_duplicates_aliases_and_typos() {
     let temp = Temp::new();
     let path = temp.0.join("cdc.toml");
     let multi = include_str!("../../examples/config/multi-source.toml");
@@ -373,26 +376,35 @@ fn config_accepts_multi_and_legacy_rejects_duplicates_aliases_and_typos() {
     let app = AppConfig::read(&path).unwrap();
     assert_eq!(app.sources.len(), 2);
     assert_eq!(app.sources[0].config.source.plugin, "mysql");
+    let one = multi.rsplit_once("\n[[sources]]").unwrap().0;
+    let unnamed = one
+        .replace("[[sources]]\nid = \"east\"\n", "")
+        .replace("[sources.source]", "[source]")
+        .replace("[[sources.tables]]", "[[tables]]");
     for bad in [
         multi.replace("id = \"west\"", "id = \"east\""),
         multi.replace("west-state.json", "./east-state.json"),
         multi.replace("server_id = 901002", "server_id = 0"),
         multi.replace("server_id = 901002", "server_idd = 901002"),
         multi.replace("id = \"west\"", "id = \"west\"\ntypo = true"),
+        multi.replace("id = \"west\"", "id = \"\""),
+        multi.replace("id = \"west\"\n", ""),
+        multi.replace("url_env = \"MYSQL_WEST_URL\"\n", ""),
+        "sources = []".into(),
+        multi.replace("[[sources]]", "[[upstreams]]"),
+        unnamed,
     ] {
         std::fs::write(&path, bad).unwrap();
         assert!(AppConfig::read(&path).is_err());
     }
-    std::fs::write(
-        &path,
-        include_str!("../../examples/config/single-source.toml"),
-    )
-    .unwrap();
+    // A deployment may configure one named entry using the same sources schema.
+    std::fs::write(&path, one).unwrap();
     let app = AppConfig::read(&path).unwrap();
-    assert_eq!(app.sources[0].id, "default");
+    assert_eq!(app.sources.len(), 1);
+    assert_eq!(app.sources[0].id, "east");
     assert_eq!(
         app.sources[0].config.state_file,
-        temp.0.join("cdc-state.json")
+        temp.0.join("east-state.json")
     );
 }
 
@@ -634,7 +646,9 @@ fn transaction_sink_can_receive_checkpoint_and_all_changes_in_one_call() {
         }
     }
     let sink = Capture(Mutex::new(Vec::new()));
-    let mut processor = Processor::new(state(), None, 100_000).unwrap();
+    let mut snapshot = state();
+    snapshot.source_id = "tenant-a".into();
+    let mut processor = Processor::new(snapshot, None, 100_000).unwrap();
     for packet in packets("8.0.44", 55, false) {
         processor
             .process_to(
@@ -644,7 +658,6 @@ fn transaction_sink_can_receive_checkpoint_and_all_changes_in_one_call() {
                     log_pos: packet.position,
                     data: &packet.body,
                 },
-                "tenant-a",
                 &sink,
             )
             .unwrap();

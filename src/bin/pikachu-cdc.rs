@@ -20,7 +20,7 @@ fn main() {
 }
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
-    let usage = "usage: pikachu-cdc <check|init|run> CONFIG.toml [--once]\n       pikachu-cdc replay STATE.json BINLOG_FILE\nMYSQL_URL supplies credentials; see README.md";
+    let usage = "usage: pikachu-cdc <check|init|run> CONFIG.toml [--once]\n       pikachu-cdc replay STATE.json BINLOG_FILE\nConfigure [[sources]] and each source's url_env; see README.md";
     if args.len() == 1 || args.get(1).is_some_and(|s| s == "--help" || s == "-h") {
         println!("{usage}");
         return Ok(());
@@ -35,7 +35,6 @@ fn run() -> Result<()> {
                     "replay filename must match the state's binlog file".into(),
                 ));
             }
-            let source_id = state.source_id.clone().unwrap_or_else(|| "default".into());
             let sink = JsonLinesSink::new(&mut output);
             let start = state.position;
             let mut processor = Processor::new(state, None, 64 * 1024 * 1024)?;
@@ -46,7 +45,7 @@ fn run() -> Result<()> {
                 // saved position, so do not apply earlier DDL/table maps.
                 let next = u64::from(event.log_pos);
                 if event.event_type == event::FORMAT_DESCRIPTION_EVENT || offset >= start {
-                    processor.process_to(event, &source_id, &sink)?;
+                    processor.process_to(event, &sink)?;
                 }
                 if next <= offset {
                     return Err(Error::Invalid(

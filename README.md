@@ -18,7 +18,7 @@ src/
 ├── error.rs              # 公共错误类型
 └── lib.rs                # 库入口与公开导出
 examples/
-├── config/               # 单来源 / 多来源 TOML 配置示例
+├── config/               # 多来源 TOML 配置示例
 └── custom_version.rs     # 新版本适配器注册示例
 tests/
 ├── integration/          # CLI、协议、事务、多来源及实库集成测试
@@ -30,7 +30,7 @@ docs/releasing.md         # CI 矩阵、crates.io 配置与发布步骤
 .github/workflows/        # CI、MySQL 版本矩阵、公共 crate 发布
 ```
 
-推荐通过 `engine`、`model`、`protocol::mysql`、`source` 模块接入。已有顶层 `decoder`、`version`、`processor`、`runtime`、`backend` 等导入路径保留为重新导出，命令行名称和 `cargo test --test mysql_live` 等测试命令保持兼容。
+通过 `engine`、`model`、`protocol::mysql`、`source` 和 `sink` 模块接入。`0.0.1` 首版即采用多来源架构，每个来源有明确身份和独立检查点。
 
 ## 运行
 
@@ -41,28 +41,19 @@ docs/releasing.md         # CI 矩阵、crates.io 配置与发布步骤
 pikachu-rs = "0.0.1"
 ```
 
-包内的命令行工具名为 `pikachu-cdc`。
+包内的命令行工具名为 `pikachu-cdc`。使用 `examples/config/multi-source.toml`，每个 `[[sources]]` 都有独立 `id`、`state_file`、`source` 和 `tables`：
 
 ```sh
 cargo build --release --locked
-cp examples/config/single-source.toml cdc.toml
-# 编辑 cdc.toml 的 [[tables]]，每项是精确的库名 + 表名，大小写遵循服务器表名。
-export MYSQL_URL='mysql://cdc:password@127.0.0.1:3306'
-./target/release/pikachu-cdc check cdc.toml
-./target/release/pikachu-cdc run cdc.toml > changes.jsonl
-```
-
-多实例直接使用 `examples/config/multi-source.toml`，每个 `[[sources]]` 都有独立 `id`、`state_file`、`source` 和 `tables`：
-
-```sh
 cp examples/config/multi-source.toml cdc.toml
+# 编辑每个来源的 [[sources.tables]]：精确库名 + 表名，大小写遵循服务器表名。
 export MYSQL_EAST_URL='mysql://cdc:password@east.example:3306'
 export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 ./target/release/pikachu-cdc check cdc.toml
 ./target/release/pikachu-cdc run cdc.toml > changes.jsonl
 ```
 
-旧单来源配置继续有效，来源 ID 为 `default`。多来源的 ID 和 state 路径必须各不相同，state 的父目录须已存在；指向同一实例 UUID 的多个订阅还必须使用不同复制 `server_id`。不同实例可以复用复制 ID，但统一分配更便于运维。每个来源单独持有线程、连接、schema、table_id 映射、事务预算和提交位点。一个来源不能借用另一个来源的 TABLE_MAP，跨来源也没有全局事务或全局顺序。
+配置统一使用 `[[sources]]` 列表；只连接一个实例时也使用一个具名条目。每个来源必须显式填写 `id` 和凭据环境变量 `sources.source.url_env`。来源的 ID 和 state 路径必须各不相同，state 的父目录须已存在；指向同一实例 UUID 的多个订阅还必须使用不同复制 `server_id`。不同实例可以复用复制 ID，但统一分配更便于运维。每个来源单独持有线程、连接、schema、table_id 映射、事务预算和提交位点。一个来源不能借用另一个来源的 TABLE_MAP，跨来源也没有全局事务或全局顺序。
 
 任一 worker 失败，进程通知其他 worker 在事件之间停止并返回非零状态；当前阻塞的 MySQL 读取最长等待其 90 秒 read timeout。重启后每个来源从自己的已提交位点继续。各来源初始化逐个获取读锁，不提供跨实例一致性快照；若初始化中途失败，已有成功的 state 会保留，下一次使用 `run` 继续准备剩余来源。
 
@@ -70,7 +61,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 
 初次 `run` 会短暂执行 `FLUSH TABLES WITH READ LOCK`，在锁内读取白名单 schema 和当前提交位点，解锁后开始消费。**它从当前位点开始，不做全量数据快照**。也可以先运行 `init cdc.toml` 生成起点，稍后 `run`；已经存在的 state 不会被 `init` 覆盖。`run cdc.toml --once` 消费当前可用事件后退出，适合补采与测试。
 
-再次运行从 state 的提交位点恢复。state 同时保存该位点对应的列顺序、主键类型、字符集；恢复时使用保存的 schema，不能拿当前 INFORMATION_SCHEMA 去解释历史事件。源 `server_uuid`、来源 ID、来源插件和白名单必须与 state 一致。旧版没有 ID/plugin 的 state 会在首次恢复时绑定。必须保留起点之后的 binlog。
+再次运行从 state 的提交位点恢复。state 必须包含非空的 `source_uuid`、`source_id` 和 `source_plugin`，同时保存该位点对应的列顺序、主键类型、字符集；恢复时使用保存的 schema，不能拿当前 INFORMATION_SCHEMA 去解释历史事件。服务器 UUID、来源 ID、来源插件和白名单必须与 state 一致。必须保留起点之后的 binlog。
 
 服务器配置示例（5.7 没有后两个变量，不必配置）：
 
@@ -159,11 +150,11 @@ cargo bench --bench event_adapter
 
 新增版本时，实现 `VersionAdapter` 并调用 `runtime.versions.register(Arc::new(adapter))`。每次收到 FDE 后调用 `create_event_parser`，为这个文件建立独立解析器；`create_decoder` 负责列元数据和字段值编码的处理。完整可编译的接入模板在 `examples/custom_version.rs`；模板注册本身不代表已验证该新版本。
 
-事件结构变化时覆盖 `create_event_parser`，返回自己的 `EventParser`。解析器直接从原始切片产生统一的 `TableMapEvent` / `RowsEvent`，可处理字段偏移、字段顺序、字节序以及新的事件码；不用先转换成一份“旧版本格式”的字节数组。控制事件可直接返回 `ParsedEvent::Control`；`classify` 保留为 `Unclassified` 事件的兼容分类入口，已被结构解析器识别的 QUERY/ROTATE/TABLE_MAP/ROWS 不再调用它。
+事件结构变化时覆盖 `create_event_parser`，返回自己的 `EventParser`。解析器直接从原始切片产生统一的 `TableMapEvent` / `RowsEvent`，可处理字段偏移、字段顺序、字节序以及新的事件码；无需重建标准布局的字节数组。控制事件可直接返回 `ParsedEvent::Control`；`classify` 负责 `Unclassified` 事件的分类，已被结构解析器识别的 QUERY/ROTATE/TABLE_MAP/ROWS 不再调用它。
 
 默认 `MysqlEventParser` 按 FDE 预处理 TABLE_MAP 的 ID 宽度、ROWS v1/v2 头及 QUERY/ROTATE 的 post-header 长度，建立固定事件分发表。某 ROWS 类型在 FDE 中长度为 0，就拒绝该类型；不会因为记得一个事件码就假设它在该文件中可用。核心行循环只接收统一视图，不读取版本号或 wire event_type；ROW 镜像解析函数在 FDE/事件阶段选定，非白名单表仍在解析 extra-data、位图和值之前直接跳过。
 
-新解析器使用 `RowsEvent::new(..., parse_images)` 提供镜像解析函数，返回借用的 `RowImages`。MySQL 类型编码相同时可继续复用默认 `Decoder`；如果列元数据或字段值编码也不同，覆盖 `create_decoder`，并实现 `RowDecoder::table_map_event` / `rows_event`。旧的原始 body 接口仍可用，旧 trait 实现的默认桥接仅允许标准布局，遇到非标准布局会明确报错。`tests/integration/event_adapters.rs` 使用合成厂商格式验证 4 字节 ID、扩展控制头、不同字段顺序和字节序、新 ROWS 事件码、文件切换与 UTF-8 主键零拷贝；这些不是实库兼容 fixture。
+新解析器使用 `RowsEvent::new(..., parse_images)` 提供镜像解析函数，返回借用的 `RowImages`。MySQL 类型编码相同时可继续复用默认 `Decoder`；如果列元数据或字段值编码也不同，覆盖 `create_decoder`，并实现 `RowDecoder::table_map_event` / `rows_event`。原始 body 方法处理标准布局；trait 的默认视图实现仅允许标准布局，遇到非标准布局会明确报错。`tests/integration/event_adapters.rs` 使用合成厂商格式验证 4 字节 ID、扩展控制头、不同字段顺序和字节序、新 ROWS 事件码、文件切换与 UTF-8 主键零拷贝；这些不是实库兼容 fixture。
 
 共同的 binlog v4 帧（19 字节公共头、FDE 引导、CRC32/NONE）仍由传输层负责。当前 MySQL 驱动还会预解析 FDE/TABLE_MAP/ROTATE，因此改变这些结构的厂商版本可能在到达本层前就被驱动拒绝；这种情况需要同时实现 `SourcePlugin` 替换传输。仅注册 `VersionAdapter` 不保证能绕过驱动的布局限制。默认 Oracle MySQL 适配器仍严格校验已支持布局，不能把未知 FDE 的长度变化自动视为安全兼容。
 
@@ -228,8 +219,8 @@ docker compose -f tests/infra/compose.yaml down -v
 离线回放使用**和起点相匹配**的 state/schema；binlog 必须保留开头的 FORMAT_DESCRIPTION：
 
 ```sh
-./target/release/pikachu-cdc replay cdc-state.json /path/to/binlog.000001
+./target/release/pikachu-cdc replay east-state.json /path/to/binlog.000001
 mysqlbinlog --hexdump --base64-output=DECODE-ROWS -vv /path/to/binlog.000001
 ```
 
-离线回放使用 state 保存的来源 ID（旧 state 为 `default`），不修改 state，跳过起点之前的历史事件，不能用错误年代的 schema。支持 CRC32 / NONE，事件大小上限 64 MiB，截断尾部返回错误。文件名需与 state 中的 file 一致；当前回放命令接收一个文件，跨文件可在库层使用同一个 `Processor` 接续下一文件。
+离线回放使用 state 保存的明确来源 ID，不修改 state，跳过起点之前的历史事件，不能用错误年代的 schema。每次回放一个来源的一个文件，多个来源分别使用对应检查点回放。支持 CRC32 / NONE，事件大小上限 64 MiB，截断尾部返回错误。文件名需与 state 中的 file 一致；跨文件可在库层使用该来源的同一个 `Processor` 接续下一文件。

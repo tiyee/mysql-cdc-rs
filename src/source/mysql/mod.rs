@@ -58,9 +58,10 @@ impl SourceSession for MysqlSession {
     fn load_tables(&mut self, config: &Config) -> Result<Vec<TableMeta>> {
         load_tables(&mut self.conn, config)
     }
-    fn initialize(&mut self, config: &Config) -> Result<State> {
+    fn initialize(&mut self, source_id: &str, config: &Config) -> Result<State> {
         initialize_with_adapter(
             &mut self.conn,
+            source_id,
             config,
             self.info.uuid.clone(),
             self.adapter.as_ref(),
@@ -160,16 +161,6 @@ pub fn inspect_server(
         .ok_or_else(|| invalid("no server_uuid"))?;
     Ok((uuid, version, adapter))
 }
-pub fn validate_server(conn: &mut Conn, server_id: u32) -> Result<String> {
-    Ok(inspect_server(
-        conn,
-        server_id,
-        &crate::protocol::mysql::version::VersionRegistry::default(),
-        None,
-    )?
-    .0)
-}
-
 pub fn load_tables(conn: &mut Conn, config: &Config) -> Result<Vec<TableMeta>> {
     let mut tables = Vec::with_capacity(config.tables.len());
     for table in &config.tables {
@@ -235,19 +226,10 @@ pub fn load_tables(conn: &mut Conn, config: &Config) -> Result<Vec<TableMeta>> {
     Ok(tables)
 }
 
-/// Capture schema + a commit boundary under a brief global read lock. No initial data snapshot.
-pub fn initialize(conn: &mut Conn, config: &Config, source_uuid: String) -> Result<State> {
-    let (_, _, adapter) = inspect_server(
-        conn,
-        config.source.server_id,
-        &crate::protocol::mysql::version::VersionRegistry::default(),
-        config.source.adapter.as_deref(),
-    )?;
-    initialize_with_adapter(conn, config, source_uuid, adapter.as_ref())
-}
-
-pub fn initialize_with_adapter(
+/// Capture source identity, schema and commit boundary under a brief global read lock.
+fn initialize_with_adapter(
     conn: &mut Conn,
+    source_id: &str,
     config: &Config,
     source_uuid: String,
     adapter: &dyn crate::protocol::mysql::version::VersionAdapter,
@@ -270,8 +252,8 @@ pub fn initialize_with_adapter(
         let state = State {
             version: 1,
             source_uuid,
-            source_id: None,
-            source_plugin: None,
+            source_id: source_id.into(),
+            source_plugin: config.source.plugin.clone(),
             file,
             position,
             tables,

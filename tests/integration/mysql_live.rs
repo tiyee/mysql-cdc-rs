@@ -3,7 +3,7 @@
 #[path = "../support/mysql_live/mod.rs"]
 mod live;
 
-use live::{CapturedOutput, Fixture, SOURCE_ID, expected};
+use live::{CapturedOutput, Fixture, expected};
 use mysql::prelude::Queryable;
 use pikachu_rs::{
     Error, OwnedChange, Result,
@@ -371,7 +371,7 @@ fn mysql_live_monitor_buffers_rows_until_transaction_commit() {
                 kind,
                 event::WRITE_ROWS_EVENT | event::UPDATE_ROWS_EVENT | event::DELETE_ROWS_EVENT
             );
-            processor.process_to(raw, SOURCE_ID, &sink).unwrap();
+            processor.process_to(raw, &sink).unwrap();
             if kind == event::FORMAT_DESCRIPTION_EVENT && !ready {
                 ready_tx.send(()).unwrap();
                 ready = true;

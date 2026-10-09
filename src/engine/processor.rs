@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-/// Single-source transaction engine; adapters own version-specific decoding.
+/// Per-source transaction engine; adapters own version-specific decoding.
 pub struct Processor {
     decoder: Option<Box<dyn RowDecoder>>,
     event_parser: Option<Box<dyn EventParser>>,
@@ -74,18 +74,21 @@ impl Processor {
         }
         Ok(())
     }
-    pub fn process(&mut self, event: EventView<'_>, output: &mut impl Write) -> Result<()> {
-        self.process_inner(event, |tx, state, path| tx.commit(output, state, path))
+    pub fn process(
+        &mut self,
+        event: EventView<'_>,
+        output: &mut (impl Write + Send),
+    ) -> Result<()> {
+        self.process_to(event, &crate::sink::JsonLinesSink::new(output))
     }
     pub fn process_to(
         &mut self,
         event: EventView<'_>,
-        source_id: &str,
         sink: &dyn crate::sink::TransactionSink,
     ) -> Result<()> {
         self.process_inner(event, |tx, state, path| {
             tx.commit_with(state, path, |changes| {
-                sink.commit(source_id, state, changes)
+                sink.commit(&state.source_id, state, changes)
             })
         })
     }

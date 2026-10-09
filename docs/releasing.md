@@ -1,6 +1,6 @@
 # CI 与 crates.io 发布
 
-公共 crate 名称为 `pikachu-rs`，Rust 导入路径为 `pikachu_rs`，仓库名仍为 `pikachu-rs`。同一个包包含库和 `pikachu-cdc` CLI。
+公共 crate 名称为 `pikachu-rs`，Rust 导入路径为 `pikachu_rs`，仓库名为 `pikachu-rs`。首版 `0.0.1` 即支持多来源，同一个包包含库和 `pikachu-cdc` CLI。配置示例统一使用 `examples/config/multi-source.toml`。
 
 ## CI 矩阵
 

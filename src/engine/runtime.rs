@@ -84,11 +84,8 @@ impl Runtime {
                 let state = State::read(&entry.config.state_file)?;
                 state.verify_whitelist(&entry.config)?;
                 if state.source_uuid != session.info().uuid
-                    || state.source_id.as_ref().is_some_and(|id| id != &entry.id)
-                    || state
-                        .source_plugin
-                        .as_ref()
-                        .is_some_and(|plugin| plugin != &entry.config.source.plugin)
+                    || state.source_id != entry.id
+                    || state.source_plugin != entry.config.source.plugin
                 {
                     return Err(Error::Schema(format!(
                         "{}: checkpoint source UUID/id/plugin mismatch",
@@ -109,20 +106,21 @@ impl Runtime {
             .zip(locks)
             .zip(saved)
         {
-            let mut state = match saved {
+            let state = match saved {
                 Some(state) => state,
-                None => session.initialize(&entry.config)?,
+                None => session.initialize(&entry.id, &entry.config)?,
             };
             state.validate()?;
             state.verify_whitelist(&entry.config)?;
-            if state.source_uuid != session.info().uuid {
+            if state.source_uuid != session.info().uuid
+                || state.source_id != entry.id
+                || state.source_plugin != entry.config.source.plugin
+            {
                 return Err(Error::Schema(format!(
-                    "{}: initialized checkpoint UUID differs from connected source",
+                    "{}: initialized checkpoint UUID/id/plugin differs from configured source",
                     entry.id
                 )));
             }
-            state.source_id = Some(entry.id.clone());
-            state.source_plugin = Some(entry.config.source.plugin.clone());
             state.save(&entry.config.state_file)?;
             ready.push(Prepared {
                 entry,
@@ -172,7 +170,7 @@ impl Runtime {
                             if cancelled.load(Ordering::Acquire) {
                                 return Ok(());
                             }
-                            processor.process_to(event, &entry.id, sink.as_ref())?;
+                            processor.process_to(event, sink.as_ref())?;
                         }
                         Ok(())
                     })();
