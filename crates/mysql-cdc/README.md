@@ -6,7 +6,7 @@ One dependency for MySQL CDC and replication. This facade re-exports `mysql-cana
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "0.0.4"
+mysql-cdc-rs = "1.0.0"
 ```
 
 The Rust import path is `mysql_cdc_rs`. CDC types and modules are available directly at the crate root and through `canal`; raw binlog events and replication transport are available through `replication`. Root `Error` and `Result` are the CDC types; raw protocol operations use `replication::Error` and `replication::Result`.

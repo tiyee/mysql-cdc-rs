@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "0.0.4"
+mysql-cdc-rs = "1.0.0"
 ```
 
 Rust 导入路径为 `mysql_cdc_rs`。CDC 类型和模块可直接从包根路径导入，也可通过 `canal` 访问；原始 binlog 事件和复制传输通过 `replication` 访问。根路径的 `Error`、`Result` 属于 CDC 层；原始协议操作使用 `replication::Error`、`replication::Result`。

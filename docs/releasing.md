@@ -62,22 +62,22 @@ cargo publish --locked --registry crates-io --package pikachu
 
 ## 发布版本
 
-同步修改 `crates/pikachu/Cargo.toml`、`crates/mysql-canal/Cargo.toml`、`crates/mysql-replication/Cargo.toml` 与 `crates/mysql-cdc/Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-canal`、canal 的 `mysql-replication` 和聚合包的两个库精确依赖版本。执行 `cargo check --workspace` 更新 lockfile 并一同提交。版本保护脚本要求四个包同版、tag 精确匹配该版本，并验证库名称、依赖路径与版本；任一不匹配均拒绝发布。先让主分支 CI 通过，再推送与版本完全一致的新 tag。旧包 `pikachu-rs 0.0.1` 已完成首次发布；此记录不代表新包已发布。本次四个包统一为 `0.0.4`，对应标签为：
+同步修改 `crates/pikachu/Cargo.toml`、`crates/mysql-canal/Cargo.toml`、`crates/mysql-replication/Cargo.toml` 与 `crates/mysql-cdc/Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-canal`、canal 的 `mysql-replication` 和聚合包的两个库精确依赖版本。执行 `cargo check --workspace` 更新 lockfile 并一同提交。版本保护脚本要求四个包同版、tag 精确匹配该版本，并验证库名称、依赖路径与版本；任一不匹配均拒绝发布。先让主分支 CI 通过，再推送与版本完全一致的新 tag。旧包 `pikachu-rs 0.0.1` 已完成首次发布；此记录不代表新包已发布。本次四个包统一为 `1.0.0`，对应标签为：
 
 ```sh
-git tag v0.0.4
-git push origin v0.0.4
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → OIDC 认证 → 使用短期 token 发布 `mysql-replication` → 发布 `mysql-canal` → 发布 `mysql-cdc-rs` → 发布 `pikachu`。可信发布者未配置或不匹配、OIDC 认证失败、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.0.4-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
+`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → OIDC 认证 → 使用短期 token 发布 `mysql-replication` → 发布 `mysql-canal` → 发布 `mysql-cdc-rs` → 发布 `pikachu`。可信发布者未配置或不匹配、OIDC 认证失败、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v1.0.0-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
 
 发布成功后，使用方可添加：
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "0.0.4"
+mysql-cdc-rs = "1.0.0"
 ```
 
-统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu` 安装。本次库与 CLI 均使用 `0.0.4`；不能覆盖旧包已发布的 `pikachu-rs 0.0.1`。工作流本身不会创建 GitHub Release 或推送 Git tag。
+统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu` 安装。本次库与 CLI 均使用 `1.0.0`；不能覆盖旧包已发布的 `pikachu-rs 0.0.1`。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 四个包发布不是原子操作。若部分包已上传而后续包失败，先确认各 crate 的实际状态，不要直接重跑整个发布 job 重复上传；可按依赖顺序恢复尚未发布的包。已成功上传的版本不能重复发布；修改内容需要同步增加四个包的版本号，并使用匹配的新 tag。

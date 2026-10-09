@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-mysql-canal = "0.0.4"
+mysql-canal = "1.0.0"
 ```
 
 ```rust,no_run

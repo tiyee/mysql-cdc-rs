@@ -1,6 +1,6 @@
 [package]
 name = "pikachu"
-version = "0.0.4"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.89"
 description = "MySQL CDC command line powered by mysql-canal"
@@ -14,7 +14,7 @@ include = ["/src/**", "/examples/**", "/tests/**", "/Cargo.lock", "/README.md", 
 autotests = false
 
 [dependencies]
-mysql-canal = { path = "../mysql-canal", version = "=0.0.4" }
+mysql-canal = { path = "../mysql-canal", version = "=1.0.0" }
 
 [dev-dependencies]
 serde_json = "1"
