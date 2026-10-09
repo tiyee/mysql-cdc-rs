@@ -1,11 +1,11 @@
 use crate::{
+    Result,
     engine::checkpoint::State,
     engine::transaction::TransactionBuffer,
     error::invalid,
     protocol::mysql::event_type as event,
     protocol::mysql::file::EventView,
     protocol::mysql::version::{EventAction, VersionRegistry},
-    Result,
 };
 use std::{
     io::Write,

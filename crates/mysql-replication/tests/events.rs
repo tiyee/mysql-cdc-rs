@@ -1,11 +1,11 @@
 use mysql_replication::{
+    BinlogParser, Error, Event, EventData, EventHeader, FrameDecoder,
     event_type::*,
     events::{
         GtidEvent, PreviousGtidsEvent, QueryEvent, RowsEvent, RowsKind, TaggedGtidEvent, XidEvent,
     },
     file::BinlogFile,
     parser::{ParserConfig, RowsDecode},
-    BinlogParser, Error, Event, EventData, EventHeader, FrameDecoder,
 };
 use std::io::{self, Write};
 

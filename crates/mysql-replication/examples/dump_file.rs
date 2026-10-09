@@ -1,4 +1,4 @@
-use mysql_replication::{file::BinlogFile, parser::ParserConfig, Event, Result};
+use mysql_replication::{Event, Result, file::BinlogFile, parser::ParserConfig};
 use std::{fs::File, io::BufReader};
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();

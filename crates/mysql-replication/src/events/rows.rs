@@ -1,5 +1,5 @@
 use super::Event;
-use crate::{error::invalid, wire::Cursor, Result};
+use crate::{Result, error::invalid, wire::Cursor};
 use std::io::Write;
 
 /// Protocol operation, independent from a CDC change or table whitelist.

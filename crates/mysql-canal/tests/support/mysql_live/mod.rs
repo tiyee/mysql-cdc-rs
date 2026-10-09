@@ -1,21 +1,21 @@
 //! Shared real-MySQL setup. No protocol bytes are mocked here.
-use mysql::{prelude::Queryable, Conn};
+use mysql::{Conn, prelude::Queryable};
 use mysql_canal::{
+    Result,
     config::{Config, SourceConfig, WhitelistTable},
     engine::{checkpoint::State, processor::Processor},
     protocol::mysql::version::VersionRegistry,
     sink::{JsonLinesSink, TransactionSink},
-    source::{mysql as mysql_source, EventStream, SourceRegistry, SourceSession},
-    Result,
+    source::{EventStream, SourceRegistry, SourceSession, mysql as mysql_source},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };

@@ -1,7 +1,7 @@
 use mysql_canal::{
+    CommittedTransaction, OwnedChange, Result, TransactionHandler,
     engine::checkpoint::State,
     sink::{JsonLinesSink, TransactionSink},
-    CommittedTransaction, OwnedChange, Result, TransactionHandler,
 };
 use std::io::{BufWriter, Stdout};
 

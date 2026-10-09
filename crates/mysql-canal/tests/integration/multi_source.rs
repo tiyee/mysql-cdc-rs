@@ -2,6 +2,7 @@
 mod common;
 use common::*;
 use mysql_canal::{
+    Error, OwnedChange, Result, TableMeta,
     config::{AppConfig, Config, SourceConfig, SourceEntry, WhitelistTable},
     engine::checkpoint::State,
     engine::processor::Processor,
@@ -12,14 +13,13 @@ use mysql_canal::{
     },
     sink::{JsonLinesSink, TransactionSink},
     source::{EventStream, ServerInfo, SourcePlugin, SourceRegistry, SourceSession},
-    Error, OwnedChange, Result, TableMeta,
 };
 use std::{
     io::Write,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Barrier, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -311,26 +311,28 @@ fn rejects_checkpoint_identity_changes_and_duplicate_replication_ids() {
     .unwrap();
     let mut changed = temp.config("east");
     changed.id = "renamed".into();
-    assert!(rt
-        .run(
+    assert!(
+        rt.run(
             AppConfig {
                 sources: vec![changed]
             },
             true,
             Arc::new(JsonLinesSink::new(Vec::new()))
         )
-        .is_err());
+        .is_err()
+    );
     assert_eq!(State::read(&path).unwrap().position, 4);
     let same = runtime(FakePlugin {
         barrier: None,
         same_uuid: true,
         broken: false,
     });
-    assert!(same
-        .check(&AppConfig {
+    assert!(
+        same.check(&AppConfig {
             sources: vec![temp.config("east"), temp.config("west")]
         })
-        .is_err());
+        .is_err()
+    );
     let mut west = temp.config("west");
     west.config.source.server_id = 101;
     same.check(&AppConfig {
@@ -346,15 +348,16 @@ fn broken_stream_stops_and_keeps_all_checkpoints_at_last_commit() {
         same_uuid: false,
         broken: true,
     });
-    assert!(rt
-        .run(
+    assert!(
+        rt.run(
             AppConfig {
                 sources: vec![temp.config("east"), temp.config("west")]
             },
             true,
             Arc::new(JsonLinesSink::new(Vec::new()))
         )
-        .is_err());
+        .is_err()
+    );
     for id in ["east", "west"] {
         assert_eq!(
             State::read(&temp.0.join(format!("{id}.json")))
@@ -504,13 +507,17 @@ fn version_profiles_validate_each_supported_series_and_reject_unknown_series() {
         "9.7.2-MariaDB",
         "10.0.0",
     ] {
-        assert!(registry
-            .resolve(&ServerVersion::parse(version).unwrap(), None)
-            .is_err());
+        assert!(
+            registry
+                .resolve(&ServerVersion::parse(version).unwrap(), None)
+                .is_err()
+        );
     }
-    assert!(registry
-        .resolve(&ServerVersion::parse("5.7.44").unwrap(), Some("mysql90"))
-        .is_err());
+    assert!(
+        registry
+            .resolve(&ServerVersion::parse("5.7.44").unwrap(), Some("mysql90"))
+            .is_err()
+    );
 }
 #[test]
 fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes() {
@@ -523,12 +530,14 @@ fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes
             rows: rows.clone(),
         }))
         .unwrap();
-    assert!(registry
-        .register(Arc::new(Custom {
-            created: created.clone(),
-            rows: rows.clone()
-        }))
-        .is_err());
+    assert!(
+        registry
+            .register(Arc::new(Custom {
+                created: created.clone(),
+                rows: rows.clone()
+            }))
+            .is_err()
+    );
     let mut processor = Processor::with_registry(state(), None, 100_000, registry, None).unwrap();
     let mut out = Vec::new();
     for packet in packets("9.1.0-test", 99, false) {
@@ -574,17 +583,19 @@ fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes
         )
         .unwrap();
     assert_eq!(created.load(Ordering::Relaxed), 1);
-    assert!(processor
-        .process(
-            EventView {
-                event_type: 200,
-                flags: 0,
-                log_pos: 0,
-                data: &[]
-            },
-            &mut out
-        )
-        .is_err());
+    assert!(
+        processor
+            .process(
+                EventView {
+                    event_type: 200,
+                    flags: 0,
+                    log_pos: 0,
+                    data: &[]
+                },
+                &mut out
+            )
+            .is_err()
+    );
 }
 struct FailingWriter;
 impl Write for FailingWriter {
@@ -610,15 +621,16 @@ fn shared_sink_failure_never_acknowledges_another_source_or_advances_checkpoint(
         same_uuid: false,
         broken: false,
     });
-    assert!(rt
-        .run(
+    assert!(
+        rt.run(
             AppConfig {
                 sources: vec![temp.config("east")]
             },
             true,
             Arc::new(JsonLinesSink::new(FailingWriter))
         )
-        .is_err());
+        .is_err()
+    );
     assert_eq!(State::read(&temp.0.join("east.json")).unwrap().position, 4);
 }
 #[test]
@@ -710,9 +722,11 @@ fn capabilities_are_checked_per_source_with_absent_57_variables_allowed() {
         "mysql57-custom"
     );
     let mut sources = SourceRegistry::default();
-    assert!(sources
-        .register(Arc::new(mysql_canal::source::MysqlSource))
-        .is_err());
+    assert!(
+        sources
+            .register(Arc::new(mysql_canal::source::MysqlSource))
+            .is_err()
+    );
     assert!(sources.resolve("not-registered").is_err());
 }
 

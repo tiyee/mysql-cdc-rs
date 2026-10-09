@@ -3,10 +3,10 @@ mod common;
 const UNKNOWN_TEST_EVENT: u8 = 99;
 use common::*;
 use mysql_canal::{
+    Error,
     engine::checkpoint::{State, StateLock},
     engine::processor::Processor,
     protocol::mysql::file::{BinlogFile, EventView},
-    Error,
 };
 use std::{
     fs,

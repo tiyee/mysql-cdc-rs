@@ -1,6 +1,6 @@
 //! Transaction sink contract and output implementations.
 mod json_lines;
-use crate::{engine::checkpoint::State, OwnedChange, Result};
+use crate::{OwnedChange, Result, engine::checkpoint::State};
 pub use json_lines::JsonLinesSink;
 
 /// A successful commit acknowledges the complete transaction, before checkpoint

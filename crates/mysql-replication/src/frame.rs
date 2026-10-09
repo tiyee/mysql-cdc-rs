@@ -1,4 +1,4 @@
-use crate::{error::invalid, event_type as event, events::EventHeader, Error, Result};
+use crate::{Error, Result, error::invalid, event_type as event, events::EventHeader};
 pub const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// A validated frame. Body excludes the original checksum trailer; raw_data does not.

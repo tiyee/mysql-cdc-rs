@@ -1,6 +1,6 @@
 use crate::{
-    protocol::mysql::{file::EventView, version::EventAction},
     Operation, Result,
+    protocol::mysql::{file::EventView, version::EventAction},
 };
 
 /// A normalized TABLE_MAP envelope. Column metadata remains borrowed and is

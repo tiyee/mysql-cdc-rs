@@ -1,5 +1,5 @@
 //! Register application listeners for normalized, committed changes.
-use mysql_canal::{config::AppConfig, Cdc, CommittedTransaction, Result};
+use mysql_canal::{Cdc, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {

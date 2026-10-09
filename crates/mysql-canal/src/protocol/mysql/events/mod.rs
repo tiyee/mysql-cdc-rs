@@ -2,8 +2,8 @@
 mod parser;
 mod view;
 
+pub use parser::{MysqlEventParser, parse_row_images, parse_v2_row_images};
 pub(crate) use parser::{parse_query, parse_rotate};
-pub use parser::{parse_row_images, parse_v2_row_images, MysqlEventParser};
 pub use view::{EventParser, ParsedEvent, RowImages, RowImagesParser, RowsEvent, TableMapEvent};
 
 pub const STMT_END_F: u16 = 1;

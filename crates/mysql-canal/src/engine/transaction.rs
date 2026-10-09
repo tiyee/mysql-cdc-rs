@@ -1,4 +1,4 @@
-use crate::{engine::checkpoint::State, Change, Error, OwnedChange, Result};
+use crate::{Change, Error, OwnedChange, Result, engine::checkpoint::State};
 use std::path::Path;
 
 /// Failures must abort consumption; retry from the last persisted commit boundary.

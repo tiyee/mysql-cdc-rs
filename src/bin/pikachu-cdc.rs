@@ -3,10 +3,10 @@ mod print_handle;
 
 use mysql_canal::protocol::mysql::event_type as event;
 use mysql_canal::{
-    config::AppConfig,
-    engine::{checkpoint::State, Processor},
-    protocol::mysql::file::BinlogFile,
     Cdc, Error, Result,
+    config::AppConfig,
+    engine::{Processor, checkpoint::State},
+    protocol::mysql::file::BinlogFile,
 };
 use std::{io::BufReader, path::Path};
 

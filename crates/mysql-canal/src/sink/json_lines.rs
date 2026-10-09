@@ -1,5 +1,5 @@
 use super::TransactionSink;
-use crate::{engine::checkpoint::State, Error, OwnedChange, Result};
+use crate::{Error, OwnedChange, Result, engine::checkpoint::State};
 use serde::Serialize;
 use std::{io::Write, sync::Mutex};
 

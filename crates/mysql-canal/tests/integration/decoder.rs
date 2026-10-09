@@ -449,20 +449,24 @@ fn missing_null_pk_and_full_images_fail() {
         ),
         Err(Error::MissingPrimaryKey)
     ));
-    assert!(decoder
-        .rows(
-            DELETE_ROWS_EVENT,
-            &rows(1, DELETE_ROWS_EVENT, 3, &[2], &[], &[0, 0]),
-            |_| Ok(())
-        )
-        .is_err());
-    assert!(decoder
-        .rows(
-            UPDATE_ROWS_EVENT,
-            &rows(1, UPDATE_ROWS_EVENT, 3, &[7], &[7], &[0]),
-            |_| Ok(())
-        )
-        .is_err());
+    assert!(
+        decoder
+            .rows(
+                DELETE_ROWS_EVENT,
+                &rows(1, DELETE_ROWS_EVENT, 3, &[2], &[], &[0, 0]),
+                |_| Ok(())
+            )
+            .is_err()
+    );
+    assert!(
+        decoder
+            .rows(
+                UPDATE_ROWS_EVENT,
+                &rows(1, UPDATE_ROWS_EVENT, 3, &[7], &[7], &[0]),
+                |_| Ok(())
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -476,16 +480,22 @@ fn truncated_data_and_schema_mismatch_are_errors() {
     decoder.table_map(&map).unwrap();
     let data = rows(1, DELETE_ROWS_EVENT, 3, &[1], &[], &[0, 1, 0, 0, 0]);
     for len in 0..data.len() {
-        assert!(decoder
-            .rows(DELETE_ROWS_EVENT, &data[..len], |_| Ok(()))
-            .is_err());
+        assert!(
+            decoder
+                .rows(DELETE_ROWS_EVENT, &data[..len], |_| Ok(()))
+                .is_err()
+        );
     }
-    assert!(decoder
-        .table_map(&table_map(1, &basic(), &[8, 15, 3], &[100, 0]))
-        .is_err());
-    assert!(decoder
-        .table_map(&table_map(1, &basic(), &[3, 15, 3], &[101, 0]))
-        .is_err());
+    assert!(
+        decoder
+            .table_map(&table_map(1, &basic(), &[8, 15, 3], &[100, 0]))
+            .is_err()
+    );
+    assert!(
+        decoder
+            .table_map(&table_map(1, &basic(), &[3, 15, 3], &[101, 0]))
+            .is_err()
+    );
 }
 
 #[test]
@@ -594,12 +604,14 @@ fn decimal_groups_fractional_only_large_values_and_invalid_groups() {
             .unwrap();
         let mut invalid = vec![0xff; packed.len()];
         invalid[0] = 0;
-        assert!(decoder
-            .rows(
-                DELETE_ROWS_EVENT,
-                &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &invalid),
-                |_| Ok(())
-            )
-            .is_err());
+        assert!(
+            decoder
+                .rows(
+                    DELETE_ROWS_EVENT,
+                    &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &invalid),
+                    |_| Ok(())
+                )
+                .is_err()
+        );
     }
 }

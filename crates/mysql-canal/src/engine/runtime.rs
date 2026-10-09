@@ -1,17 +1,17 @@
 use crate::{
+    Error, Result,
     config::{AppConfig, SourceEntry},
     engine::checkpoint::{State, StateLock},
     engine::processor::Processor,
     protocol::mysql::version::VersionRegistry,
     sink::TransactionSink,
     source::{SourceRegistry, SourceSession},
-    Error, Result,
 };
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 

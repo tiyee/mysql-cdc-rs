@@ -1,6 +1,7 @@
 //! MySQL transport, capability discovery, schema loading and initial position capture.
 use super::{EventStream, ServerInfo, SourcePlugin, SourceSession};
 use crate::{
+    ColumnMeta, Error, Result, TableMeta,
     config::Config,
     engine::checkpoint::State,
     error::invalid,
@@ -8,9 +9,8 @@ use crate::{
         file::EventView,
         version::{VersionAdapter, VersionRegistry},
     },
-    ColumnMeta, Error, Result, TableMeta,
 };
-use ::mysql::{params, prelude::Queryable, Conn};
+use ::mysql::{Conn, params, prelude::Queryable};
 use mysql_replication::stream::{ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage};
 use std::{collections::BTreeMap, sync::Arc};
 

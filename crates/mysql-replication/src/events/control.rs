@@ -18,7 +18,7 @@ impl fmt::Display for ChecksumAlgorithm {
         })
     }
 }
-use crate::{error::invalid, wire::Cursor, Result};
+use crate::{Result, error::invalid, wire::Cursor};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FormatDescriptionEvent<'a> {

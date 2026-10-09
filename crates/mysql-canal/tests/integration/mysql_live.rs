@@ -3,15 +3,15 @@
 #[path = "../support/mysql_live/mod.rs"]
 mod live;
 
-use live::{expected, CapturedOutput, Fixture};
+use live::{CapturedOutput, Fixture, expected};
 use mysql::prelude::Queryable;
 use mysql_canal::{
+    Error, OwnedChange, Result,
     engine::checkpoint::State,
     protocol::mysql::event_type as event,
     sink::{JsonLinesSink, TransactionSink},
-    Error, OwnedChange, Result,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{sync::mpsc, thread, time::Duration};
 
 const ITEMS: &[(&str, &str)] = &[("items", "id INT PRIMARY KEY, note VARCHAR(80)")];

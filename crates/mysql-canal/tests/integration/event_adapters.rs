@@ -2,15 +2,15 @@
 mod common;
 use common::*;
 use mysql_canal::{
+    Decoder, Error, Operation, PrimaryKey, Result,
     engine::Processor,
     protocol::mysql::{
         events::{
-            parse_row_images, EventParser, MysqlEventParser, ParsedEvent, RowsEvent, TableMapEvent,
+            EventParser, MysqlEventParser, ParsedEvent, RowsEvent, TableMapEvent, parse_row_images,
         },
         file::EventView,
         version::{FormatDescription, ServerVersion, VersionAdapter, VersionRegistry},
     },
-    Decoder, Error, Operation, PrimaryKey, Result,
 };
 use std::{borrow::Cow, sync::Arc};
 

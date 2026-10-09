@@ -1,5 +1,5 @@
 use super::Event;
-use crate::{error::invalid, wire::Cursor, Error, Result};
+use crate::{Error, Result, error::invalid, wire::Cursor};
 use std::io::Write;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -1,6 +1,7 @@
 //! Template only: replace series/version checks after validating the actual wire
 //! format. Registration does not certify compatibility with an untested server.
 use mysql_canal::{
+    Cdc, CommittedTransaction, Result,
     config::AppConfig,
     engine::runtime::Runtime,
     protocol::mysql::{
@@ -8,7 +9,6 @@ use mysql_canal::{
         version::{FormatDescription, ServerVersion, VersionAdapter},
     },
     sink::{JsonLinesSink, TransactionSink},
-    Cdc, CommittedTransaction, Result,
 };
 use std::{io::BufWriter, path::Path, sync::Arc};
 struct CustomMysql;

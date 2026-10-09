@@ -2,12 +2,12 @@
 pub mod mysql;
 
 use crate::{
+    Error, Result, TableMeta,
     config::Config,
     protocol::mysql::{
         file::EventView,
         version::{ServerVersion, VersionRegistry},
     },
-    Error, Result, TableMeta,
 };
 use std::sync::Arc;
 

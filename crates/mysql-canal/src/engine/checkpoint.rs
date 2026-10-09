@@ -1,5 +1,5 @@
 //! Per-source schema snapshots, atomic checkpoints and exclusive state locks.
-use crate::{config::Config, error::invalid, Error, Result, TableMeta};
+use crate::{Error, Result, TableMeta, config::Config, error::invalid};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{

@@ -1,11 +1,11 @@
 use super::events::{
-    MysqlEventParser, RowsEvent, TableMapEvent, GENERATED_INVISIBLE_PK_F, STMT_END_F,
+    GENERATED_INVISIBLE_PK_F, MysqlEventParser, RowsEvent, STMT_END_F, TableMapEvent,
 };
 use crate::{
-    error::invalid,
-    model::schema::{key_decoder, KeyDecoder},
-    protocol::mysql::wire::{bit, set_bits, Cursor},
     Change, ColumnMeta, Error, Operation, PrimaryKey, Result, TableMeta,
+    error::invalid,
+    model::schema::{KeyDecoder, key_decoder},
+    protocol::mysql::wire::{Cursor, bit, set_bits},
 };
 use std::{collections::BTreeMap, sync::Arc};
 

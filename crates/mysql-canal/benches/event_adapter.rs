@@ -2,12 +2,12 @@
 mod common;
 use common::*;
 use mysql_canal::{
+    PrimaryKey,
     protocol::mysql::{
         events::ParsedEvent,
         file::EventView,
         version::{FormatDescription, VersionRegistry},
     },
-    PrimaryKey,
 };
 use std::{hint::black_box, time::Instant};
 

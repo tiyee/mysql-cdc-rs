@@ -1,6 +1,6 @@
 use crate::{
-    error::{invalid, Error},
     Result,
+    error::{Error, invalid},
 };
 
 pub(crate) struct Cursor<'a> {

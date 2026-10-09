@@ -1,4 +1,4 @@
-use crate::{error::invalid, event_type as code, events::*, BinlogFrame, Error, Result};
+use crate::{BinlogFrame, Error, Result, error::invalid, event_type as code, events::*};
 
 /// ROWS values are never materialized. Bitmaps can also be deferred until a table matches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

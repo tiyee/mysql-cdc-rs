@@ -1,10 +1,10 @@
 //! Configuration-driven CDC and committed transaction listeners.
 
 use crate::{
-    config::AppConfig,
-    engine::{checkpoint::State, Runtime},
-    sink::TransactionSink,
     Error, OwnedChange, Result,
+    config::AppConfig,
+    engine::{Runtime, checkpoint::State},
+    sink::TransactionSink,
 };
 use std::sync::{Arc, Mutex};
 

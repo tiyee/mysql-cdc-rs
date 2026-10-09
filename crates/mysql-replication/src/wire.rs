@@ -1,4 +1,4 @@
-use crate::{error::invalid, Error, Result};
+use crate::{Error, Result, error::invalid};
 pub(crate) struct Cursor<'a> {
     rest: &'a [u8],
 }

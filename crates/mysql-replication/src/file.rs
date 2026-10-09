@@ -1,7 +1,7 @@
 //! Bounded binlog files share framing and event parsing with network replication.
 use crate::{
-    error::invalid, events::EventHeader, parser::ParserConfig, BinlogEvent, BinlogFrame,
-    BinlogParser, FrameDecoder, Result, MAX_EVENT_BYTES,
+    BinlogEvent, BinlogFrame, BinlogParser, FrameDecoder, MAX_EVENT_BYTES, Result, error::invalid,
+    events::EventHeader, parser::ParserConfig,
 };
 use std::io::Read;
 
@@ -52,7 +52,7 @@ fn read_frame<'a>(
                     Ok(None)
                 } else {
                     Err(invalid("binlog has no FORMAT_DESCRIPTION"))
-                }
+                };
             }
             Ok(_) => break,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,

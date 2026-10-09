@@ -1,5 +1,5 @@
 use super::Event;
-use crate::{error::invalid, wire::Cursor, Result};
+use crate::{Result, error::invalid, wire::Cursor};
 use std::io::Write;
 
 /// The complete MySQL binlog v4 common header. Unknown codes and flags survive.

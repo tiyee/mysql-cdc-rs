@@ -1,5 +1,6 @@
 //! Explicit conversion from borrowed binlog views into lightweight CDC changes.
 use crate::{
+    Change, Result, TableMeta,
     error::invalid,
     protocol::mysql::{
         event_type as event,
@@ -7,7 +8,6 @@ use crate::{
         file::EventView,
         version::{EventAction, FormatDescription, RowDecoder, VersionAdapter, VersionRegistry},
     },
-    Change, Result, TableMeta,
 };
 use std::sync::Arc;
 

@@ -1,11 +1,11 @@
 //! Synchronous replication configuration without CDC schema or checkpoints.
 use crate::{
-    error::invalid, event_type as code, parser::ParserConfig, BinlogEvent, BinlogFrame,
-    BinlogParser, Error, FrameDecoder, Result, MAX_EVENT_BYTES,
+    BinlogEvent, BinlogFrame, BinlogParser, Error, FrameDecoder, MAX_EVENT_BYTES, Result,
+    error::invalid, event_type as code, parser::ParserConfig,
 };
 use mysql::{
-    prelude::Queryable, BinlogDumpFlags, BinlogRequest, BinlogStream, Conn, Opts, OptsBuilder,
-    SslOpts,
+    BinlogDumpFlags, BinlogRequest, BinlogStream, Conn, Opts, OptsBuilder, SslOpts,
+    prelude::Queryable,
 };
 use mysql_common::binlog::{
     consts::BinlogChecksumAlg,

@@ -2,7 +2,7 @@
 //! They are object safe; row values still borrow the input event across this boundary.
 use super::events::{EventParser, MysqlEventParser, RowsEvent, TableMapEvent};
 use super::{decoder::Decoder, event_type as event, file::EventView, wire::Cursor};
-use crate::{error::invalid, Change, Error, Result, TableMeta};
+use crate::{Change, Error, Result, TableMeta, error::invalid};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

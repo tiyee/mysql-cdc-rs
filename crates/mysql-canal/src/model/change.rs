@@ -1,7 +1,7 @@
 use crate::TableMeta;
 use serde::{
-    ser::{SerializeSeq, SerializeStruct},
     Serialize, Serializer,
+    ser::{SerializeSeq, SerializeStruct},
 };
 use std::{borrow::Cow, sync::Arc};
 

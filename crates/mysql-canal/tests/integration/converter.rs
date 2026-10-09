@@ -2,10 +2,10 @@
 mod common;
 use common::*;
 use mysql_canal::{
-    engine::{converter::EventConverter, Processor},
+    Error, Operation, PrimaryKey,
+    engine::{Processor, converter::EventConverter},
     protocol::mysql::version::{EventAction, VersionRegistry},
     sink::JsonLinesSink,
-    Error, Operation, PrimaryKey,
 };
 use mysql_replication::{BinlogParser, EventData, FrameDecoder};
 

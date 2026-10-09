@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 pub use mysql_canal::protocol::mysql::event_type::*;
-use mysql_canal::{engine::checkpoint::State, ColumnMeta, TableMeta};
+use mysql_canal::{ColumnMeta, TableMeta, engine::checkpoint::State};
 
 pub fn column(name: &str, ty: &str, pk: bool) -> ColumnMeta {
     ColumnMeta {
@@ -123,11 +123,7 @@ pub fn framed(ty: u8, pos: u32, body: &[u8], crc: bool) -> Vec<u8> {
         + body.len()
         + if crc { 4 } else { 0 }
         + if ty == FORMAT_DESCRIPTION_EVENT {
-            if crc {
-                1
-            } else {
-                5
-            }
+            if crc { 1 } else { 5 }
         } else {
             0
         };

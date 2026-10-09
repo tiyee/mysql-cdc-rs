@@ -1,5 +1,6 @@
 use super::{EventParser, ParsedEvent, RowImages, RowImagesParser, RowsEvent, TableMapEvent};
 use crate::{
+    Error, Operation, Result,
     error::invalid,
     protocol::mysql::{
         event_type as event,
@@ -7,7 +8,6 @@ use crate::{
         version::{EventAction, FormatDescription},
         wire::Cursor,
     },
-    Error, Operation, Result,
 };
 
 #[derive(Clone, Copy)]
