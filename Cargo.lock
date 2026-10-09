@@ -563,18 +563,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "mysql-replication"
+name = "mysql-canal"
 version = "0.0.2"
 dependencies = [
  "crc32fast",
  "encoding_rs",
  "fs2",
  "mysql",
+ "mysql-replication",
  "mysql_common",
  "serde",
  "serde_json",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "mysql-replication"
+version = "0.0.2"
+dependencies = [
+ "crc32fast",
+ "mysql",
+ "mysql_common",
+ "thiserror",
 ]
 
 [[package]]
@@ -669,7 +680,7 @@ name = "pikachu-rs"
 version = "0.0.2"
 dependencies = [
  "crc32fast",
- "mysql-replication",
+ "mysql-canal",
  "serde_json",
 ]
 

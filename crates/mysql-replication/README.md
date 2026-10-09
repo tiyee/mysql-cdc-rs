@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A reusable Rust MySQL CDC library with configuration-driven consumption and committed event handlers. The `pikachu-rs` package provides the `pikachu-cdc` CLI and registers its own default printing handle.
+Synchronous MySQL replication transport and borrowed binlog events. CDC conversion, whitelists, historical SQL schema, transaction delivery and persistent checkpoints belong to the `mysql-canal` consumer library (`mysql_canal`).
 
 ```toml
 [dependencies]
@@ -10,26 +10,66 @@ mysql-replication = "0.0.2"
 ```
 
 ```rust,no_run
-use mysql_replication::{Event, Replication, Result, config::AppConfig};
-use std::path::Path;
+use mysql_replication::{Event, Result, file::BinlogFile};
+use std::{fs::File, io::BufReader};
 
 fn main() -> Result<()> {
-    let config = AppConfig::read(Path::new("cdc.toml"))?;
-    let mut replication = Replication::new(config)?;
-    replication.add_handle(|event: Event<'_>| {
-        for change in event.changes {
-            println!("{} {:?} {:?}", event.source_id, change.operation, change.pk);
-        }
-        Ok(())
-    });
-    replication.run()
+    let mut reader = BinlogFile::new(BufReader::new(File::open("binlog.000001")?))?;
+    while let Some(event) = reader.next_event()? {
+        println!("{} {}", event.header.server_id, event.header.log_pos);
+        event.event.dump(&mut std::io::stderr())?;
+        // Clone the complete raw buffer only when retaining this event.
+        let owned = event.into_owned()?;
+        let view = owned.view()?;
+        assert_eq!(view.raw_data, owned.raw_data());
+    }
+    Ok(())
 }
 ```
 
-Construct `AppConfig` in Rust or read the named `[[sources]]` TOML configuration; see `examples/config/multi-source.toml`. Call `add_handle` for each closure or `EventHandler` implementation. `run()` consumes continuously; `run_once()` consumes the currently available binlog. At least one handle is required; there is no default output. Use `check()` to validate source settings and `initialize()` to save initial checkpoints.
+`Event<'a>` has `decode(&mut self, &'a [u8]) -> Result<()>` and `dump(&self, &mut dyn Write) -> Result<()>`. The common `EventHeader` and concrete body types implement the same object-safe interface. Header decoding accepts exactly 19 bytes. Body decoding excludes the common header and checksum. `dump` writes human-readable diagnostics and propagates writer failures; it is neither binary serialization nor CDC output.
 
-Each `Event` borrows the source ID, commit checkpoint, and ordered `OwnedChange` slice. Changes contain table metadata, operation, an exact primary key, optional previous key, and changed column indices/names. Full row values are not materialized. Handlers run synchronously in registration order, serialized across sources, only after COMMIT/XID; rolled-back and incomplete transactions produce no callbacks. Fully filtered commits deliver an empty slice. All handlers must succeed before checkpoint persistence. Failure stops consumption; earlier handler side effects may replay after restart. Slow handlers apply backpressure. Clone changes only when retaining them after the callback.
+`dump` prints labeled fields, one per line. For example, an FDE prints `Version: 4`, `Server version: 8.4.6`, and `Checksum algorithm: CRC32`, followed by a blank line. The checksum algorithm comes from the validated frame trailer; body-only decoding leaves it `UNKNOWN` unless supplied by the caller. This context survives `into_owned()` and `view()`.
 
-Sources keep independent connections, schema snapshots, transaction budgets, mappings, and checkpoints. Initial consumption starts at the current position without a data snapshot; recovery uses historical schema from the checkpoint. DDL stops consumption with an explicit error. Credentials are read from the configured environment variable. Requires Rust 1.89+, MySQL ROW + MINIMAL, and supported single-column numeric or string primary keys.
+`BinlogEvent` associates `raw_data`, the complete header and typed `EventData`. Raw data contains the original common header, body and actual trailer, including the FDE algorithm byte; it excludes the file magic and network packet framing. Reader results borrow its reusable buffer until the next read. `into_owned()` retains one raw buffer; `view()` borrows it without self references or unsafe code. `EventData` is an enum, so consumers access concrete fields through matching rather than downcasting.
 
-See `examples/listen.rs` for listeners and `examples/custom_version.rs` for adapter registration with `Replication::with_runtime`. Lower-level APIs remain under `config`, `engine`, `model`, `protocol::mysql`, `source`, and `sink`. Complete CLI configuration, compatibility, and output details are documented in the [repository README](https://github.com/tiyee/pikachu-rs#readme).
+The structured parser supports FDE, ROTATE, QUERY, TABLE_MAP, ROWS v1/v2, XID, regular/anonymous/tagged GTID, Previous GTIDs and v1 heartbeat. Optional GTID metadata uses `Option` to distinguish absence from zero. Tagged GTID serialization v2 has a separate decoder. Other bodies, including heartbeat v2, XA, transaction payloads and unknown event codes, are explicitly `EventData::Raw`; this is not a claim of decoded support. SQL and schema bytes remain borrowed, and DDL is delivered as a QUERY event.
+
+## Configuration and selective work
+
+```rust,no_run
+use mysql_replication::{Result, stream::{ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage}, parser::ParserConfig};
+
+fn main() -> Result<()> {
+    let connection = ConnectionConfig::new("MYSQL_URL");
+    let mut config = ReplicationConfig::new(123, "binlog.000001", 4);
+    config.required_row_image = Some(RowImage::Minimal);
+    config.parser = ParserConfig::minimal();
+    let mut stream = ReplicationStream::connect(&connection, config)?;
+    while let Some(view) = stream.next_view()? {
+        // Borrowed body: no second raw-frame copy or row-value decoding.
+        println!("{} {}", view.header.event_type, view.body.len());
+    }
+    Ok(())
+}
+```
+
+Connection configuration controls credentials via an environment variable, TLS CA and timeouts. Replication configuration controls server ID, file/position, blocking mode, required upstream row image and parser options. Row-image requirements are verified, never changed globally. The library does not query application tables or require primary keys. MySQL sends the available binlog bytes; there is no per-column network projection.
+
+- `next_event()` returns typed protocol events and the complete raw bytes.
+- `next_frame()` validates bounds and checksums, retaining raw bytes while leaving body interpretation to custom adapters.
+- Network `next_view()` validates the driver's event and borrows its body directly, avoiding full raw-frame assembly for consumers that do not need it.
+- `ParserConfig::minimal()` skips GTID metadata and Previous GTIDs decoding. They remain explicit raw bodies with their original event codes.
+- ROWS image parsing is deferred by default; `RowsEvent::images()` reads extra data and sparse bitmaps on demand. `RowsDecode::ValidateImages` validates those immediately. No mode materializes full row values.
+- `TableMapEvent::columns()` validates column envelopes on demand, after table selection.
+
+The structured parser selects advertised layouts from every file's FDE and accepts the registered MySQL series 5.7, 8.0–8.4, 9.0 and 9.7. Unknown series/layouts fail explicitly. `next_frame()` permits custom body parsers. When switching between frame/view and structured-event methods, feed encountered FDE frames into your own `BinlogParser`; the built-in structured parser only observes `next_event()` calls.
+
+Offline files must retain their initial FDE. CRC32/NONE are supported; truncated tails and oversized events fail, with a 64 MiB bound. Network transport uses `mysql`'s driver, which pre-parses FDE/TABLE_MAP/ROTATE and allocates before this library can check event size. Custom framing may require another transport. Full raw network events preserve the driver's original header fields, body, algorithm and stored checksum; they never call the driver's checksum-recalculating serializer. `next_view()` avoids this assembly entirely. Disconnects propagate errors without silent reconnects.
+
+```sh
+cargo test -p mysql-replication --locked
+cargo test -p mysql-canal --locked
+```
+
+Synthetic protocol tests verify headers, raw-byte preservation, CRC32/NONE, optional/tagged GTID metadata, lazy ROWS parsing, wide sparse bitmaps and owned lifetimes. Real-server CDC compatibility tests and version adapters live in `mysql-canal`; see the [project README](../../README.md).

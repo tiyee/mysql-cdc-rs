@@ -1,7 +1,7 @@
-use mysql_replication::{
-    Event, EventHandler, OwnedChange, Result,
+use mysql_canal::{
     engine::checkpoint::State,
     sink::{JsonLinesSink, TransactionSink},
+    CommittedTransaction, OwnedChange, Result, TransactionHandler,
 };
 use std::io::{BufWriter, Stdout};
 
@@ -17,8 +17,8 @@ impl PrintHandle {
     }
 }
 
-impl EventHandler for PrintHandle {
-    fn handle(&self, event: Event<'_>) -> Result<()> {
+impl TransactionHandler for PrintHandle {
+    fn handle(&self, event: CommittedTransaction<'_>) -> Result<()> {
         self.0
             .commit(event.source_id, event.checkpoint, event.changes)
     }
@@ -26,7 +26,7 @@ impl EventHandler for PrintHandle {
 
 impl TransactionSink for PrintHandle {
     fn commit(&self, source_id: &str, checkpoint: &State, changes: &[OwnedChange]) -> Result<()> {
-        self.handle(Event {
+        self.handle(CommittedTransaction {
             source_id,
             checkpoint,
             changes,

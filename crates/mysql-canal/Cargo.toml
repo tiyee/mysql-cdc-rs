@@ -1,0 +1,60 @@
+[package]
+name = "mysql-canal"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.89"
+description = "MySQL CDC conversion and committed transactions over mysql-replication"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/tiyee/pikachu-rs"
+keywords = ["mysql", "cdc", "binlog", "replication"]
+categories = ["database"]
+publish = ["crates-io"]
+include = ["/src/**", "/examples/**", "/benches/**", "/tests/**", "/README.md", "/README.zh-CN.md", "/LICENSE", "!**/.DS_Store"]
+autotests = false
+
+[dependencies]
+mysql-replication = { path = "../mysql-replication", version = "=0.0.2" }
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "binlog", "rustls-tls-ring"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+toml = "0.9"
+thiserror = "2"
+encoding_rs = "0.8"
+fs2 = "0.4"
+crc32fast = "1"
+
+[dev-dependencies]
+mysql_common = { version = "0.37", default-features = false, features = ["binlog"] }
+
+[[bench]]
+name = "minimal_rows"
+harness = false
+
+[[test]]
+name = "decoder"
+path = "tests/integration/decoder.rs"
+
+[[test]]
+name = "multi_source"
+path = "tests/integration/multi_source.rs"
+
+[[test]]
+name = "mysql_live"
+path = "tests/integration/mysql_live.rs"
+
+[[test]]
+name = "processor"
+path = "tests/integration/processor.rs"
+
+[[test]]
+name = "event_adapters"
+path = "tests/integration/event_adapters.rs"
+
+[[bench]]
+name = "event_adapter"
+harness = false
+
+[[test]]
+name = "converter"
+path = "tests/integration/converter.rs"

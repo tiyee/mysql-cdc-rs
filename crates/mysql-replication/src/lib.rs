@@ -1,33 +1,19 @@
 #![forbid(unsafe_code)]
-//! MySQL replication with configuration-driven, committed event handlers.
+#![doc = include_str!("../README.md")]
+//! MySQL replication transport and borrowed binary-log events.
 //!
-//! ```no_run
-//! use mysql_replication::{Event, Replication, Result, config::AppConfig};
-//! use std::path::Path;
-//!
-//! fn main() -> Result<()> {
-//!     let config = AppConfig::read(Path::new("cdc.toml"))?;
-//!     let mut replication = Replication::new(config)?;
-//!     replication.add_handle(|event: Event<'_>| {
-//!         for change in event.changes {
-//!             println!("{} {:?} {:?}", event.source_id, change.operation, change.pk);
-//!         }
-//!         Ok(())
-//!     });
-//!     replication.run()
-//! }
-//! ```
-
-pub mod config;
-pub mod engine;
-pub mod error;
-pub mod model;
-pub mod protocol;
-pub mod replication;
-pub mod sink;
-pub mod source;
+//! Events describe the wire protocol. Filtering, row-to-change conversion,
+//! transaction delivery and checkpoint persistence belong to the consumer.
+mod error;
+pub mod event_type;
+pub mod events;
+pub mod file;
+mod frame;
+pub mod parser;
+pub mod stream;
+mod wire;
 
 pub use error::{Error, Result};
-pub use model::{Change, ColumnMeta, Operation, OwnedChange, PrimaryKey, TableMeta};
-pub use protocol::mysql::Decoder;
-pub use replication::{Event, EventHandler, Replication};
+pub use events::{BinlogEvent, Event, EventData, EventHeader, OwnedBinlogEvent};
+pub use frame::{BinlogFrame, EventView, FrameDecoder, MAX_EVENT_BYTES};
+pub use parser::BinlogParser;

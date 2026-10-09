@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 mod print_handle;
 
-use mysql_replication::protocol::mysql::event_type as event;
-use mysql_replication::{
-    Error, Replication, Result,
+use mysql_canal::protocol::mysql::event_type as event;
+use mysql_canal::{
     config::AppConfig,
-    engine::{Processor, checkpoint::State},
+    engine::{checkpoint::State, Processor},
     protocol::mysql::file::BinlogFile,
+    Cdc, Error, Result,
 };
 use std::{io::BufReader, path::Path};
 
@@ -64,7 +64,7 @@ fn run() -> Result<()> {
         command @ ("check" | "init" | "run")
             if args.len() == 3 || command == "run" && args.len() == 4 && args[3] == "--once" =>
         {
-            let mut replication = Replication::new(AppConfig::read(Path::new(&args[2]))?)?;
+            let mut replication = Cdc::new(AppConfig::read(Path::new(&args[2]))?)?;
             match command {
                 "check" => replication.check()?,
                 "init" => replication.initialize()?,

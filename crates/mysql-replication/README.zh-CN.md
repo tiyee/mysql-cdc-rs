@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-可复用的 Rust MySQL CDC 库，支持传入配置并注册已提交事件监听 handle。`pikachu-rs` 包负责 `pikachu-cdc` CLI，并自行注册默认打印 handle。
+同步 MySQL 复制传输与借用 binlog 事件库。CDC 转换、白名单、历史 SQL schema、事务交付及持久化检查点属于上层 `mysql-canal` 公共库（导入路径 `mysql_canal`）。
 
 ```toml
 [dependencies]
@@ -10,26 +10,66 @@ mysql-replication = "0.0.2"
 ```
 
 ```rust,no_run
-use mysql_replication::{Event, Replication, Result, config::AppConfig};
-use std::path::Path;
+use mysql_replication::{Event, Result, file::BinlogFile};
+use std::{fs::File, io::BufReader};
 
 fn main() -> Result<()> {
-    let config = AppConfig::read(Path::new("cdc.toml"))?;
-    let mut replication = Replication::new(config)?;
-    replication.add_handle(|event: Event<'_>| {
-        for change in event.changes {
-            println!("{} {:?} {:?}", event.source_id, change.operation, change.pk);
-        }
-        Ok(())
-    });
-    replication.run()
+    let mut reader = BinlogFile::new(BufReader::new(File::open("binlog.000001")?))?;
+    while let Some(event) = reader.next_event()? {
+        println!("{} {}", event.header.server_id, event.header.log_pos);
+        event.event.dump(&mut std::io::stderr())?;
+        // Clone the complete raw buffer only when retaining this event.
+        let owned = event.into_owned()?;
+        let view = owned.view()?;
+        assert_eq!(view.raw_data, owned.raw_data());
+    }
+    Ok(())
 }
 ```
 
-配置可以在 Rust 中构造 `AppConfig`，也可以读取具名 `[[sources]]` TOML，见 `examples/config/multi-source.toml`。使用 `add_handle` 注册闭包或 `EventHandler` 实现；`run()` 持续消费，`run_once()` 消费当前可用事件后退出。运行前必须注册至少一个 handle，库没有默认输出。`check()` 验证来源配置，`initialize()` 生成初始检查点。
+`Event<'a>` 包含 `decode(&mut self, &'a [u8]) -> Result<()>` 与 `dump(&self, &mut dyn Write) -> Result<()>`。公共头 `EventHeader` 和具体事件体实现同一对象安全接口。头部解码接收恰好 19 字节，事件体解码不含公共头及 checksum。`dump` 用于可读诊断并传播写入错误，不承担二进制序列化或 CDC 输出。
 
-每个 `Event` 借用来源 ID、提交检查点和按 binlog 顺序排列的 `OwnedChange` 列表。变更包含表元数据、操作、精确主键、可选旧主键和变动字段索引/名称，不构建完整行值。handle 按注册顺序同步执行，不同来源的事务回调不交错；只在 COMMIT/XID 后调用，回滚与未完成事务不触发回调，完全被白名单过滤的提交收到空列表。全部 handle 成功后才保存检查点。失败停止消费，重启可能重放之前 handle 的副作用；慢 handle 直接施加背压。只在需要跨回调持有时复制变更。
+`dump` 按字段逐行打印标签和值。例如 FDE 输出 `Version: 4`、`Server version: 8.4.6`、`Checksum algorithm: CRC32`，末尾为空行。checksum 算法来自已校验帧的尾部；仅解码事件体时保留调用方提供的值，未提供则为 `UNKNOWN`。`into_owned()` 与 `view()` 会保留该上下文。
 
-每个来源独立维护连接、历史 schema、事务预算、映射及检查点。首次消费从当前位点开始，不提供数据快照；恢复使用检查点中的历史 schema。DDL 明确报错并停止。凭据从配置指定的环境变量读取。要求 Rust 1.89+、MySQL ROW + MINIMAL，以及支持的单列数字或字符串主键。
+`BinlogEvent` 关联 `raw_data`、完整公共头和具体 `EventData`。原始字节包含未修改的公共头、事件体、实际尾部及 FDE 算法字节，不包含文件 magic 或网络包封装。读取结果借用可复用缓冲区，到下一次读取前有效。`into_owned()` 持有一份原始缓冲区；`view()` 按需借用，不使用自引用或 unsafe。`EventData` 使用枚举，调用方通过匹配访问字段，无需下转型。
 
-监听示例见 `examples/listen.rs`，自定义适配器与 `Replication::with_runtime` 示例见 `examples/custom_version.rs`。底层接口仍按 `config`、`engine`、`model`、`protocol::mysql`、`source`、`sink` 组织。CLI 配置、兼容性与输出契约见[仓库中文版 README](https://github.com/tiyee/pikachu-rs/blob/main/README.zh-CN.md)。
+结构化解析覆盖 FDE、ROTATE、QUERY、TABLE_MAP、ROWS v1/v2、XID、普通/匿名/Tagged GTID、Previous GTIDs 与 v1 心跳。GTID 可选元数据用 `Option` 区分缺失与零，Tagged GTID serialization v2 使用独立解码器。其他载荷，包括 v2 心跳、XA、压缩事务与未知事件码，明确交付为 `EventData::Raw`，不宣称已解码支持。SQL 和库名字节保持借用，DDL 正常交付为 QUERY。
+
+## 配置与按需解析
+
+```rust,no_run
+use mysql_replication::{Result, stream::{ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage}, parser::ParserConfig};
+
+fn main() -> Result<()> {
+    let connection = ConnectionConfig::new("MYSQL_URL");
+    let mut config = ReplicationConfig::new(123, "binlog.000001", 4);
+    config.required_row_image = Some(RowImage::Minimal);
+    config.parser = ParserConfig::minimal();
+    let mut stream = ReplicationStream::connect(&connection, config)?;
+    while let Some(view) = stream.next_view()? {
+        // Borrowed body: no second raw-frame copy or row-value decoding.
+        println!("{} {}", view.header.event_type, view.body.len());
+    }
+    Ok(())
+}
+```
+
+连接配置支持凭据环境变量、TLS CA 和超时；复制配置支持 server ID、file/position、阻塞模式、上游行镜像要求及解析选项。行镜像要求只校验，不修改服务器全局设置。底层不查询业务表，也不要求主键。MySQL 发送已经存在的 binlog 字节，复制协议不支持按列裁剪网络传输。
+
+- `next_event()` 返回具体协议事件和完整原始字节。
+- `next_frame()` 校验长度/checksum，保留原始字节，事件体留给自定义适配器。
+- 在线 `next_view()` 校验驱动事件并直接借用 body，适合不需要完整原始帧的消费者。
+- `ParserConfig::minimal()` 跳过 GTID 元数据和 Previous GTIDs 解析，保留原事件码及明确的 raw 载荷。
+- ROWS 默认延迟解析镜像，调用 `RowsEvent::images()` 时才读取 extra-data 和稀疏位图。`RowsDecode::ValidateImages` 可要求立即校验。所有模式均不构建完整行值。
+- `TableMapEvent::columns()` 在表匹配后按需校验列结构。
+
+结构化解析器根据每个文件的 FDE 选择声明的布局，支持已注册 MySQL 5.7、8.0–8.4、9.0、9.7 系列。未知系列或布局明确失败；`next_frame()` 可交给自定义事件体解析器。混用帧/视图与结构化读取时，需要将读取到的 FDE 帧交给自己的 `BinlogParser`；内置结构化解析器只观察 `next_event()` 调用。
+
+离线文件必须保留开头 FDE，支持 CRC32/NONE，截断尾部和超过 64 MiB 的事件报错。在线传输复用 `mysql` 驱动；驱动会预解析 FDE/TABLE_MAP/ROTATE，并在本库校验事件大小之前分配内存，特殊 framing 可能需要其他传输实现。完整在线原始事件保留驱动读取的原头部字段、body、算法字节及存储的 checksum，不调用会重新计算 checksum 的序列化方法。`next_view()` 完全跳过这次原始帧组装。断线传播错误，不静默重连。
+
+```sh
+cargo test -p mysql-replication --locked
+cargo test -p mysql-canal --locked
+```
+
+独立合成协议测试覆盖公共头、原始字节保真、CRC32/NONE、可选/Tagged GTID、延迟 ROWS、宽表稀疏位图和 owned 生命周期。实库 CDC 兼容测试与版本适配器位于 `mysql-canal`，见[项目说明](../../README.zh-CN.md)。

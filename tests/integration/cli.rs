@@ -64,10 +64,15 @@ fn offline_cli_replays_from_snapshot_boundary_and_rejects_truncation() {
         String::from_utf8_lossy(&result.stderr)
     );
     let change: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(change["pk"]["value"], 1);
-    assert_eq!(change["source"], "east");
     assert_eq!(
-        mysql_replication::engine::checkpoint::State::read(&state_path)
+        change,
+        serde_json::json!({
+            "source": "east", "schema": "app", "table": "users",
+            "operation": "delete", "pk": {"type": "signed", "value": 1}, "changed": []
+        })
+    );
+    assert_eq!(
+        mysql_canal::engine::checkpoint::State::read(&state_path)
             .unwrap()
             .position,
         snapshot.position

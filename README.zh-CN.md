@@ -2,49 +2,58 @@
 
 [English](README.md) | 简体中文
 
-`pikachu-rs` 是 MySQL CDC 命令行包（命令名 `pikachu-cdc`）。可复用库独立为 workspace 子包 `mysql-replication`，Rust 导入路径为 `mysql_replication`。只保留白名单表的**库名、表名、单列主键、变动字段名**，不构建整行值。内置 Oracle MySQL 5.7 / 8.0 / 8.1–8.4 / 9.0 / 9.7 的 `ROW + MINIMAL` 版本适配器，支持多个实例并行消费。已验证的范围是下述协议与模拟来源测试；实库兼容矩阵需单独运行。
+`pikachu-rs` 提供 CLI（命令名 `pikachu-cdc`），依赖独立的 CDC 公共库 `mysql-canal`（导入路径 `mysql_canal`）。底层包 `mysql-replication` 提供协议事件和复制传输，不依赖白名单、业务 schema、事务 sink 或检查点策略。CDC 只保留白名单表的**库名、表名、单列主键、变动字段名**，不构建整行值。内置 Oracle MySQL 5.7 / 8.0 / 8.1–8.4 / 9.0 / 9.7 的 `ROW + MINIMAL` 版本适配器，支持多个实例并行消费。实库兼容矩阵需单独运行。
 
 ## 目录结构
 
 ```text
-src/bin/                 # CLI entry point and default printing handle
+src/bin/                 # pikachu-cdc and its default JSON Lines handle
+crates/mysql-canal/
+├── src/cdc.rs           # Cdc and committed transaction handlers
+├── src/config/          # Named sources and CDC policy
+├── src/model/           # Exact primary keys and lightweight changes
+├── src/protocol/mysql/  # CDC adapters and selective primary-key decoding
+├── src/source/          # Source plugins and historical schema discovery
+├── src/engine/          # Event conversion, transactions and checkpoints
+├── src/sink/            # Transaction sinks and JSON Lines output
+├── examples/            # CDC listeners, adapters and configuration
+├── benches/             # Selective decoding benchmarks
+└── tests/               # CDC, conversion and dedicated MySQL tests
 crates/mysql-replication/
-├── src/config/          # Configuration parsing and validation
-├── src/model/           # Changes, exact primary keys, and schema metadata
-├── src/protocol/mysql/  # Binlog framing, borrowed event views, and row decoding
-├── src/source/          # Source plugins, connections, and event streams
-├── src/engine/          # Source scheduling, transactions, and checkpoints
-├── src/replication.rs   # Config-driven entry point and event handlers
-├── src/sink/            # Transaction sink and JSON Lines writer
-├── examples/            # Listener and version adapter examples
-├── tests/               # Protocol, transaction, multi-source, and live tests
-└── benches/             # Core decoding benchmarks
+├── src/events/          # Event trait, common header and concrete binlog events
+├── src/frame.rs         # Raw bytes, bounds and checksums
+├── src/parser.rs        # Per-file layouts and configurable lazy parsing
+├── src/file.rs          # Offline event/frame reader
+├── src/stream.rs        # Replication transport and borrowed body views
+└── tests/events.rs      # Protocol regression tests
 examples/config/         # CLI configuration
-tests/                  # CLI tests and dedicated MySQL infrastructure
+tests/                  # CLI replay tests
 scripts/release/         # Release tag validation and tests
 docs/releasing.md        # CI and publishing guide (Chinese)
-.github/workflows/       # CI, MySQL compatibility, and workspace publishing
+.github/workflows/       # CI, MySQL compatibility and workspace publishing
 ```
 
-应用通过 `Replication` 传入配置，通过 `EventHandler` 注册监听逻辑。底层解码、来源及 sink 接口均属于 `mysql-replication`。
+应用通过 `Cdc` 传入 CDC 配置，通过 `TransactionHandler` 注册已提交事务监听。`mysql_replication::BinlogEvent` 表示一条协议事件，`mysql_canal::CommittedTransaction` 表示转换并提交后的变更集合。`engine::converter::EventConverter` 明确负责 binlog 视图到行变更及事务动作的转换；`Processor` 缓冲变更并在提交后交付。包含 DDL 的 QUERY 在复制层是有效事件，在 CDC 层触发 `Error::Statement`。
+
+CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不额外组装完整原始缓冲区；离线回放使用 `next_frame()`。两者均在匹配表之后解析 ROWS 镜像，只解码主键，其余值按长度跳过。准确定位字段仍需表布局元数据。MINIMAL 检查针对上游配置，复制协议无法从已有 binlog 中按列请求数据。原始事件、解析配置和传输限制见[复制库说明](crates/mysql-replication/README.zh-CN.md)。
 
 ## 运行
 
-命令行安装使用 `cargo install pikachu-rs`。库接入依赖独立子包：
+命令行安装使用 `cargo install pikachu-rs`。CDC 库接入依赖 `mysql-canal`：
 
 ```toml
 [dependencies]
-mysql-replication = "0.0.2"
+mysql-canal = "0.0.2"
 ```
 
 ```rust,no_run
-use mysql_replication::{Event, Replication, Result, config::AppConfig};
+use mysql_canal::{CommittedTransaction, Cdc, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
     let config = AppConfig::read(Path::new("cdc.toml"))?;
-    let mut replication = Replication::new(config)?;
-    replication.add_handle(|event: Event<'_>| {
+    let mut replication = Cdc::new(config)?;
+    replication.add_handle(|event: CommittedTransaction<'_>| {
         for change in event.changes {
             println!("{} {:?} {:?}", event.source_id, change.operation, change.pk);
         }
@@ -54,7 +63,7 @@ fn main() -> Result<()> {
 }
 ```
 
-`Replication::new` 也支持传入程序构造的 `AppConfig`。`add_handle` 接受闭包或 `EventHandler` 实现，多个 handle 按注册顺序执行。`Event` 包含来源 ID、事务提交位点及有序的 `OwnedChange` 变更列表；只在 COMMIT/XID 后回调，回滚与未完成事务不触发回调，完全被白名单过滤的提交收到空列表。全部 handle 成功后才保存检查点；失败停止消费，重启后可能重放先前 handle 已处理的事务，处理逻辑应容忍重放。回调借用事务数据，仅在需要跨回调持有时复制；不同来源的回调不交错，慢 handle 对消费施加背压。调用 `run()` 或 `run_once()` 前至少注册一个 handle，库没有默认输出；`run_once()` 消费当前可用事件后退出。完整示例见 [listen.rs](crates/mysql-replication/examples/listen.rs)。
+`Cdc::new` 也支持传入程序构造的 `AppConfig`。`add_handle` 接受闭包或 `TransactionHandler` 实现，多个 handle 按注册顺序执行。`CommittedTransaction` 包含来源 ID、事务提交位点及有序的 `OwnedChange` 变更列表；只在 COMMIT/XID 后回调，回滚与未完成事务不触发回调，完全被白名单过滤的提交收到空列表。全部 handle 成功后才保存检查点；失败停止消费，重启后可能重放先前 handle 已处理的事务，处理逻辑应容忍重放。回调借用事务数据，仅在需要跨回调持有时复制；不同来源的回调不交错，慢 handle 对消费施加背压。调用 `run()` 或 `run_once()` 前至少注册一个 handle，库没有默认输出；`run_once()` 消费当前可用事件后退出。完整示例见 [listen.rs](crates/mysql-canal/examples/listen.rs)。
 
 CLI 注册默认 `PrintHandle`，将事件打印为 stdout JSON Lines；命令名继续使用 `pikachu-cdc`。使用 `examples/config/multi-source.toml`，每个 `[[sources]]` 都有独立 `id`、`state_file`、`source` 和 `tables`：
 
@@ -139,13 +148,13 @@ GRANT RELOAD ON *.* TO 'cdc'@'127.0.0.1';
 “零拷贝”限定在核心行解码：网络驱动仍需要接收/组装事件，持有跨事件的字符串主键也需要复制。数值主键行的借用回调无需逐行堆分配。命令行为了提交后可见会缓冲轻量 Change；`max_transaction_bytes` 限制其记账内存（含 Vec 预留空间、主键与共享索引的保守估算，不是进程 RSS 硬上限），超限直接停止且不推进位点。
 
 ```sh
-cargo bench -p mysql-replication --bench minimal_rows
-cargo bench -p mysql-replication --bench event_adapter
+cargo bench -p mysql-canal --bench minimal_rows
+cargo bench -p mysql-canal --bench event_adapter
 ```
 
 两个基准分别测量直接调用核心 Decoder，以及 EventParser + dyn RowDecoder 的完整适配分发路径；各自测量每事件 1 / 100 / 1000 行的 MINIMAL UPDATE 解码，不含网络、JSON、事务持有与磁盘同步，不可作为端到端吞吐承诺。命令行每个事务都会 flush 输出、写 state 并 fsync；小事务密集场景下，持久化通常比解码更贵。需要更高吞吐可实现 `TransactionSink` 接批量持久化 sink，并由 sink 确认后保存提交位点。多来源同步输出用一个共享锁，每事务只获取一次；慢输出会对各来源施加背压，没有无界消息队列。总事务预算上限是所有来源预算之和，另加驱动缓冲和元数据。源传输、版本适配与行解码器按连接/事件分发，sink 按事务分发；行回调仍保持借用类型。
 
-库接口 `Decoder::new(Vec<TableMeta>)` 接收按列序排列的白名单 schema；`table_map(&[u8])` 预处理表映射；`rows(event_type, &[u8], callback)` 将借用的 `Change` 传给回调。输入都是去掉 19 字节公共头和 checksum 后的事件 body，库不会自行假定完整行镜像。`Change::into_owned()` 用于需要跨缓冲区持有数据的 sink。包含提交管理的接入可以直接使用 `Processor`，真实网络接入见 `source::mysql::MysqlSource` 与 `crates/mysql-replication/tests/integration/mysql_live.rs`，多来源入口为 `Runtime`。
+库接口 `Decoder::new(Vec<TableMeta>)` 接收按列序排列的白名单 schema；`table_map(&[u8])` 预处理表映射；`rows(event_type, &[u8], callback)` 将借用的 `Change` 传给回调。输入都是去掉 19 字节公共头和 checksum 后的事件 body，库不会自行假定完整行镜像。`Change::into_owned()` 用于需要跨缓冲区持有数据的 sink。包含提交管理的接入可以直接使用 `Processor`，真实网络接入见 `source::mysql::MysqlSource` 与 `tests/integration/mysql_live.rs`，多来源入口为 `Runtime`。
 
 ## 新版本与插件接口
 
@@ -163,18 +172,18 @@ cargo bench -p mysql-replication --bench event_adapter
 
 未注册的系列拒绝启动；不能仅因为 `major >= 5` 就推断兼容。MySQL 官方版本序列没有 5.8，5.7.8 则属于 5.7 系列，见 [MySQL 官方版本参考](https://downloads.mysql.com/docs/mysqld-version-reference-en.pdf)。如果“5.8”指厂商版本，需根据其真实版本和日志布局实现适配器。
 
-新增版本时，实现 `VersionAdapter` 并调用 `runtime.versions.register(Arc::new(adapter))`。每次收到 FDE 后调用 `create_event_parser`，为这个文件建立独立解析器；`create_decoder` 负责列元数据和字段值编码的处理。完整可编译的接入模板在 `crates/mysql-replication/examples/custom_version.rs`；模板注册本身不代表已验证该新版本。
+新增版本时，实现 `VersionAdapter` 并调用 `runtime.versions.register(Arc::new(adapter))`。每次收到 FDE 后调用 `create_event_parser`，为这个文件建立独立解析器；`create_decoder` 负责列元数据和字段值编码的处理。完整可编译的接入模板在 `crates/mysql-canal/examples/custom_version.rs`；模板注册本身不代表已验证该新版本。
 
 事件结构变化时覆盖 `create_event_parser`，返回自己的 `EventParser`。解析器直接从原始切片产生统一的 `TableMapEvent` / `RowsEvent`，可处理字段偏移、字段顺序、字节序以及新的事件码；无需重建标准布局的字节数组。控制事件可直接返回 `ParsedEvent::Control`；`classify` 负责 `Unclassified` 事件的分类，已被结构解析器识别的 QUERY/ROTATE/TABLE_MAP/ROWS 不再调用它。
 
 默认 `MysqlEventParser` 按 FDE 预处理 TABLE_MAP 的 ID 宽度、ROWS v1/v2 头及 QUERY/ROTATE 的 post-header 长度，建立固定事件分发表。某 ROWS 类型在 FDE 中长度为 0，就拒绝该类型；不会因为记得一个事件码就假设它在该文件中可用。核心行循环只接收统一视图，不读取版本号或 wire event_type；ROW 镜像解析函数在 FDE/事件阶段选定，非白名单表仍在解析 extra-data、位图和值之前直接跳过。
 
-新解析器使用 `RowsEvent::new(..., parse_images)` 提供镜像解析函数，返回借用的 `RowImages`。MySQL 类型编码相同时可继续复用默认 `Decoder`；如果列元数据或字段值编码也不同，覆盖 `create_decoder`，并实现 `RowDecoder::table_map_event` / `rows_event`。原始 body 方法处理标准布局；trait 的默认视图实现仅允许标准布局，遇到非标准布局会明确报错。`crates/mysql-replication/tests/integration/event_adapters.rs` 使用合成厂商格式验证 4 字节 ID、扩展控制头、不同字段顺序和字节序、新 ROWS 事件码、文件切换与 UTF-8 主键零拷贝；这些不是实库兼容 fixture。
+新解析器使用 `RowsEvent::new(..., parse_images)` 提供镜像解析函数，返回借用的 `RowImages`。MySQL 类型编码相同时可继续复用默认 `Decoder`；如果列元数据或字段值编码也不同，覆盖 `create_decoder`，并实现 `RowDecoder::table_map_event` / `rows_event`。原始 body 方法处理标准布局；trait 的默认视图实现仅允许标准布局，遇到非标准布局会明确报错。`crates/mysql-canal/tests/integration/event_adapters.rs` 使用合成厂商格式验证 4 字节 ID、扩展控制头、不同字段顺序和字节序、新 ROWS 事件码、文件切换与 UTF-8 主键零拷贝；这些不是实库兼容 fixture。
 
 共同的 binlog v4 帧（19 字节公共头、FDE 引导、CRC32/NONE）仍由传输层负责。当前 MySQL 驱动还会预解析 FDE/TABLE_MAP/ROTATE，因此改变这些结构的厂商版本可能在到达本层前就被驱动拒绝；这种情况需要同时实现 `SourcePlugin` 替换传输。仅注册 `VersionAdapter` 不保证能绕过驱动的布局限制。默认 Oracle MySQL 适配器仍严格校验已支持布局，不能把未知 FDE 的长度变化自动视为安全兼容。
 
 ```rust
-let mut runtime = mysql_replication::engine::Runtime::default();
+let mut runtime = mysql_canal::engine::Runtime::default();
 runtime.versions.register(std::sync::Arc::new(MyVersionAdapter))?;
 // runtime.sources.register(Arc::new(MySourcePlugin))?;
 runtime.run(config, false, sink)?;
@@ -200,14 +209,14 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 默认测试包括事件结构适配与零拷贝、多来源线程隔离、相同 table_id 不同列序、来源身份绑定、独立位点、输出失败、版本系列选择、旧文件重选适配器、自定义事件/行解码器与注册冲突；并使用独立构造的协议字节覆盖符号扩展、稀疏 NULL、多行与主键变更、长 CHAR、多种跳读类型、超过 64 列、table_id 复用、截断、CRC32/NONE、事务可见性、位点保存顺序与文件锁。它们不是 mysqlbinlog 导出的实库 fixture。
 
-GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、stable）与 macOS（stable）测试、格式/Clippy/文档检查、下面的 MySQL 实库矩阵及 crates.io 打包验证。两个包保持相同版本，推送 `v<package.version>` tag 且全部 CI 通过后，`release.yml` 先通过仓库 secret `CARGO_REGISTRY_TOKEN` 自动发布 `mysql-replication`（首次发布需要 API token），再通过 GitHub OIDC Trusted Publishing 发布 `pikachu-rs`。CI 使用 `--dry-run` 验证 workspace 包，不上传任何包，也不需要发布凭据。完整步骤见 [CI 与发布说明](docs/releasing.md)。
+GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、stable）与 macOS（stable）测试、格式/Clippy/文档检查、下面的 MySQL 实库矩阵及 crates.io 打包验证。三个包保持相同版本，推送 `v<package.version>` tag 且全部 CI 通过后，`release.yml` 先通过仓库 secret `CARGO_REGISTRY_TOKEN` 依次发布 `mysql-replication` 和 `mysql-canal`（库的首次发布需要 API token），再通过 GitHub OIDC Trusted Publishing 发布 `pikachu-rs`。CI 使用 `--dry-run` 验证 workspace 包，不上传任何包，也不需要发布凭据。完整步骤见 [CI 与发布说明](docs/releasing.md)。
 
 真实 MySQL 集成测试（显式执行，在独立测试服务上创建并删除唯一命名的测试库）：
 
 ```sh
 MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
-cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 docker compose -f tests/infra/compose.yaml down -v
 ```
 
