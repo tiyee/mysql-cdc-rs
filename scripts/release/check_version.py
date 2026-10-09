@@ -20,7 +20,7 @@ def validate_tag(manifest: Path, tag: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tag", help="Git tag, e.g. v0.1.0")
+    parser.add_argument("tag", help="Git tag, e.g. v0.0.1")
     parser.add_argument(
         "--manifest",
         type=Path,

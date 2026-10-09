@@ -31,20 +31,20 @@
 
 ## 发布版本
 
-修改 `Cargo.toml` 的 `package.version`，执行 `cargo check --locked`；如果因根包版本变化要求更新 lockfile，则运行 `cargo check` 并一同提交生成的 `Cargo.lock`。提交该版本后推送与版本完全一致的 tag，例如当前 `0.1.0`：
+修改 `Cargo.toml` 的 `package.version`，执行 `cargo check --locked`；如果因根包版本变化要求更新 lockfile，则运行 `cargo check` 并一同提交生成的 `Cargo.lock`。提交该版本后推送与版本完全一致的 tag，例如当前 `0.0.1`：
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.0.1
+git push origin v0.0.1
 ```
 
-`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → `cargo publish --locked --registry crates-io --package pikachu-rs`。缺少 token、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.2.0-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
+`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → `cargo publish --locked --registry crates-io --package pikachu-rs`。缺少 token、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.0.2-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
 
 发布成功后，使用方可添加：
 
 ```toml
 [dependencies]
-pikachu-rs = "0.1"
+pikachu-rs = "0.0.1"
 ```
 
 发布入口为 [crates.io](https://crates.io/crates/pikachu-rs)，API 文档入口为 [docs.rs](https://docs.rs/pikachu-rs)。这些链接在首次发布成功后才可用。工作流本身不会创建 GitHub Release 或推送 Git tag。

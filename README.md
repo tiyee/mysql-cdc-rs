@@ -38,7 +38,7 @@ docs/releasing.md         # CI 矩阵、crates.io 配置与发布步骤
 
 ```toml
 [dependencies]
-pikachu-rs = "0.1"
+pikachu-rs = "0.0.1"
 ```
 
 包内的命令行工具名为 `pikachu-cdc`。

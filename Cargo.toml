@@ -1,6 +1,6 @@
 [package]
 name = "pikachu-rs"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Selective MySQL ROW/MINIMAL CDC with precompiled row skip plans"
