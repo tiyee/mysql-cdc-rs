@@ -1,13 +1,19 @@
-# pikachu-rs
+# mysql-cdc-rs
 
 English | [简体中文](README.zh-CN.md)
 
-`pikachu-rs` provides the CLI (`pikachu-cdc`), which depends on the CDC library `mysql-canal` (`mysql_canal`). The separate `mysql-replication` package provides protocol events and replication transport, with no whitelist, application schema, transaction sink or checkpoint policy. CDC keeps only **database names, table names, single-column primary keys, and changed column names**, without materializing full rows. Built-in `ROW + MINIMAL` adapters cover Oracle MySQL 5.7, 8.0, 8.1–8.4, 9.0 and 9.7, with concurrent consumption from multiple instances. Real-server compatibility tests must be run separately.
+`mysql-cdc-rs` (`mysql_cdc_rs`) is the unified library entry point, re-exporting `mysql-canal` and `mysql-replication`. `pikachu` provides the CLI (`pikachu-cdc`), which depends on the CDC library `mysql-canal` (`mysql_canal`). The separate `mysql-replication` package provides protocol events and replication transport, with no whitelist, application schema, transaction sink or checkpoint policy. CDC keeps only **database names, table names, single-column primary keys, and changed column names**, without materializing full rows. Built-in `ROW + MINIMAL` adapters cover Oracle MySQL 5.7, 8.0, 8.1–8.4, 9.0 and 9.7, with concurrent consumption from multiple instances. Real-server compatibility tests must be run separately.
 
 ## Project layout
 
 ```text
-src/bin/                 # pikachu-cdc and its default JSON Lines handle
+crates/mysql-cdc/
+├── src/lib.rs           # Unified CDC and replication exports
+└── examples/            # Single-dependency listeners and raw-event readers
+crates/pikachu/
+├── src/bin/             # pikachu-cdc and its default JSON Lines handle
+├── examples/config/     # CLI configuration
+└── tests/               # CLI replay tests
 crates/mysql-canal/
 ├── src/cdc.rs           # Cdc and committed transaction handlers
 ├── src/config/          # Named sources and CDC policy
@@ -26,28 +32,27 @@ crates/mysql-replication/
 ├── src/file.rs          # Offline event/frame reader
 ├── src/stream.rs        # Replication transport and borrowed body views
 └── tests/events.rs      # Protocol regression tests
-examples/config/         # CLI configuration
-tests/                  # CLI replay tests
+tests/infra/            # Dedicated MySQL test containers
 scripts/release/         # Release tag validation and tests
 docs/releasing.md        # CI and publishing guide (Chinese)
 .github/workflows/       # CI, MySQL compatibility and workspace publishing
 ```
 
-Use `Cdc` for configuration-driven CDC and `TransactionHandler` for committed transactions. `mysql_replication::BinlogEvent` describes one protocol event; `mysql_canal::CommittedTransaction` describes converted, committed changes. `engine::converter::EventConverter` explicitly converts binlog views into changes and transaction actions; `Processor` buffers the changes and delivers them only at commit. A QUERY containing DDL is valid in the replication layer; the CDC layer stops with `Error::Statement`.
+Use `Cdc` for configuration-driven CDC and `TransactionHandler` for committed transactions. `mysql_cdc_rs::replication::BinlogEvent` describes one protocol event; `mysql_cdc_rs::CommittedTransaction` describes converted, committed changes. `engine::converter::EventConverter` explicitly converts binlog views into changes and transaction actions; `Processor` buffers the changes and delivers them only at commit. A QUERY containing DDL is valid in the replication layer; the CDC layer stops with `Error::Statement`.
 
 CDC uses the replication library's `next_view()` network path to borrow the driver body directly, without assembling a second raw buffer. Offline replay uses `next_frame()`. Both paths delay ROWS image parsing until table selection, decode only the primary key and skip other values by their encoded lengths. Table layout metadata is still required to locate fields safely. MINIMAL is checked against the upstream setting; replication cannot request individual columns from an existing binlog. See the [replication API](crates/mysql-replication/README.md) for raw events, parser configuration and transport limits.
 
 ## Usage
 
-Install the CLI with `cargo install pikachu-rs`. For CDC library integration, depend on `mysql-canal`:
+Build the CLI from this workspace with `cargo build --release --locked -p pikachu`; after publication, install it with `cargo install pikachu`. For library integration, depend only on `mysql-cdc-rs`:
 
 ```toml
 [dependencies]
-mysql-canal = "0.0.3"
+mysql-cdc-rs = "0.0.3"
 ```
 
 ```rust,no_run
-use mysql_canal::{CommittedTransaction, Cdc, Result, config::AppConfig};
+use mysql_cdc_rs::{CommittedTransaction, Cdc, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
@@ -63,13 +68,15 @@ fn main() -> Result<()> {
 }
 ```
 
+CDC types and modules are re-exported at the root (`mysql_cdc_rs::Cdc`, `mysql_cdc_rs::config`) and under `mysql_cdc_rs::canal`. Raw events and transport are available under `mysql_cdc_rs::replication`, for example `replication::BinlogEvent` and `replication::stream::ReplicationStream`. These are the original library types, so events can pass directly to the CDC converter. Root `Error`/`Result` belong to CDC; raw replication uses `replication::Error`/`replication::Result`. The lower-level crates remain independently usable. See the [facade examples](crates/mysql-cdc/README.md).
+
 `Cdc::new` also accepts a programmatically constructed `AppConfig`. `add_handle` accepts closures or implementations of `TransactionHandler`; multiple handles run in registration order. `CommittedTransaction` contains a source ID, commit checkpoint, and an ordered slice of converted `OwnedChange` values. Callbacks run only after COMMIT/XID, never for rolled-back or incomplete transactions. Fully filtered commits deliver an empty slice. All handlers must succeed before the checkpoint is saved; failure stops consumption and may replay earlier handler side effects on restart. Callbacks borrow the transaction data; clone only data retained after returning. Callbacks across sources do not interleave, and slow handlers apply backpressure. Register at least one handle before `run()` or `run_once()`; the library has no default output. `run_once()` consumes currently available events. See [the listener example](crates/mysql-canal/examples/listen.rs).
 
-The CLI registers its default `PrintHandle`, which writes JSON Lines to stdout. Its command name remains `pikachu-cdc`. Start with `examples/config/multi-source.toml`. Each `[[sources]]` entry has its own `id`, `state_file`, `source`, and `tables`:
+The CLI registers its default `PrintHandle`, which writes JSON Lines to stdout. Its command name remains `pikachu-cdc`. Start with `crates/pikachu/examples/config/multi-source.toml`. Each `[[sources]]` entry has its own `id`, `state_file`, `source`, and `tables`:
 
 ```sh
 cargo build --release --locked
-cp examples/config/multi-source.toml cdc.toml
+cp crates/pikachu/examples/config/multi-source.toml cdc.toml
 # Set each source's [[sources.tables]] to exact database and table names, respecting server case rules.
 export MYSQL_EAST_URL='mysql://cdc:password@east.example:3306'
 export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
@@ -158,7 +165,7 @@ These benchmarks measure direct Decoder calls and the EventParser + `dyn RowDeco
 
 The CLI flushes output, writes state, and fsyncs on every transaction. With many small transactions, persistence often costs more than decoding. For higher throughput, implement `TransactionSink` with batched durable storage and acknowledge the transaction before saving the checkpoint. Shared multi-source output takes one lock per transaction. Slow output applies backpressure without an unbounded message queue. Total transaction budgets are the sum of all source budgets, plus driver buffers and metadata. Source transport and version/row adapters dispatch per connection or event; sinks dispatch per transaction. Row callbacks keep borrowed types.
 
-The library's `Decoder::new(Vec<TableMeta>)` accepts whitelisted schemas in column order. `table_map(&[u8])` preprocesses mappings, and `rows(event_type, &[u8], callback)` delivers borrowed `Change` values. Inputs are event bodies with the 19-byte common header and checksum removed; the decoder does not assume full row images. Use `Change::into_owned()` when retaining changes beyond the input buffer's lifetime. Use `Processor` for commit handling, `source::mysql::MysqlSource` for real connections, and `Runtime` for multi-source execution. See `tests/integration/mysql_live.rs` for the live path.
+The library's `Decoder::new(Vec<TableMeta>)` accepts whitelisted schemas in column order. `table_map(&[u8])` preprocesses mappings, and `rows(event_type, &[u8], callback)` delivers borrowed `Change` values. Inputs are event bodies with the 19-byte common header and checksum removed; the decoder does not assume full row images. Use `Change::into_owned()` when retaining changes beyond the input buffer's lifetime. Use `Processor` for commit handling, `source::mysql::MysqlSource` for real connections, and `Runtime` for multi-source execution. See `crates/mysql-canal/tests/integration/mysql_live.rs` for the live path.
 
 ## Version adapters and plugins
 
@@ -189,7 +196,7 @@ Custom parsers use `RowsEvent::new(..., parse_images)` to provide a function ret
 The transport owns common binlog v4 framing: the 19-byte header, FDE bootstrap, and CRC32/NONE. The current MySQL driver also preparses FDE/TABLE_MAP/ROTATE, so it may reject vendor layout changes before they reach the adapter. Such cases need a custom `SourcePlugin` as well. Registering a `VersionAdapter` alone cannot bypass driver layout restrictions. Default Oracle MySQL adapters continue to enforce validated layouts rather than assuming unknown FDE length changes are safe.
 
 ```rust
-let mut runtime = mysql_canal::engine::Runtime::default();
+let mut runtime = mysql_cdc_rs::engine::Runtime::default();
 runtime.versions.register(std::sync::Arc::new(MyVersionAdapter))?;
 // runtime.sources.register(Arc::new(MySourcePlugin))?;
 runtime.run(config, false, sink)?;
@@ -215,7 +222,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Default tests cover event adaptation and zero-copy behavior, source thread isolation, identical table IDs with different column orders, source identity binding, independent checkpoints, sink failures, version selection, historical-file adapter selection, custom parsers/decoders, and registry conflicts. Independently constructed protocol bytes cover sign extension, sparse NULL images, multiple rows, key changes, long CHAR values, mixed skip types, more than 64 columns, table ID reuse, truncation, CRC32/NONE, transaction visibility, checkpoint ordering, and file locks. These are synthetic fixtures, not mysqlbinlog exports.
 
-GitHub Actions runs tests on Ubuntu with Rust 1.89.0 and stable, and macOS with stable, for PRs and pushes to main/master. It also runs formatting, Clippy, documentation, the MySQL matrix below, and crates.io package verification. Releases are triggered by `v<package.version>` tags after the full CI passes. All three packages share the same version. `release.yml` publishes `mysql-replication`, then `mysql-canal`, using the repository secret `CARGO_REGISTRY_TOKEN` for the libraries, then publishes `pikachu-rs` using GitHub OIDC Trusted Publishing. CI only verifies the workspace packages with `--dry-run` and requires no publishing credentials. See the [CI and publishing guide](docs/releasing.md) (Chinese).
+GitHub Actions runs tests on Ubuntu with Rust 1.89.0 and stable, and macOS with stable, for PRs and pushes to main/master. It also runs formatting, Clippy, documentation, the MySQL matrix below, and crates.io package verification. Releases are triggered by `v<package.version>` tags after the full CI passes. All four packages share the same version. `release.yml` publishes `mysql-replication`, then `mysql-canal`, then `mysql-cdc-rs`, using the repository secret `CARGO_REGISTRY_TOKEN` for the libraries, then publishes `pikachu` using GitHub OIDC Trusted Publishing. CI only verifies the workspace packages with `--dry-run` and requires no publishing credentials. See the [CI and publishing guide](docs/releasing.md) (Chinese).
 
 Run real-MySQL tests explicitly against a dedicated test server. The fixtures create and drop uniquely named databases:
 

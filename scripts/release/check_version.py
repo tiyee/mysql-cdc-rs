@@ -10,22 +10,31 @@ def validate_tag(manifest: Path, tag: str) -> str:
     with manifest.open("rb") as source:
         data = tomllib.load(source)
     package = data["package"]
-    if package["name"] != "pikachu-rs":
-        raise ValueError("release.yml publishes pikachu-rs; update it before renaming the crate")
+    if package["name"] != "pikachu":
+        raise ValueError("release.yml publishes pikachu; update it before renaming the crate")
     version = package["version"]
-    for name, parent, dependency_path in [
-        ("mysql-canal", manifest, "crates/mysql-canal"),
-        ("mysql-replication", manifest.parent / "crates/mysql-canal/Cargo.toml", "../mysql-replication"),
+    manifests = {"pikachu": manifest}
+    packages = {"pikachu": data}
+    for name, directory in [
+        ("mysql-canal", "mysql-canal"),
+        ("mysql-replication", "mysql-replication"),
+        ("mysql-cdc-rs", "mysql-cdc"),
     ]:
-        library_manifest = manifest.parent / "crates" / name / "Cargo.toml"
-        with library_manifest.open("rb") as source:
-            library = tomllib.load(source)["package"]
+        manifests[name] = manifest.parent.parent / directory / "Cargo.toml"
+        with manifests[name].open("rb") as source:
+            packages[name] = tomllib.load(source)
+        library = packages[name]["package"]
         if library["name"] != name or library["version"] != version:
-            raise ValueError(f"{name} and pikachu-rs must have matching release versions")
-        with parent.open("rb") as source:
-            dependency = tomllib.load(source)["dependencies"][name]
+            raise ValueError(f"{name} and pikachu must have matching release versions")
+    for parent, name, dependency_path in [
+        ("pikachu", "mysql-canal", "../mysql-canal"),
+        ("mysql-canal", "mysql-replication", "../mysql-replication"),
+        ("mysql-cdc-rs", "mysql-canal", "../mysql-canal"),
+        ("mysql-cdc-rs", "mysql-replication", "../mysql-replication"),
+    ]:
+        dependency = packages[parent]["dependencies"][name]
         if dependency.get("version") != f"={version}" or dependency.get("path") != dependency_path:
-            raise ValueError(f"{parent} must depend on the exact workspace {name} version")
+            raise ValueError(f"{manifests[parent]} must depend on the exact workspace {name} version")
     expected = f"v{version}"
     if tag != expected:
         raise ValueError(f"release tag {tag!r} does not match Cargo.toml; expected {expected!r}")
@@ -38,7 +47,7 @@ def main() -> int:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path(__file__).resolve().parents[2] / "Cargo.toml",
+        default=Path(__file__).resolve().parents[2] / "crates/pikachu/Cargo.toml",
     )
     args = parser.parse_args()
     try:
@@ -46,7 +55,7 @@ def main() -> int:
     except (OSError, ValueError, KeyError) as error:
         print(f"Release rejected: {error}", file=sys.stderr)
         return 1
-    print(f"Validated mysql-replication, mysql-canal and pikachu-rs {version}")
+    print(f"Validated mysql-replication, mysql-canal, mysql-cdc-rs and pikachu {version}")
     return 0
 
 

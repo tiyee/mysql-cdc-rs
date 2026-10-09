@@ -2,7 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-MySQL CDC conversion and committed transaction delivery, built on `mysql-replication`. The `pikachu-rs` package supplies the `pikachu-cdc` CLI and its default JSON Lines handler. This library has no default output.
+MySQL CDC conversion and committed transaction delivery, built on `mysql-replication`. The `pikachu` package supplies the `pikachu-cdc` CLI and its default JSON Lines handler. This library has no default output.
+
+For a single dependency covering CDC and raw replication, use `mysql-cdc-rs` (`mysql_cdc_rs`); this library is re-exported at its root and under `canal`.
 
 ```toml
 [dependencies]
@@ -33,7 +35,7 @@ Raw binlog events and CDC changes are separate types. `engine::converter::EventC
 
 CDC output contains only the source, schema/table, operation, exact primary key, optional previous key and changed column names. It supports single-column signed/unsigned integers, exact DECIMAL and supported CHAR/VARCHAR keys. INSERT/UPDATE changed fields follow the after-image bitmap, including NULL and primary-key writes; DELETE has no changed fields. Unsupported keys, missing keys, truncated data and metadata mismatches fail explicitly. ROW + MINIMAL is required by the built-in source. Table selection occurs before image parsing; only primary-key values are decoded, while other values are skipped by encoded length. UTF-8 keys and event views stay borrowed during conversion; field indices use shared `Arc<[u16]>`. The transport cannot reduce the columns already present in upstream binlog bytes.
 
-Use `Cdc::with_runtime` to register `SourcePlugin` or `VersionAdapter` implementations. `EventParser` handles event layout differences; `RowDecoder` handles field encodings. Each FDE selects its producer's adapter again, including historical files from before an upgrade. Built-in adapters cover validated MySQL 5.7, 8.0–8.4, 9.0 and 9.7 series. Unknown layouts, compressed transactions, XA, partial JSON and unregistered series are rejected. Real-server verification is separate from synthetic protocol tests. See [custom_version.rs](examples/custom_version.rs), [listen.rs](examples/listen.rs), and the [project guide](https://github.com/tiyee/pikachu-rs#readme) for the CLI, output contract and compatibility matrix.
+Use `Cdc::with_runtime` to register `SourcePlugin` or `VersionAdapter` implementations. `EventParser` handles event layout differences; `RowDecoder` handles field encodings. Each FDE selects its producer's adapter again, including historical files from before an upgrade. Built-in adapters cover validated MySQL 5.7, 8.0–8.4, 9.0 and 9.7 series. Unknown layouts, compressed transactions, XA, partial JSON and unregistered series are rejected. Real-server verification is separate from synthetic protocol tests. See [custom_version.rs](examples/custom_version.rs), [listen.rs](examples/listen.rs), and the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for the CLI, output contract and compatibility matrix.
 
 ```sh
 cargo test -p mysql-canal --locked

@@ -1,0 +1,27 @@
+[package]
+name = "mysql-cdc-rs"
+version = "0.0.3"
+edition = "2024"
+rust-version = "1.89"
+description = "Unified MySQL CDC and replication API over mysql-canal and mysql-replication"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/tiyee/mysql-cdc-rs"
+documentation = "https://docs.rs/mysql-cdc-rs"
+keywords = ["mysql", "cdc", "binlog", "replication"]
+categories = ["database"]
+publish = ["crates-io"]
+include = ["/src/**", "/examples/**", "/README.md", "/README.zh-CN.md", "/LICENSE", "!**/.DS_Store"]
+autoexamples = false
+
+[dependencies]
+mysql-canal = { path = "../mysql-canal", version = "=0.0.3" }
+mysql-replication = { path = "../mysql-replication", version = "=0.0.3" }
+
+[[example]]
+name = "cdc_listen"
+path = "examples/listen.rs"
+
+[[example]]
+name = "replication_dump_file"
+path = "examples/dump_file.rs"

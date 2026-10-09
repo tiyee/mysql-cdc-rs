@@ -10,26 +10,36 @@ class ReleaseTagTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.manifest = Path(self.directory.name) / "Cargo.toml"
+        self.manifest = Path(self.directory.name) / "crates/pikachu/Cargo.toml"
+        self.manifest.parent.mkdir(parents=True)
         self.write_package("0.0.1")
 
-    def write_package(self, version, name="pikachu-rs", library_version=None):
+    def write_package(self, version, name="pikachu", library_version=None):
         library_version = library_version or version
         self.manifest.write_text(
             f'[package]\nname = "{name}"\nversion = "{version}"\n'
-            '[dependencies]\nmysql-canal = { path = "crates/mysql-canal", '
+            '[dependencies]\nmysql-canal = { path = "../mysql-canal", '
             f'version = "={library_version}" }}\n', encoding="utf-8"
         )
-        self.library = self.manifest.parent / "crates/mysql-replication/Cargo.toml"
+        self.library = self.manifest.parent.parent / "mysql-replication/Cargo.toml"
         self.library.parent.mkdir(parents=True, exist_ok=True)
         self.library.write_text(
             f'[package]\nname = "mysql-replication"\nversion = "{library_version}"\n', encoding="utf-8"
         )
-        self.canal = self.manifest.parent / "crates/mysql-canal/Cargo.toml"
+        self.canal = self.manifest.parent.parent / "mysql-canal/Cargo.toml"
         self.canal.parent.mkdir(parents=True, exist_ok=True)
         self.canal.write_text(
             f'[package]\nname = "mysql-canal"\nversion = "{library_version}"\n'
             '[dependencies]\nmysql-replication = { path = "../mysql-replication", '
+            f'version = "={library_version}" }}\n', encoding="utf-8"
+        )
+        self.facade = self.manifest.parent.parent / "mysql-cdc/Cargo.toml"
+        self.facade.parent.mkdir(parents=True, exist_ok=True)
+        self.facade.write_text(
+            f'[package]\nname = "mysql-cdc-rs"\nversion = "{library_version}"\n'
+            '[dependencies]\nmysql-canal = { path = "../mysql-canal", '
+            f'version = "={library_version}" }}\n'
+            'mysql-replication = { path = "../mysql-replication", '
             f'version = "={library_version}" }}\n', encoding="utf-8"
         )
 
@@ -48,7 +58,7 @@ class ReleaseTagTests(unittest.TestCase):
             validate_tag(self.manifest, "v0.0.2")
 
     def test_renamed_package_is_rejected(self):
-        for name in ["another-crate", "pikachu-cdc"]:
+        for name in ["another-crate", "pikachu-cdc", "pikachu-rs"]:
             with self.subTest(name=name):
                 self.write_package("0.0.1", name=name)
                 with self.assertRaises(ValueError):
@@ -72,7 +82,7 @@ class ReleaseTagTests(unittest.TestCase):
 
     def test_cli_dependency_must_pin_the_workspace_library(self):
         for old, new in [('version = "=0.0.1"', 'version = "=0.0.2"'),
-                         ('path = "crates/mysql-canal"', 'path = "other"')]:
+                         ('path = "../mysql-canal"', 'path = "other"')]:
             with self.subTest(new=new):
                 self.write_package("0.0.1")
                 self.manifest.write_text(self.manifest.read_text().replace(old, new), encoding="utf-8")
@@ -97,6 +107,28 @@ class ReleaseTagTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             validate_tag(self.manifest, "v0.0.1")
 
+    def test_facade_identity_version_and_both_dependencies_are_checked(self):
+        for old, new in [
+            ('name = "mysql-cdc-rs"', 'name = "mysql-cdc"'),
+            ('version = "0.0.1"', 'version = "0.0.2"'),
+            ('path = "../mysql-canal"', 'path = "other"'),
+            ('path = "../mysql-replication"', 'path = "other"'),
+            ('mysql-canal = { path = "../mysql-canal", version = "=0.0.1"',
+             'mysql-canal = { path = "../mysql-canal", version = "0.0.1"'),
+            ('mysql-replication = { path = "../mysql-replication", version = "=0.0.1"',
+             'mysql-replication = { path = "../mysql-replication", version = "=0.0.2"'),
+        ]:
+            with self.subTest(new=new):
+                self.write_package("0.0.1")
+                self.facade.write_text(self.facade.read_text().replace(old, new), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    validate_tag(self.manifest, "v0.0.1")
+
+    def test_missing_facade_is_rejected(self):
+        self.facade.unlink()
+        with self.assertRaises(FileNotFoundError):
+            validate_tag(self.manifest, "v0.0.1")
+
 
 class ReleaseWorkflowTests(unittest.TestCase):
     def test_automatic_uploads_publish_library_then_cli_with_scoped_credentials(self):
@@ -115,7 +147,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                     self.assertIn("--package", command)
         self.assertEqual(
             [command[command.index("--package") + 1] for command in uploads],
-            ["mysql-replication", "mysql-canal", "pikachu-rs"],
+            ["mysql-replication", "mysql-canal", "mysql-cdc-rs", "pikachu"],
         )
         release = (workflows / "release.yml").read_text(encoding="utf-8")
         library = release.split("- name: Publish mysql-replication using an API token", 1)[1]
@@ -123,9 +155,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", library)
         self.assertIn("--package mysql-replication", library)
         self.assertIn("--package mysql-canal", library)
+        self.assertIn("--package mysql-cdc-rs", library)
         self.assertNotIn("secrets.CARGO_REGISTRY_TOKEN", remaining)
         self.assertIn("CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}", remaining)
-        self.assertIn("--package pikachu-rs", remaining)
+        self.assertIn("--package pikachu", remaining)
 
 
 if __name__ == "__main__":

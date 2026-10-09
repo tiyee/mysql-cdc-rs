@@ -4,6 +4,8 @@
 
 同步 MySQL 复制传输与借用 binlog 事件库。CDC 转换、白名单、历史 SQL schema、事务交付及持久化检查点属于上层 `mysql-canal` 公共库（导入路径 `mysql_canal`）。
 
+需要通过一个依赖同时使用原始复制与 CDC 时，可依赖 `mysql-cdc-rs`，通过 `mysql_cdc_rs::replication` 导入本库 API。
+
 ```toml
 [dependencies]
 mysql-replication = "0.0.3"

@@ -1,34 +1,7 @@
 [workspace]
-members = ["crates/mysql-replication", "crates/mysql-canal"]
-default-members = [".", "crates/mysql-replication", "crates/mysql-canal"]
+members = ["crates/mysql-replication", "crates/mysql-canal", "crates/mysql-cdc", "crates/pikachu"]
 resolver = "3"
-
-[package]
-name = "pikachu-rs"
-version = "0.0.3"
-edition = "2024"
-rust-version = "1.89"
-description = "MySQL CDC command line powered by mysql-canal"
-license = "MIT"
-readme = "README.md"
-repository = "https://github.com/tiyee/pikachu-rs"
-keywords = ["mysql", "cdc", "binlog", "replication"]
-categories = ["database", "command-line-utilities"]
-publish = ["crates-io"]
-include = ["/src/**", "/examples/**", "/tests/**", "/docs/**", "/Cargo.lock", "/README.md", "/README.zh-CN.md", "/LICENSE", "!**/.DS_Store"]
-autotests = false
-
-[dependencies]
-mysql-canal = { path = "crates/mysql-canal", version = "=0.0.3" }
-
-[dev-dependencies]
-serde_json = "1"
-crc32fast = "1"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-[[test]]
-name = "cli"
-path = "tests/integration/cli.rs"

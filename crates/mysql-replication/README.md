@@ -4,6 +4,8 @@ English | [简体中文](README.zh-CN.md)
 
 Synchronous MySQL replication transport and borrowed binlog events. CDC conversion, whitelists, historical SQL schema, transaction delivery and persistent checkpoints belong to the `mysql-canal` consumer library (`mysql_canal`).
 
+For a single dependency covering raw replication and CDC, use `mysql-cdc-rs` and import this API through `mysql_cdc_rs::replication`.
+
 ```toml
 [dependencies]
 mysql-replication = "0.0.3"
