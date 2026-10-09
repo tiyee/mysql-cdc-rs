@@ -22,7 +22,7 @@ examples/
 └── custom_version.rs     # 新版本适配器注册示例
 tests/
 ├── integration/          # CLI、协议、事务、多来源及实库集成测试
-├── support/              # 共享协议字节与元数据构造工具
+├── support/              # 共享协议构造工具、MySQL 实库 fixture
 └── infra/compose.yaml    # MySQL 实库测试环境
 benches/                  # 核心解码基准
 scripts/release/          # 发布 tag 校验与测试
@@ -192,11 +192,29 @@ GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、sta
 ```sh
 MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
-cargo test --test mysql_live -- --ignored --nocapture
+cargo test --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 docker compose -f tests/infra/compose.yaml down -v
 ```
 
-集成测试覆盖真实连接、schema 初始化、无符号最大整数、JSON/时间/DECIMAL/BIT/ENUM/SET 跳读、NULL、中文字符串主键、多行、主键变更、删除、排除表、回滚与 CRC 校验。同一测试通过正式 `SourcePlugin` / `VersionAdapter` 路径接入。替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql-compatibility.yml` 覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
+`mysql_live` 包含 11 个独立实库场景，均通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径读取服务器实际生成的 binlog；不使用合成事件替代实库变更。输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk 与 changed，缺失、额外或重复的事件都会失败。
+
+| 场景 | 校验内容 |
+| --- | --- |
+| 单行 INSERT / UPDATE / DELETE | 完整输出、只更新指定字段、写入 NULL、DELETE 的 changed 为空；同时跳过 JSON/时间/DECIMAL/BIT/ENUM/SET/BLOB 值 |
+| 多行操作 | 批量新增、批量更新、批量删除逐行核对；零匹配 UPDATE/DELETE 不输出 |
+| 整数主键 | TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT 的 signed/unsigned 边界及 NULL 跳读，包含 i64::MIN 与 u64::MAX |
+| 主键变更 | UTF-8（含 emoji）、CHAR、ASCII、latin1、DECIMAL、无符号整数的新旧主键；DECIMAL 保留 scale |
+| 宽表稀疏位图 | 80 列、主键在第 70 列、跨 64 位边界的 NULL 与非 NULL 更新 |
+| 白名单 | 同库排除表、其他库同名表、混合事务过滤、纯过滤事务仍推进位点 |
+| 实时事务消费 | 先启动阻塞 CDC，再执行混合行操作；处理 ROWS 后仍不输出、不保存位点，XID/COMMIT 后整批可见 |
+| 回滚 | INSERT/UPDATE/DELETE 全部回滚后无输出，后续提交仍可正常监控 |
+| 位点恢复 | 重新连接并读取磁盘 checkpoint，已提交事件不重发，新变更继续输出 |
+| 输出失败 | sink 拒绝提交时不推进磁盘位点，从原位点重连能完整重放 |
+| DDL 边界 | ALTER TABLE 明确失败停止，不使用旧 schema 继续输出，也不确认 DDL 后位点 |
+
+这些场景必须串行执行：fixture 创建/删除数据库会产生 DDL，而 CDC 对任何来源的 DDL 都会停止。每个 fixture 有独立 schema、复制 ID 和临时 state，结束或断言失败时尝试清理数据库与状态目录。
+
+替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql-compatibility.yml` 在每个版本上运行以上全部 11 个场景，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
 
 离线回放使用**和起点相匹配**的 state/schema；binlog 必须保留开头的 FORMAT_DESCRIPTION：
 
