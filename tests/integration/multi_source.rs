@@ -1,7 +1,7 @@
 #[path = "../support/mod.rs"]
 mod common;
 use common::*;
-use pikachu_cdc::{
+use pikachu_rs::{
     Error, OwnedChange, Result, TableMeta,
     config::{AppConfig, Config, SourceConfig, SourceEntry, WhitelistTable},
     engine::checkpoint::State,
@@ -414,7 +414,7 @@ impl VersionAdapter for Custom {
         if event.event_type == 200 {
             Ok(EventAction::Ignore)
         } else {
-            pikachu_cdc::protocol::mysql::version::classify_mysql_event(event)
+            pikachu_rs::protocol::mysql::version::classify_mysql_event(event)
         }
     }
     fn create_decoder(
@@ -424,13 +424,13 @@ impl VersionAdapter for Custom {
     ) -> Result<Box<dyn RowDecoder>> {
         self.created.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(CountingDecoder {
-            inner: pikachu_cdc::Decoder::new(tables)?,
+            inner: pikachu_rs::Decoder::new(tables)?,
             count: self.rows.clone(),
         }))
     }
 }
 struct CountingDecoder {
-    inner: pikachu_cdc::Decoder,
+    inner: pikachu_rs::Decoder,
     count: Arc<AtomicUsize>,
 }
 impl RowDecoder for CountingDecoder {
@@ -444,7 +444,7 @@ impl RowDecoder for CountingDecoder {
         &mut self,
         kind: u8,
         body: &[u8],
-        emit: &mut dyn FnMut(pikachu_cdc::Change<'_>) -> Result<()>,
+        emit: &mut dyn FnMut(pikachu_rs::Change<'_>) -> Result<()>,
     ) -> Result<()> {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.inner.rows(kind, body, emit)
@@ -711,7 +711,7 @@ fn capabilities_are_checked_per_source_with_absent_57_variables_allowed() {
     let mut sources = SourceRegistry::default();
     assert!(
         sources
-            .register(Arc::new(pikachu_cdc::source::MysqlSource))
+            .register(Arc::new(pikachu_rs::source::MysqlSource))
             .is_err()
     );
     assert!(sources.resolve("not-registered").is_err());
@@ -728,7 +728,7 @@ fn trait_object_row_decoder_preserves_borrowed_utf8_key() {
         columns: vec![key],
     };
     let mut decoder: Box<dyn RowDecoder> =
-        Box::new(pikachu_cdc::Decoder::new(vec![meta.clone()]).unwrap());
+        Box::new(pikachu_rs::Decoder::new(vec![meta.clone()]).unwrap());
     decoder
         .table_map(&table_map(7, &meta, &[15], &[100, 0]))
         .unwrap();
@@ -737,7 +737,7 @@ fn trait_object_row_decoder_preserves_borrowed_utf8_key() {
     decoder
         .rows(WRITE_ROWS_EVENT, &body, &mut |change| {
             match change.pk {
-                pikachu_cdc::PrimaryKey::Text(std::borrow::Cow::Borrowed(text)) => {
+                pikachu_rs::PrimaryKey::Text(std::borrow::Cow::Borrowed(text)) => {
                     assert_eq!(text, "hello");
                     assert_eq!(text.as_ptr(), body[body.len() - 5..].as_ptr());
                 }

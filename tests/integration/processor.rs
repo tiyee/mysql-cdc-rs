@@ -2,7 +2,7 @@
 mod common;
 const UNKNOWN_TEST_EVENT: u8 = 99;
 use common::*;
-use pikachu_cdc::{
+use pikachu_rs::{
     Error,
     engine::checkpoint::{State, StateLock},
     engine::processor::Processor,
@@ -20,7 +20,7 @@ fn feed(
     pos: u32,
     data: &[u8],
     out: &mut impl Write,
-) -> pikachu_cdc::Result<()> {
+) -> pikachu_rs::Result<()> {
     p.process(
         EventView {
             event_type: ty,

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-use pikachu_cdc::protocol::mysql::event_type as event;
-use pikachu_cdc::{
+use pikachu_rs::protocol::mysql::event_type as event;
+use pikachu_rs::{
     Error, Result,
     config::AppConfig,
     engine::{Processor, Runtime, checkpoint::State},

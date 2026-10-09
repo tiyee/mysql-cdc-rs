@@ -9,8 +9,8 @@ import tomllib
 def validate_tag(manifest: Path, tag: str) -> str:
     with manifest.open("rb") as source:
         package = tomllib.load(source)["package"]
-    if package["name"] != "pikachu-cdc":
-        raise ValueError("release.yml publishes pikachu-cdc; update it before renaming the crate")
+    if package["name"] != "pikachu-rs":
+        raise ValueError("release.yml publishes pikachu-rs; update it before renaming the crate")
     version = package["version"]
     expected = f"v{version}"
     if tag != expected:
@@ -32,7 +32,7 @@ def main() -> int:
     except (OSError, ValueError, KeyError) as error:
         print(f"Release rejected: {error}", file=sys.stderr)
         return 1
-    print(f"Validated pikachu-cdc {version}")
+    print(f"Validated pikachu-rs {version}")
     return 0
 
 

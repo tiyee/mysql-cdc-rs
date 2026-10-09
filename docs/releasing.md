@@ -1,6 +1,6 @@
 # CI 与 crates.io 发布
 
-公共 crate 名称为 `pikachu-cdc`，Rust 导入路径为 `pikachu_cdc`，仓库名仍为 `pikachu-rs`。同一个包包含库和 `pikachu-cdc` CLI。
+公共 crate 名称为 `pikachu-rs`，Rust 导入路径为 `pikachu_rs`，仓库名仍为 `pikachu-rs`。同一个包包含库和 `pikachu-cdc` CLI。
 
 ## CI 矩阵
 
@@ -12,7 +12,7 @@
 | Rust 测试 | Ubuntu / Rust 1.89.0、Ubuntu / stable、macOS / stable |
 | 目标编译 | 同一 Rust 矩阵检查库、CLI、示例和 benchmark |
 | 实库测试 | Ubuntu / MySQL 5.7、8.0、8.4 LTS、9.7 LTS，ROW + MINIMAL |
-| 发布包 | `cargo publish --dry-run --locked --registry crates-io --package pikachu-cdc` |
+| 发布包 | `cargo publish --dry-run --locked --registry crates-io --package pikachu-rs` |
 | 发布保护 | Python 测试验证 tag 必须精确匹配 Cargo 版本，包括预发布版本 |
 
 所有矩阵独立执行，单项失败不会取消其他项。`CI success` 汇总所有任务，可设为分支保护的必需检查。MySQL 矩阵由 `mysql-compatibility.yml` 统一维护，也可单独手动运行。当前运行时的位点持久化依赖 Unix 文件/目录同步语义，因此测试系统先覆盖 Linux 与 macOS。
@@ -25,7 +25,7 @@
 
 ## 首次配置
 
-1. 在 crates.io 创建账号，并生成有权发布 `pikachu-cdc` 的 API token。首次发布需要创建新 crate 的权限；后续发布需要对应 crate 的所有者权限。crate 名称是否可用以 crates.io 实际结果为准。
+1. 在 crates.io 创建账号，并生成有权发布 `pikachu-rs` 的 API token。首次发布需要创建新 crate 的权限；后续发布需要对应 crate 的所有者权限。crate 名称是否可用以 crates.io 实际结果为准。
 2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions → New repository secret** 添加 `CARGO_REGISTRY_TOKEN`，值为上面的 token，见 [GitHub secrets 文档](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)。此 token 只注入发布步骤，PR 与普通 CI 不需要它。
 3. 提交所有源码、`Cargo.lock` 和 `.github/workflows/`，先让主分支 CI 通过。
 
@@ -38,15 +38,15 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → `cargo publish --locked --registry crates-io --package pikachu-cdc`。缺少 token、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.2.0-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
+`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → `cargo publish --locked --registry crates-io --package pikachu-rs`。缺少 token、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.2.0-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
 
 发布成功后，使用方可添加：
 
 ```toml
 [dependencies]
-pikachu-cdc = "0.1"
+pikachu-rs = "0.1"
 ```
 
-发布入口为 [crates.io](https://crates.io/crates/pikachu-cdc)，API 文档入口为 [docs.rs](https://docs.rs/pikachu-cdc)。这些链接在首次发布成功后才可用。工作流本身不会创建 GitHub Release 或推送 Git tag。
+发布入口为 [crates.io](https://crates.io/crates/pikachu-rs)，API 文档入口为 [docs.rs](https://docs.rs/pikachu-rs)。这些链接在首次发布成功后才可用。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 发布任务临时网络失败时，可在 GitHub Actions 重跑失败任务；若该版本已成功上传，则不能重复发布同一版本，应先确认 crates.io 状态。修改内容需要增加版本号并使用新 tag。

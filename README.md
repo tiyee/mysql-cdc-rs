@@ -1,4 +1,4 @@
-# pikachu-cdc
+# pikachu-rs
 
 Rust MySQL CDC 库与命令行工具。只保留白名单表的**库名、表名、单列主键、变动字段名**，不构建整行值。内置 Oracle MySQL 5.7 / 8.0 / 8.1–8.4 / 9.0 / 9.7 的 `ROW + MINIMAL` 版本适配器，支持多个实例并行消费。已验证的范围是下述协议与模拟来源测试；实库兼容矩阵需单独运行。
 
@@ -33,6 +33,15 @@ docs/releasing.md         # CI 矩阵、crates.io 配置与发布步骤
 推荐通过 `engine`、`model`、`protocol::mysql`、`source` 模块接入。已有顶层 `decoder`、`version`、`processor`、`runtime`、`backend` 等导入路径保留为重新导出，命令行名称和 `cargo test --test mysql_live` 等测试命令保持兼容。
 
 ## 运行
+
+公共 crate 名为 `pikachu-rs`，Rust 导入路径为 `pikachu_rs`。发布后使用方可添加：
+
+```toml
+[dependencies]
+pikachu-rs = "0.1"
+```
+
+包内的命令行工具名为 `pikachu-cdc`。
 
 ```sh
 cargo build --release --locked
@@ -159,7 +168,7 @@ cargo bench --bench event_adapter
 共同的 binlog v4 帧（19 字节公共头、FDE 引导、CRC32/NONE）仍由传输层负责。当前 MySQL 驱动还会预解析 FDE/TABLE_MAP/ROTATE，因此改变这些结构的厂商版本可能在到达本层前就被驱动拒绝；这种情况需要同时实现 `SourcePlugin` 替换传输。仅注册 `VersionAdapter` 不保证能绕过驱动的布局限制。默认 Oracle MySQL 适配器仍严格校验已支持布局，不能把未知 FDE 的长度变化自动视为安全兼容。
 
 ```rust
-let mut runtime = pikachu_cdc::engine::Runtime::default();
+let mut runtime = pikachu_rs::engine::Runtime::default();
 runtime.versions.register(std::sync::Arc::new(MyVersionAdapter))?;
 // runtime.sources.register(Arc::new(MySourcePlugin))?;
 runtime.run(config, false, sink)?;

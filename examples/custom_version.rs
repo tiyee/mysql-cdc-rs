@@ -1,6 +1,6 @@
 //! Template only: replace series/version checks after validating the actual wire
 //! format. Registration does not certify compatibility with an untested server.
-use pikachu_cdc::{
+use pikachu_rs::{
     Result,
     config::AppConfig,
     engine::runtime::Runtime,

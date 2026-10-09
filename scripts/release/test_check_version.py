@@ -12,7 +12,7 @@ class ReleaseTagTests(unittest.TestCase):
         self.manifest = Path(self.directory.name) / "Cargo.toml"
         self.write_package("0.1.0")
 
-    def write_package(self, version, name="pikachu-cdc"):
+    def write_package(self, version, name="pikachu-rs"):
         self.manifest.write_text(
             f'[package]\nname = "{name}"\nversion = "{version}"\n', encoding="utf-8"
         )
@@ -32,9 +32,11 @@ class ReleaseTagTests(unittest.TestCase):
             validate_tag(self.manifest, "v0.2.0")
 
     def test_renamed_package_is_rejected(self):
-        self.write_package("0.1.0", name="another-crate")
-        with self.assertRaises(ValueError):
-            validate_tag(self.manifest, "v0.1.0")
+        for name in ["another-crate", "pikachu-cdc"]:
+            with self.subTest(name=name):
+                self.write_package("0.1.0", name=name)
+                with self.assertRaises(ValueError):
+                    validate_tag(self.manifest, "v0.1.0")
 
 
 if __name__ == "__main__":

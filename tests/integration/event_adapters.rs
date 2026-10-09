@@ -1,7 +1,7 @@
 #[path = "../support/mod.rs"]
 mod common;
 use common::*;
-use pikachu_cdc::{
+use pikachu_rs::{
     Decoder, Error, Operation, PrimaryKey, Result,
     engine::Processor,
     protocol::mysql::{

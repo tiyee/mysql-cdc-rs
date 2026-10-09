@@ -32,7 +32,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: Publish pikachu-cdc to crates.io
+    name: Publish pikachu-rs to crates.io
     needs: [version, ci]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -49,4 +49,4 @@ jobs:
             echo '::error::Configure the CARGO_REGISTRY_TOKEN repository secret before releasing.'
             exit 1
           fi
-          cargo publish --locked --registry crates-io --package pikachu-cdc
+          cargo publish --locked --registry crates-io --package pikachu-rs

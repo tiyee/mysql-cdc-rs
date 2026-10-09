@@ -1,7 +1,7 @@
 #[path = "../tests/support/mod.rs"]
 mod common;
 use common::*;
-use pikachu_cdc::{Decoder, PrimaryKey};
+use pikachu_rs::{Decoder, PrimaryKey};
 use std::{hint::black_box, time::Instant};
 
 fn main() {
