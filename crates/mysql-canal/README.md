@@ -6,7 +6,7 @@ MySQL CDC conversion and committed transaction delivery, built on `mysql-replica
 
 ```toml
 [dependencies]
-mysql-canal = "0.0.2"
+mysql-canal = "0.0.3"
 ```
 
 ```rust,no_run

@@ -57,22 +57,22 @@ cargo publish --locked --registry crates-io --package mysql-canal
 
 ## 发布版本
 
-同步修改根 `Cargo.toml`、`crates/mysql-canal/Cargo.toml` 与 `crates/mysql-replication/Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-canal`、canal 的 `mysql-replication` 精确依赖版本。执行 `cargo check --workspace` 更新 lockfile 并一同提交。版本保护脚本要求三个包同版、tag 精确匹配该版本，并验证库名称、依赖路径与版本；任一不匹配均拒绝发布。先让主分支 CI 通过，再推送与版本完全一致的新 tag。`pikachu-rs 0.0.1` 已完成首次发布。本次三个包统一为 `0.0.2`，对应标签为：
+同步修改根 `Cargo.toml`、`crates/mysql-canal/Cargo.toml` 与 `crates/mysql-replication/Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-canal`、canal 的 `mysql-replication` 精确依赖版本。执行 `cargo check --workspace` 更新 lockfile 并一同提交。版本保护脚本要求三个包同版、tag 精确匹配该版本，并验证库名称、依赖路径与版本；任一不匹配均拒绝发布。先让主分支 CI 通过，再推送与版本完全一致的新 tag。`pikachu-rs 0.0.1` 已完成首次发布。本次三个包统一为 `0.0.3`，对应标签为：
 
 ```sh
-git tag v0.0.2
-git push origin v0.0.2
+git tag v0.0.3
+git push origin v0.0.3
 ```
 
-`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → 使用仓库 secret token 发布 `mysql-replication` → 使用仓库 secret token 发布 `mysql-canal` → OIDC 认证 → `cargo publish --locked --registry crates-io --package pikachu-rs`。可信发布者未配置或不匹配、OIDC 认证失败、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.0.2-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
+`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → 使用仓库 secret token 发布 `mysql-replication` → 使用仓库 secret token 发布 `mysql-canal` → OIDC 认证 → `cargo publish --locked --registry crates-io --package pikachu-rs`。可信发布者未配置或不匹配、OIDC 认证失败、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.0.3-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
 
 发布成功后，使用方可添加：
 
 ```toml
 [dependencies]
-mysql-canal = "0.0.2"
+mysql-canal = "0.0.3"
 ```
 
-CDC 库入口为 [mysql-canal](https://crates.io/crates/mysql-canal)，API 文档为 [docs.rs](https://docs.rs/mysql-canal)。原始事件接入使用 [mysql-replication](https://crates.io/crates/mysql-replication)。CLI 使用 `cargo install pikachu-rs` 安装。本次库与 CLI 均使用 `0.0.2`；不能覆盖已发布的 `pikachu-rs 0.0.1`。工作流本身不会创建 GitHub Release 或推送 Git tag。
+CDC 库入口为 [mysql-canal](https://crates.io/crates/mysql-canal)，API 文档为 [docs.rs](https://docs.rs/mysql-canal)。原始事件接入使用 [mysql-replication](https://crates.io/crates/mysql-replication)。CLI 使用 `cargo install pikachu-rs` 安装。本次库与 CLI 均使用 `0.0.3`；不能覆盖已发布的 `pikachu-rs 0.0.1`。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 三个包发布不是原子操作。若部分包已上传而后续包失败，先确认各 crate 的实际状态，不要直接重跑整个发布 job 重复上传；可按依赖顺序恢复尚未发布的包。已成功上传的版本不能重复发布；修改内容需要同步增加三个包的版本号，并使用匹配的新 tag。

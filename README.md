@@ -43,7 +43,7 @@ Install the CLI with `cargo install pikachu-rs`. For CDC library integration, de
 
 ```toml
 [dependencies]
-mysql-canal = "0.0.2"
+mysql-canal = "0.0.3"
 ```
 
 ```rust,no_run

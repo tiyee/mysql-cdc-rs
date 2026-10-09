@@ -6,7 +6,7 @@ Synchronous MySQL replication transport and borrowed binlog events. CDC conversi
 
 ```toml
 [dependencies]
-mysql-replication = "0.0.2"
+mysql-replication = "0.0.3"
 ```
 
 ```rust,no_run
