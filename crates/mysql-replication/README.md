@@ -6,7 +6,7 @@ A reusable Rust MySQL CDC library with configuration-driven consumption and comm
 
 ```toml
 [dependencies]
-mysql-replication = "0.0.1"
+mysql-replication = "0.0.2"
 ```
 
 ```rust,no_run

@@ -5,7 +5,7 @@ resolver = "3"
 
 [package]
 name = "pikachu-rs"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.89"
 description = "MySQL CDC CLI powered by mysql-replication"
@@ -19,7 +19,7 @@ include = ["/src/**", "/examples/config/**", "/tests/**", "/docs/**", "/Cargo.lo
 autotests = false
 
 [dependencies]
-mysql-replication = { path = "crates/mysql-replication", version = "=0.0.1" }
+mysql-replication = { path = "crates/mysql-replication", version = "=0.0.2" }
 
 [dev-dependencies]
 serde_json = "1"

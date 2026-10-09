@@ -56,7 +56,7 @@ cargo publish --locked --registry crates-io --package mysql-replication
 
 ## 发布版本
 
-同步修改根 `Cargo.toml` 与 `crates/mysql-replication/Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-replication` 精确依赖版本。执行 `cargo check --workspace` 更新 lockfile 并一同提交。版本保护脚本要求两个包同版、tag 精确匹配该版本，并验证库名称、依赖路径与版本；任一不匹配均拒绝发布。先让主分支 CI 通过，再推送与版本完全一致的新 tag。`0.0.1` 已完成首次发布，例如下一版修改为 `0.0.2` 后：
+同步修改根 `Cargo.toml` 与 `crates/mysql-replication/Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-replication` 精确依赖版本。执行 `cargo check --workspace` 更新 lockfile 并一同提交。版本保护脚本要求两个包同版、tag 精确匹配该版本，并验证库名称、依赖路径与版本；任一不匹配均拒绝发布。先让主分支 CI 通过，再推送与版本完全一致的新 tag。`pikachu-rs 0.0.1` 已完成首次发布。本次两个包统一为 `0.0.2`，对应标签为：
 
 ```sh
 git tag v0.0.2
@@ -69,9 +69,9 @@ git push origin v0.0.2
 
 ```toml
 [dependencies]
-mysql-replication = "0.0.1"
+mysql-replication = "0.0.2"
 ```
 
-库入口为 [mysql-replication](https://crates.io/crates/mysql-replication)，API 文档为 [docs.rs](https://docs.rs/mysql-replication)。CLI 使用 `cargo install pikachu-rs` 安装。包拆分仍使用当前版本进行本地验证；实际发布须使用未发布的新版本，不能覆盖已发布的 `pikachu-rs 0.0.1`。工作流本身不会创建 GitHub Release 或推送 Git tag。
+库入口为 [mysql-replication](https://crates.io/crates/mysql-replication)，API 文档为 [docs.rs](https://docs.rs/mysql-replication)。CLI 使用 `cargo install pikachu-rs` 安装。本次库与 CLI 均使用 `0.0.2`；不能覆盖已发布的 `pikachu-rs 0.0.1`。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 两个包发布不是原子操作。若库已上传但 CLI 失败，先确认各 crate 的实际状态，不要直接重跑整个发布 job 重复上传库；可单独恢复尚未发布的 CLI。已成功上传的版本不能重复发布；修改内容需要同步增加两个包的版本号，并使用匹配的新 tag。
