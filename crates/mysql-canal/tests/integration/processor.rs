@@ -192,6 +192,67 @@ fn checkpoint_only_after_successful_output_flush() {
 }
 
 #[test]
+fn null_in_not_null_column_stops_without_output_or_checkpoint_advance() {
+    let path = temporary("not-null");
+    let mut initial = state();
+    initial.tables[0].columns[2].nullable = false;
+    initial.save(&path).unwrap();
+    let mut p = Processor::new(initial.clone(), Some(path.clone()), 1024 * 1024).unwrap();
+    let mut out = Vec::new();
+    feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &format(), &mut out).unwrap();
+    feed(&mut p, QUERY_EVENT, 150, &query("BEGIN"), &mut out).unwrap();
+    feed(
+        &mut p,
+        TABLE_MAP_EVENT,
+        200,
+        &table_map(1, &initial.tables[0], &[3, 15, 3], &[100, 0]),
+        &mut out,
+    )
+    .unwrap();
+    // Buffer one valid row, then encounter an invalid NULL in the same event.
+    let data = [0, 1, 0, 0, 0, 0, 7, 0, 0, 0, 0, 2, 0, 0, 0, 1];
+    let result = feed(
+        &mut p,
+        UPDATE_ROWS_EVENT,
+        250,
+        &rows(1, UPDATE_ROWS_EVENT, 3, &[1], &[4], &data),
+        &mut out,
+    );
+    assert!(matches!(result, Err(Error::Schema(message)) if message.contains("NOT NULL")));
+    assert!(out.is_empty());
+    assert!(matches!(p.finish(), Err(Error::Invalid(_))));
+    let saved = State::read(&path).unwrap();
+    assert_eq!(saved.file, initial.file);
+    assert_eq!(saved.position, initial.position);
+    assert_eq!(saved.tables, initial.tables);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn default_adapter_rejects_unvalidated_rotate_headers_without_saving_state() {
+    let path = temporary("rotate-layout");
+    let initial = state();
+    initial.save(&path).unwrap();
+    for length in [0, 7, 9, 12, 255] {
+        let mut fde = format();
+        fde[57 + usize::from(ROTATE_EVENT) - 1] = length;
+        let mut p = Processor::new(initial.clone(), Some(path.clone()), 1024 * 1024).unwrap();
+        let mut out = Vec::new();
+        let result = feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &fde, &mut out);
+        assert!(
+            matches!(result, Err(Error::Unsupported(message)) if message.contains("post-header")),
+            "ROTATE post-header {length} must fail"
+        );
+        assert!(out.is_empty());
+        assert_eq!(p.state().file, initial.file);
+        let saved = State::read(&path).unwrap();
+        assert_eq!(saved.file, initial.file);
+        assert_eq!(saved.position, initial.position);
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn rotation_changes_file_and_invalidates_maps() {
     let mut p = setup();
     let mut out = Vec::new();

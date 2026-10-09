@@ -61,13 +61,13 @@ impl BinlogParser {
                     Some(1) => ChecksumAlgorithm::Crc32,
                     _ => return Err(invalid("missing FDE checksum algorithm")),
                 };
-            let mut version = format.server_version.split('.');
-            let major = version.next().and_then(|s| s.parse::<u32>().ok());
-            let minor = version.next().and_then(|s| s.parse::<u32>().ok());
-            if !matches!(
-                (major, minor),
-                (Some(5), Some(7)) | (Some(8), Some(0..=4)) | (Some(9), Some(0 | 7))
-            ) {
+            let (major, minor, _) = crate::version::parse_server_version(format.server_version)?;
+            if format
+                .server_version
+                .to_ascii_lowercase()
+                .contains("mariadb")
+                || !matches!((major, minor), (5, 7) | (8, 0..=4) | (9, 0 | 7))
+            {
                 return Err(Error::Unsupported(format!(
                     "unregistered producer {}",
                     format.server_version

@@ -41,6 +41,7 @@ struct TablePlan {
 struct ReadColumn {
     op: ReadOp,
     is_pk: bool,
+    nullable: bool,
 }
 struct ImagePlan {
     columns: Vec<ReadColumn>,
@@ -53,6 +54,7 @@ impl ImagePlan {
                 .map(|i| ReadColumn {
                     op: table.columns[i],
                     is_pk: i == table.pk_index,
+                    nullable: table.meta.columns[i].nullable,
                 })
                 .collect(),
         }
@@ -68,6 +70,9 @@ impl ImagePlan {
             if bit(nulls, i) {
                 if col.is_pk {
                     return Err(Error::MissingPrimaryKey);
+                }
+                if !col.nullable {
+                    return Err(Error::Schema("NULL in a NOT NULL column".into()));
                 }
                 continue;
             }

@@ -140,7 +140,7 @@ GRANT RELOAD ON *.* TO 'cdc'@'127.0.0.1';
 
 拒绝联合主键、无主键、FLOAT/DOUBLE 主键、二进制主键、其他主键字符集。JSON 数字能表示 u64，但 JavaScript 消费方直接解析大整数会损失精度，应使用保留大整数的 JSON 解析器，或在自定义输出层转成字符串。
 
-非主键字段支持跳过整数、FLOAT/DOUBLE、DECIMAL、BIT、日期时间及其小数秒、CHAR/VARCHAR/BINARY/VARBINARY、ENUM/SET、BLOB/TEXT、JSON、空间类型、VECTOR。非主键值不解码，因此不会为 JSON/字符串/BLOB 内容分配对象。生成列、不可见列、旧 DECIMAL wire 类型和 typed array 明确报错，不推测布局。
+非主键字段支持跳过整数、FLOAT/DOUBLE、DECIMAL、BIT、日期时间及其小数秒、CHAR/VARCHAR/BINARY/VARBINARY、ENUM/SET、BLOB/TEXT、JSON、空间类型、VECTOR。非主键值不解码，因此不会为 JSON/字符串/BLOB 内容分配对象。NULL 位图仍按保存的 schema 校验：NOT NULL 列出现 NULL 时明确报错，不交付事务或持久化检查点。生成列、不可见列、旧 DECIMAL wire 类型和 typed array 明确报错，不推测布局。
 
 ## 性能设计
 
@@ -175,7 +175,7 @@ cargo bench -p mysql-canal --bench event_adapter
 | `RowDecoder` | 对统一视图进行 TABLE_MAP 预处理及 ROWS 解码，回调参数为借用的 `Change<'_>` |
 | `TransactionSink` | 一次接收来源 ID、提交 file/position 和整批轻量 `OwnedChange`，成功返回后才保存 state |
 
-`VersionRegistry` 内置 `mysql57`、`mysql80`、`mysql81`、`mysql82`、`mysql83`、`mysql84`、`mysql90`、`mysql97`。连接时按 `SELECT VERSION()` 选择适配器；每个日志文件按其 FDE 中的生产者版本重新选择，因此升级后仍能自动读取旧版日志。5.7/8.0–8.3 用 `SHOW MASTER STATUS`，8.4/9.0/9.7 用 `SHOW BINARY LOG STATUS`。除了版本号，还检查 ROW/MINIMAL、压缩/部分 JSON 开关、公共头和相关 post-header 长度。9.7 继续复用严格校验的 binlog v4 布局，参考 [MySQL 9.7.2 格式描述源码](https://raw.githubusercontent.com/mysql/mysql-server/mysql-9.7.2/libs/mysql/binlog/event/control_events.cpp)；实库兼容仍以 CI 结果为准。
+`VersionRegistry` 内置 `mysql57`、`mysql80`、`mysql81`、`mysql82`、`mysql83`、`mysql84`、`mysql90`、`mysql97`。连接时按 `SELECT VERSION()` 选择适配器；每个日志文件按其 FDE 中的生产者版本重新选择，因此升级后仍能自动读取旧版日志。5.7/8.0–8.3 用 `SHOW MASTER STATUS`，8.4/9.0/9.7 用 `SHOW BINARY LOG STATUS`。除了版本号，还检查 ROW/MINIMAL、压缩/部分 JSON 开关、公共头和相关 post-header 长度，ROTATE 必须精确为 8 字节。原始事件解析与 CDC 共用完整数字 `major.minor.patch` 语法，允许非空的 `-` 或 `+` 后缀；内置解析器与适配器拒绝 MariaDB 生产者标识。自定义适配器可明确校验其他布局。9.7 继续复用严格校验的 binlog v4 布局，参考 [MySQL 9.7.2 格式描述源码](https://raw.githubusercontent.com/mysql/mysql-server/mysql-9.7.2/libs/mysql/binlog/event/control_events.cpp)；实库兼容仍以 CI 结果为准。
 
 未注册的系列拒绝启动；不能仅因为 `major >= 5` 就推断兼容。MySQL 官方版本序列没有 5.8，5.7.8 则属于 5.7 系列，见 [MySQL 官方版本参考](https://downloads.mysql.com/docs/mysqld-version-reference-en.pdf)。如果“5.8”指厂商版本，需根据其真实版本和日志布局实现适配器。
 
@@ -216,7 +216,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 默认测试包括事件结构适配与零拷贝、多来源线程隔离、相同 table_id 不同列序、来源身份绑定、独立位点、输出失败、版本系列选择、旧文件重选适配器、自定义事件/行解码器与注册冲突；并使用独立构造的协议字节覆盖符号扩展、稀疏 NULL、多行与主键变更、长 CHAR、多种跳读类型、超过 64 列、table_id 复用、截断、CRC32/NONE、事务可见性、位点保存顺序与文件锁。它们不是 mysqlbinlog 导出的实库 fixture。
 
-GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、stable）与 macOS（stable）测试、格式/Clippy/文档检查、下面的 MySQL 实库矩阵及 crates.io 打包验证。四个包保持相同版本，推送 `v<package.version>` tag 且全部 CI 通过后，`release.yml` 先通过仓库 secret `CARGO_REGISTRY_TOKEN` 依次发布 `mysql-replication`、`mysql-canal` 和 `mysql-cdc-rs`（库的首次发布需要 API token），再通过 GitHub OIDC Trusted Publishing 发布 `pikachu`。CI 使用 `--dry-run` 验证 workspace 包，不上传任何包，也不需要发布凭据。完整步骤见 [CI 与发布说明](docs/releasing.md)。
+GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、stable）与 macOS（stable）测试、格式/Clippy/文档检查、下面的 MySQL 实库矩阵及 crates.io 打包验证。四个包保持相同版本，推送 `v<package.version>` tag 且全部 CI 通过后，`release.yml` 通过 GitHub OIDC Trusted Publishing 认证，按依赖顺序发布 `mysql-replication`、`mysql-canal`、`mysql-cdc-rs` 和 `pikachu`。四个包统一使用 `rust-lang/crates-io-auth-action@v1` 交换的短期 token，无需长期发布 secret；发布前须为每个 crate 分别配置可信发布者。CI 使用 `--dry-run` 验证 workspace 包，不上传任何包，也不需要发布凭据。完整步骤见 [CI 与发布说明](docs/releasing.md)。
 
 真实 MySQL 集成测试（显式执行，在独立测试服务上创建并删除唯一命名的测试库）：
 

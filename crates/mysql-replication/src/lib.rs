@@ -11,6 +11,7 @@ pub mod file;
 mod frame;
 pub mod parser;
 pub mod stream;
+pub mod version;
 mod wire;
 
 pub use error::{Error, Result};

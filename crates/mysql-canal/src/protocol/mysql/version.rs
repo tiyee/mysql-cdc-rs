@@ -14,21 +14,12 @@ pub struct ServerVersion {
 }
 impl ServerVersion {
     pub fn parse(raw: &str) -> Result<Self> {
-        let mut parts = raw.split('.');
-        let mut number = || -> Result<u32> {
-            let part = parts
-                .next()
-                .ok_or_else(|| invalid("incomplete server version"))?;
-            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-            digits
-                .parse()
-                .map_err(|_| invalid("invalid server version"))
-        };
+        let (major, minor, patch) = mysql_replication::version::parse_server_version(raw)?;
         Ok(Self {
             raw: raw.into(),
-            major: number()?,
-            minor: number()?,
-            patch: number()?,
+            major,
+            minor,
+            patch,
         })
     }
 }
@@ -293,6 +284,7 @@ pub fn validate_mysql_v4(format: &FormatDescription<'_>) -> Result<()> {
     }
     for (kind, length) in [
         (event::QUERY_EVENT, 13),
+        (event::ROTATE_EVENT, 8),
         (event::TABLE_MAP_EVENT, 8),
         (event::WRITE_ROWS_EVENT, 10),
         (event::UPDATE_ROWS_EVENT, 10),

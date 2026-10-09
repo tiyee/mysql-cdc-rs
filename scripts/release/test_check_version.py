@@ -131,7 +131,7 @@ class ReleaseTagTests(unittest.TestCase):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    def test_automatic_uploads_publish_library_then_cli_with_scoped_credentials(self):
+    def test_automatic_uploads_publish_libraries_then_cli_using_only_oidc(self):
         workflows = Path(__file__).resolve().parents[2] / ".github/workflows"
         uploads = []
         for workflow in workflows.glob("*.yml"):
@@ -150,15 +150,18 @@ class ReleaseWorkflowTests(unittest.TestCase):
             ["mysql-replication", "mysql-canal", "mysql-cdc-rs", "pikachu"],
         )
         release = (workflows / "release.yml").read_text(encoding="utf-8")
-        library = release.split("- name: Publish mysql-replication using an API token", 1)[1]
-        library, remaining = library.split("- name: Authenticate with crates.io using OIDC", 1)
-        self.assertIn("CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}", library)
-        self.assertIn("--package mysql-replication", library)
-        self.assertIn("--package mysql-canal", library)
-        self.assertIn("--package mysql-cdc-rs", library)
-        self.assertNotIn("secrets.CARGO_REGISTRY_TOKEN", remaining)
-        self.assertIn("CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}", remaining)
-        self.assertIn("--package pikachu", remaining)
+        self.assertNotIn("secrets.", release)
+        self.assertEqual(release.count("uses: rust-lang/crates-io-auth-action@v1"), 1)
+        self.assertLess(release.index("id: auth"), release.index("run: cargo publish "))
+        publish = release.split("\n  publish:\n", 1)[1]
+        self.assertIn("needs: [version, ci]", publish)
+        self.assertIn("id-token: write", publish)
+        self.assertNotIn("id-token: write", release.split("\n  publish:\n", 1)[0])
+        publish_steps = [step for step in publish.split("\n      - ") if "run: cargo publish " in step]
+        self.assertEqual(len(publish_steps), 4)
+        for step in publish_steps:
+            with self.subTest(step=step.splitlines()[0]):
+                self.assertIn("CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}", step)
 
 
 if __name__ == "__main__":

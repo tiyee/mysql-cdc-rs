@@ -305,6 +305,55 @@ fn owned_events_outlive_the_reader_without_self_references() {
     assert_eq!(format.server_version, "8.4.6");
 }
 #[test]
+fn producer_version_requires_complete_numbers_and_rejects_mariadb() {
+    for version in [
+        "8.4",
+        "8.4.",
+        "8.4.invalid",
+        "8x.4.6",
+        "8.4x.6",
+        "8.4.4294967296",
+        "8.4.6.1",
+        "8.4.6-",
+        "8.4.6 ",
+    ] {
+        let raw = frame(FORMAT_DESCRIPTION_EVENT, &format(version), false, 0);
+        let mut framing = FrameDecoder::new();
+        assert!(
+            matches!(
+                BinlogParser::default().parse(framing.decode(&raw).unwrap()),
+                Err(Error::Invalid(_))
+            ),
+            "malformed producer {version} must fail"
+        );
+    }
+    for version in ["5.7.44-MariaDB", "8.4.6-mArIaDb", "9.7.2-MariaDB"] {
+        let raw = frame(FORMAT_DESCRIPTION_EVENT, &format(version), false, 0);
+        let mut framing = FrameDecoder::new();
+        assert!(
+            matches!(BinlogParser::default().parse(framing.decode(&raw).unwrap()), Err(Error::Unsupported(message)) if message.contains(version)),
+            "unsupported producer {version} must fail"
+        );
+    }
+    for version in [
+        "5.7.44-log",
+        "8.0.45-0ubuntu0.24.04.1",
+        "8.4.6-commercial",
+        "9.7.2+build.1",
+    ] {
+        let raw = frame(FORMAT_DESCRIPTION_EVENT, &format(version), false, 0);
+        let mut framing = FrameDecoder::new();
+        let event = BinlogParser::default()
+            .parse(framing.decode(&raw).unwrap())
+            .unwrap();
+        let EventData::FormatDescription(description) = event.event else {
+            panic!("FDE expected")
+        };
+        assert_eq!(description.server_version, version);
+    }
+}
+
+#[test]
 fn framing_and_layout_failures_are_explicit() {
     let fde = frame(FORMAT_DESCRIPTION_EVENT, &format("8.4.6"), false, 0);
     let mut truncated = file_bytes(std::slice::from_ref(&fde));

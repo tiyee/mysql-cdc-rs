@@ -463,6 +463,38 @@ impl RowDecoder for CountingDecoder {
     }
 }
 #[test]
+fn server_versions_require_complete_numeric_components_and_preserve_suffixes() {
+    for (raw, expected) in [
+        ("5.7.44-log", (5, 7, 44)),
+        ("8.0.45-0ubuntu0.24.04.1", (8, 0, 45)),
+        ("8.4.6-commercial", (8, 4, 6)),
+        ("9.7.2+build.1", (9, 7, 2)),
+        ("9.1.0-vendor", (9, 1, 0)),
+    ] {
+        let version = ServerVersion::parse(raw).unwrap();
+        assert_eq!(version.raw, raw);
+        assert_eq!((version.major, version.minor, version.patch), expected);
+    }
+    for raw in [
+        "",
+        "8.4",
+        "8.4.",
+        "8.4.invalid",
+        "8x.4.6",
+        "8.4x.6",
+        "8.4.4294967296",
+        "8.4.6.1",
+        "8.4.6-",
+        "8.4.6 ",
+    ] {
+        assert!(
+            matches!(ServerVersion::parse(raw), Err(Error::Invalid(_))),
+            "malformed server version {raw} must fail"
+        );
+    }
+}
+
+#[test]
 fn version_profiles_validate_each_supported_series_and_reject_unknown_series() {
     let registry = VersionRegistry::default();
     for (version, name, query) in [

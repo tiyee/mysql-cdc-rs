@@ -37,6 +37,102 @@ fn minimal_update_and_null_are_sparse() {
 }
 
 #[test]
+fn not_null_columns_reject_null_in_sparse_insert_and_update_images() {
+    let meta = mysql_canal::TableMeta {
+        schema: "app".into(),
+        table: "wide".into(),
+        columns: (0..80)
+            .map(|i| {
+                let mut col = column(&format!("c{i}"), "int", i == 69);
+                if i == 79 {
+                    col.nullable = false;
+                }
+                col
+            })
+            .collect(),
+    };
+    let mut key_columns = [0; 10];
+    key_columns[8] = 1 << 5;
+    for ty in [
+        WRITE_ROWS_EVENT_V1,
+        WRITE_ROWS_EVENT,
+        UPDATE_ROWS_EVENT_V1,
+        UPDATE_ROWS_EVENT,
+    ] {
+        let insert = matches!(ty, WRITE_ROWS_EVENT_V1 | WRITE_ROWS_EVENT);
+        let mut present = [0; 10];
+        present[0] = 1;
+        present[9] = 1 << 7;
+        if insert {
+            present[8] = key_columns[8];
+        }
+        let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
+        decoder
+            .table_map(&table_map(1, &meta, &[3; 80], &[]))
+            .unwrap();
+        for invalid in [true, false] {
+            let mut data = Vec::new();
+            if !insert {
+                data.push(0);
+                data.extend(42i32.to_le_bytes());
+            }
+            // Sparse NULL ordinals: c0 is nullable, c79 is NOT NULL.
+            data.push(if invalid {
+                if insert { 0b101 } else { 0b11 }
+            } else {
+                1
+            });
+            if insert {
+                data.extend(42i32.to_le_bytes());
+            }
+            if !invalid {
+                data.extend(7i32.to_le_bytes());
+            }
+            let body = rows(
+                1,
+                ty,
+                80,
+                if insert { &present } else { &key_columns },
+                &present,
+                &data,
+            );
+            let mut changes = Vec::new();
+            let result = decoder.rows(ty, &body, |change| {
+                changes.push(change.into_owned());
+                Ok(())
+            });
+            if invalid {
+                assert!(
+                    matches!(result, Err(Error::Schema(message)) if message.contains("NOT NULL"))
+                );
+                assert!(changes.is_empty(), "invalid row emitted for event {ty}");
+            } else {
+                result.unwrap();
+                assert_eq!(changes.len(), 1);
+                assert_eq!(changes[0].pk, PrimaryKey::Signed(42));
+                assert_eq!(changes[0].previous_pk, None);
+                assert_eq!(
+                    changes[0].operation,
+                    if insert {
+                        Operation::Insert
+                    } else {
+                        Operation::Update
+                    }
+                );
+                assert_eq!(
+                    changes[0].changed_names().collect::<Vec<_>>(),
+                    if insert {
+                        vec!["c0", "c69", "c79"]
+                    } else {
+                        vec!["c0", "c79"]
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn multiple_rows_share_changed_indices_and_metadata() {
     let mut data = Vec::new();
     for id in [1i32, 2, 3] {
