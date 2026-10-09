@@ -185,7 +185,7 @@ cargo clippy --all-targets --locked -- -D warnings
 
 默认测试包括事件结构适配与零拷贝、多来源线程隔离、相同 table_id 不同列序、来源身份绑定、独立位点、输出失败、版本系列选择、旧文件重选适配器、自定义事件/行解码器与注册冲突；并使用独立构造的协议字节覆盖符号扩展、稀疏 NULL、多行与主键变更、长 CHAR、多种跳读类型、超过 64 列、table_id 复用、截断、CRC32/NONE、事务可见性、位点保存顺序与文件锁。它们不是 mysqlbinlog 导出的实库 fixture。
 
-GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、stable）与 macOS（stable）测试、格式/Clippy/文档检查、下面的 MySQL 实库矩阵及 crates.io 打包验证。发布推送 `v<package.version>` tag，全部 CI 通过后上传公共库；需要先配置 `CARGO_REGISTRY_TOKEN`。完整步骤见 [CI 与发布说明](docs/releasing.md)。
+GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、stable）与 macOS（stable）测试、格式/Clippy/文档检查、下面的 MySQL 实库矩阵及 crates.io 打包验证。发布推送 `v<package.version>` tag，全部 CI 通过后使用 GitHub OIDC Trusted Publishing 上传公共库；首次发布完成后，在 crates.io 配置本仓库与 `release.yml` 为可信发布者，无需保存长期 API token。完整步骤见 [CI 与发布说明](docs/releasing.md)。
 
 真实 MySQL 集成测试（显式执行，在独立测试服务上创建并删除唯一命名的测试库）：
 

@@ -23,22 +23,35 @@
 
 打包检查会从生成的 `.crate` 解包并编译，检查包内是否缺文件，但不会上传；参考 [Cargo 官方发布说明](https://doc.rust-lang.org/cargo/reference/publishing.html)。包包含源码、示例、测试、benchmark、文档、README、许可证与 lockfile；不包含工作流、本地 state 或凭据。
 
-## 首次配置
+## Trusted Publishing 配置
 
-1. 在 crates.io 创建账号，并生成有权发布 `pikachu-rs` 的 API token。首次发布需要创建新 crate 的权限；后续发布需要对应 crate 的所有者权限。crate 名称是否可用以 crates.io 实际结果为准。
-2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions → New repository secret** 添加 `CARGO_REGISTRY_TOKEN`，值为上面的 token，见 [GitHub secrets 文档](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)。此 token 只注入发布步骤，PR 与普通 CI 不需要它。
-3. 提交所有源码、`Cargo.lock` 和 `.github/workflows/`，先让主分支 CI 通过。
+首次发布完成后，后续版本使用 GitHub Actions OIDC Trusted Publishing，无需在 GitHub 保存长期 crates.io API token。首次创建 crate 仍需 API token；本流程用于已经发布的 `pikachu-rs`，依据 [crates.io 官方说明](https://crates.io/docs/trusted-publishing)。
+
+以 crate 所有者身份打开 [pikachu-rs 设置](https://crates.io/crates/pikachu-rs/settings)，在 **Trusted Publishing** 中添加 GitHub 发布者：
+
+| 字段 | 值 |
+| --- | --- |
+| Repository owner | `tiyee` |
+| Repository name | `pikachu-rs` |
+| Workflow filename | `release.yml`（只填文件名） |
+| Environment | 留空（当前发布 job 未指定 GitHub environment） |
+
+`release.yml` 只在 `publish` job 授予 `contents: read` 和 `id-token: write`，通过官方 [`rust-lang/crates-io-auth-action@v1`](https://github.com/rust-lang/crates-io-auth-action) 交换短期凭据。`cargo publish` 的 `CARGO_REGISTRY_TOKEN` 环境变量来自 `steps.auth.outputs.token`，不是仓库 secret；任务结束后 action 自动撤销该凭据。普通 CI 和版本检查没有 OIDC 写权限，也不需要发布凭据。
+
+可信发布者的仓库与 workflow 文件名必须匹配实际执行的流程。若以后指定 GitHub environment，必须同步设置 job 的 `environment` 与 crates.io 的对应字段。
+
+确认 Trusted Publishing 发布成功后，可以删除旧的 GitHub `CARGO_REGISTRY_TOKEN` secret，并撤销旧的专用 crates.io 发布 token。工作流已不读取该 secret，也不回退到长期 API token。
 
 ## 发布版本
 
-修改 `Cargo.toml` 的 `package.version`，执行 `cargo check --locked`；如果因根包版本变化要求更新 lockfile，则运行 `cargo check` 并一同提交生成的 `Cargo.lock`。提交该版本后推送与版本完全一致的 tag，例如当前 `0.0.1`：
+修改 `Cargo.toml` 的 `package.version`，执行 `cargo check --locked`；如果因根包版本变化要求更新 lockfile，则运行 `cargo check` 并一同提交生成的 `Cargo.lock`。先让主分支 CI 通过，再推送与版本完全一致的新 tag。`0.0.1` 已完成首次发布，例如下一版修改为 `0.0.2` 后：
 
 ```sh
-git tag v0.0.1
-git push origin v0.0.1
+git tag v0.0.2
+git push origin v0.0.2
 ```
 
-`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → `cargo publish --locked --registry crates-io --package pikachu-rs`。缺少 token、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.0.2-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
+`release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → OIDC 认证 → `cargo publish --locked --registry crates-io --package pikachu-rs`。可信发布者未配置或不匹配、OIDC 认证失败、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v0.0.2-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
 
 发布成功后，使用方可添加：
 
@@ -47,6 +60,6 @@ git push origin v0.0.1
 pikachu-rs = "0.0.1"
 ```
 
-发布入口为 [crates.io](https://crates.io/crates/pikachu-rs)，API 文档入口为 [docs.rs](https://docs.rs/pikachu-rs)。这些链接在首次发布成功后才可用。工作流本身不会创建 GitHub Release 或推送 Git tag。
+发布入口为 [crates.io](https://crates.io/crates/pikachu-rs)，API 文档入口为 [docs.rs](https://docs.rs/pikachu-rs)。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 发布任务临时网络失败时，可在 GitHub Actions 重跑失败任务；若该版本已成功上传，则不能重复发布同一版本，应先确认 crates.io 状态。修改内容需要增加版本号并使用新 tag。

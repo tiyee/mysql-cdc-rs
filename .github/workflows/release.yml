@@ -36,17 +36,18 @@ jobs:
     needs: [version, ci]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     env:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Authenticate with crates.io using OIDC
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
       - name: Publish verified package
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo '::error::Configure the CARGO_REGISTRY_TOKEN repository secret before releasing.'
-            exit 1
-          fi
-          cargo publish --locked --registry crates-io --package pikachu-rs
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked --registry crates-io --package pikachu-rs
