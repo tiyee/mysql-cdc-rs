@@ -8,7 +8,7 @@ For a single dependency covering CDC and raw replication, use `mysql-cdc-rs` (`m
 
 ```toml
 [dependencies]
-mysql-canal = "0.0.3"
+mysql-canal = "0.0.4"
 ```
 
 ```rust,no_run

@@ -48,7 +48,7 @@ CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不�
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "0.0.3"
+mysql-cdc-rs = "0.0.4"
 ```
 
 ```rust,no_run

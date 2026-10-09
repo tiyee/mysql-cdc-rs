@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-mysql-replication = "0.0.3"
+mysql-replication = "0.0.4"
 ```
 
 ```rust,no_run

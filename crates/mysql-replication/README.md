@@ -8,7 +8,7 @@ For a single dependency covering raw replication and CDC, use `mysql-cdc-rs` and
 
 ```toml
 [dependencies]
-mysql-replication = "0.0.3"
+mysql-replication = "0.0.4"
 ```
 
 ```rust,no_run

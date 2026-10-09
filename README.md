@@ -48,7 +48,7 @@ Build the CLI from this workspace with `cargo build --release --locked -p pikach
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "0.0.3"
+mysql-cdc-rs = "0.0.4"
 ```
 
 ```rust,no_run
