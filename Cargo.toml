@@ -11,7 +11,7 @@ documentation = "https://docs.rs/pikachu-rs"
 keywords = ["mysql", "cdc", "binlog", "replication"]
 categories = ["database", "command-line-utilities"]
 publish = ["crates-io"]
-include = ["/src/**", "/examples/**", "/tests/**", "/benches/**", "/docs/**", "/Cargo.lock", "/README.md", "/LICENSE", "!**/.DS_Store"]
+include = ["/src/**", "/examples/**", "/tests/**", "/benches/**", "/docs/**", "/Cargo.lock", "/README.md", "/README.zh-CN.md", "/LICENSE", "!**/.DS_Store"]
 autotests = false
 
 [dependencies]
