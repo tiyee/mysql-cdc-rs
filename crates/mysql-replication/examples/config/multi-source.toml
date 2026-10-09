@@ -1,0 +1,30 @@
+# Each entry is one upstream instance. Paths are relative to this file.
+# Export MYSQL_EAST_URL and MYSQL_WEST_URL before check/init/run.
+[[sources]]
+id = "east"
+state_file = "east-state.json"
+max_transaction_bytes = 67108864
+[sources.source]
+plugin = "mysql"
+url_env = "MYSQL_EAST_URL"
+server_id = 901001
+# adapter = "mysql57" # optional; auto-select from server/FDE version by default
+# tls_ca = "/path/to/ca.pem"
+[[sources.tables]]
+schema = "app"
+table = "users"
+[[sources.tables]]
+schema = "app"
+table = "orders"
+
+[[sources]]
+id = "west"
+state_file = "west-state.json"
+max_transaction_bytes = 67108864
+[sources.source]
+plugin = "mysql"
+url_env = "MYSQL_WEST_URL"
+server_id = 901002
+[[sources.tables]]
+schema = "app"
+table = "users"

@@ -67,7 +67,7 @@ fn offline_cli_replays_from_snapshot_boundary_and_rejects_truncation() {
     assert_eq!(change["pk"]["value"], 1);
     assert_eq!(change["source"], "east");
     assert_eq!(
-        pikachu_rs::engine::checkpoint::State::read(&state_path)
+        mysql_replication::engine::checkpoint::State::read(&state_path)
             .unwrap()
             .position,
         snapshot.position

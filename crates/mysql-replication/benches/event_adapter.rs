@@ -1,7 +1,7 @@
 #[path = "../tests/support/mod.rs"]
 mod common;
 use common::*;
-use pikachu_rs::{
+use mysql_replication::{
     PrimaryKey,
     protocol::mysql::{
         events::ParsedEvent,

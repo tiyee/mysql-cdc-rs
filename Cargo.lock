@@ -563,6 +563,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mysql-replication"
+version = "0.0.1"
+dependencies = [
+ "crc32fast",
+ "encoding_rs",
+ "fs2",
+ "mysql",
+ "mysql_common",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "mysql_common"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -654,14 +669,8 @@ name = "pikachu-rs"
 version = "0.0.1"
 dependencies = [
  "crc32fast",
- "encoding_rs",
- "fs2",
- "mysql",
- "mysql_common",
- "serde",
+ "mysql-replication",
  "serde_json",
- "thiserror",
- "toml",
 ]
 
 [[package]]

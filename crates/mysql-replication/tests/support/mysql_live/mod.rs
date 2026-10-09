@@ -1,6 +1,6 @@
 //! Shared real-MySQL setup. No protocol bytes are mocked here.
 use mysql::{Conn, prelude::Queryable};
-use pikachu_rs::{
+use mysql_replication::{
     Result,
     config::{Config, SourceConfig, WhitelistTable},
     engine::{checkpoint::State, processor::Processor},

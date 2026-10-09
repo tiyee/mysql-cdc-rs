@@ -1,7 +1,7 @@
 #[path = "../support/mod.rs"]
 mod common;
 use common::*;
-use pikachu_rs::{
+use mysql_replication::{
     Error, OwnedChange, Result, TableMeta,
     config::{AppConfig, Config, SourceConfig, SourceEntry, WhitelistTable},
     engine::checkpoint::State,
@@ -426,7 +426,7 @@ impl VersionAdapter for Custom {
         if event.event_type == 200 {
             Ok(EventAction::Ignore)
         } else {
-            pikachu_rs::protocol::mysql::version::classify_mysql_event(event)
+            mysql_replication::protocol::mysql::version::classify_mysql_event(event)
         }
     }
     fn create_decoder(
@@ -436,13 +436,13 @@ impl VersionAdapter for Custom {
     ) -> Result<Box<dyn RowDecoder>> {
         self.created.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(CountingDecoder {
-            inner: pikachu_rs::Decoder::new(tables)?,
+            inner: mysql_replication::Decoder::new(tables)?,
             count: self.rows.clone(),
         }))
     }
 }
 struct CountingDecoder {
-    inner: pikachu_rs::Decoder,
+    inner: mysql_replication::Decoder,
     count: Arc<AtomicUsize>,
 }
 impl RowDecoder for CountingDecoder {
@@ -456,7 +456,7 @@ impl RowDecoder for CountingDecoder {
         &mut self,
         kind: u8,
         body: &[u8],
-        emit: &mut dyn FnMut(pikachu_rs::Change<'_>) -> Result<()>,
+        emit: &mut dyn FnMut(mysql_replication::Change<'_>) -> Result<()>,
     ) -> Result<()> {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.inner.rows(kind, body, emit)
@@ -724,7 +724,7 @@ fn capabilities_are_checked_per_source_with_absent_57_variables_allowed() {
     let mut sources = SourceRegistry::default();
     assert!(
         sources
-            .register(Arc::new(pikachu_rs::source::MysqlSource))
+            .register(Arc::new(mysql_replication::source::MysqlSource))
             .is_err()
     );
     assert!(sources.resolve("not-registered").is_err());
@@ -741,7 +741,7 @@ fn trait_object_row_decoder_preserves_borrowed_utf8_key() {
         columns: vec![key],
     };
     let mut decoder: Box<dyn RowDecoder> =
-        Box::new(pikachu_rs::Decoder::new(vec![meta.clone()]).unwrap());
+        Box::new(mysql_replication::Decoder::new(vec![meta.clone()]).unwrap());
     decoder
         .table_map(&table_map(7, &meta, &[15], &[100, 0]))
         .unwrap();
@@ -750,7 +750,7 @@ fn trait_object_row_decoder_preserves_borrowed_utf8_key() {
     decoder
         .rows(WRITE_ROWS_EVENT, &body, &mut |change| {
             match change.pk {
-                pikachu_rs::PrimaryKey::Text(std::borrow::Cow::Borrowed(text)) => {
+                mysql_replication::PrimaryKey::Text(std::borrow::Cow::Borrowed(text)) => {
                     assert_eq!(text, "hello");
                     assert_eq!(text.as_ptr(), body[body.len() - 5..].as_ptr());
                 }
@@ -761,4 +761,259 @@ fn trait_object_row_decoder_preserves_borrowed_utf8_key() {
         })
         .unwrap();
     assert!(seen);
+}
+
+#[test]
+fn replication_delivers_converted_transactions_to_handles_before_checkpointing() {
+    use mysql_replication::{Event, Operation, PrimaryKey, Replication};
+    let temp = Temp::new();
+    let east = temp.config("east");
+    let west = temp.config("west");
+    let east_path = east.config.state_file.clone();
+    let west_path = west.config.state_file.clone();
+    let rt = runtime(FakePlugin {
+        barrier: Some(Arc::new(Barrier::new(2))),
+        same_uuid: false,
+        broken: false,
+    });
+    let mut replication = Replication::with_runtime(
+        AppConfig {
+            sources: vec![east, west],
+        },
+        rt,
+    )
+    .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    for handle in 0..2 {
+        let calls = Arc::clone(&calls);
+        let east_path = east_path.clone();
+        let west_path = west_path.clone();
+        replication.add_handle(move |event: Event<'_>| {
+            let east = event.source_id == "east";
+            assert_eq!(event.checkpoint.source_id, event.source_id);
+            assert_eq!(event.checkpoint.source_uuid, event.source_id);
+            assert_eq!(event.checkpoint.source_plugin, "fake");
+            assert_eq!(event.checkpoint.file, "binlog.000001");
+            assert_eq!(event.checkpoint.position, 240);
+            let path = if east { &east_path } else { &west_path };
+            assert_eq!(State::read(path)?.position, 4);
+            assert_eq!(event.changes.len(), 1);
+            let change = &event.changes[0];
+            assert_eq!(change.table.schema, "app");
+            assert_eq!(change.table.table, "users");
+            assert_eq!(change.operation, Operation::Update);
+            assert_eq!(change.pk, PrimaryKey::Signed(if east { 11 } else { 22 }));
+            assert_eq!(change.previous_pk, None);
+            assert_eq!(
+                change.changed_names().collect::<Vec<_>>(),
+                if east { vec!["name"] } else { vec!["age"] }
+            );
+            calls
+                .lock()
+                .unwrap()
+                .push((event.source_id.to_owned(), handle));
+            std::thread::yield_now();
+            Ok(())
+        });
+    }
+    replication.run_once().unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    for pair in calls.as_chunks::<2>().0 {
+        assert_eq!(pair[0].0, pair[1].0);
+        assert_eq!((pair[0].1, pair[1].1), (0, 1));
+    }
+    assert_ne!(calls[0].0, calls[2].0);
+    for path in [east_path, west_path] {
+        assert_eq!(State::read(&path).unwrap().position, 240);
+    }
+}
+
+#[test]
+fn replication_handle_failure_stops_fanout_and_preserves_checkpoint() {
+    use mysql_replication::{Event, Replication};
+    let temp = Temp::new();
+    let entry = temp.config("east");
+    let path = entry.config.state_file.clone();
+    let rt = runtime(FakePlugin {
+        barrier: None,
+        same_uuid: false,
+        broken: false,
+    });
+    let mut replication = Replication::with_runtime(
+        AppConfig {
+            sources: vec![entry],
+        },
+        rt,
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_calls = Arc::clone(&calls);
+    replication.add_handle(move |event: Event<'_>| {
+        assert_eq!(event.changes.len(), 1);
+        first_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    replication.add_handle(|_: Event<'_>| Err(Error::Sink("listener rejected transaction".into())));
+    let last_calls = Arc::clone(&calls);
+    replication.add_handle(move |_: Event<'_>| {
+        last_calls.fetch_add(100, Ordering::SeqCst);
+        Ok(())
+    });
+    let error = replication.run_once().unwrap_err();
+    assert!(
+        matches!(error, Error::Sources(ref message) if message.contains("east: sink failure: listener rejected transaction"))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(State::read(&path).unwrap().position, 4);
+}
+
+#[test]
+fn replication_requires_a_handle_before_initializing_any_state() {
+    use mysql_replication::Replication;
+    let temp = Temp::new();
+    let entry = temp.config("east");
+    let path = entry.config.state_file.clone();
+    let replication = Replication::new(AppConfig {
+        sources: vec![entry],
+    })
+    .unwrap();
+    assert!(
+        matches!(replication.run_once(), Err(Error::Sink(message)) if message == "register at least one event handler")
+    );
+    assert!(!path.exists());
+    assert!(!path.with_extension("json.lock").exists());
+}
+
+struct ScriptedPlugin(Vec<Packet>);
+impl SourcePlugin for ScriptedPlugin {
+    fn name(&self) -> &str {
+        "fake"
+    }
+    fn connect(
+        &self,
+        config: &Config,
+        registry: &VersionRegistry,
+    ) -> Result<Box<dyn SourceSession>> {
+        let session = FakePlugin {
+            barrier: None,
+            same_uuid: false,
+            broken: false,
+        }
+        .connect(config, registry)?;
+        Ok(Box::new(FakeSession {
+            info: session.info().clone(),
+            barrier: None,
+            packets: self.0.clone(),
+        }))
+    }
+}
+
+#[test]
+fn replication_handles_only_committed_events_and_rejects_incomplete_transactions() {
+    use mysql_replication::{Event, Replication};
+    for outcome in ["rollback", "truncated", "filtered"] {
+        let temp = Temp::new();
+        let entry = temp.config("east");
+        let path = entry.config.state_file.clone();
+        let mut script = packets("5.7.44-log", 11, false);
+        match outcome {
+            "rollback" => {
+                script[4] = Packet {
+                    kind: QUERY_EVENT,
+                    position: 240,
+                    body: query("ROLLBACK"),
+                }
+            }
+            "truncated" => {
+                script.pop();
+            }
+            "filtered" => {
+                let mut excluded = basic();
+                excluded.table = "excluded".into();
+                script[2].body = table_map(7, &excluded, &[3, 15, 3], &[100, 0]);
+            }
+            _ => unreachable!(),
+        }
+        let mut sources = SourceRegistry::empty();
+        sources.register(Arc::new(ScriptedPlugin(script))).unwrap();
+        let mut replication = Replication::with_runtime(
+            AppConfig {
+                sources: vec![entry],
+            },
+            Runtime {
+                sources,
+                versions: VersionRegistry::default(),
+            },
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle_calls = Arc::clone(&calls);
+        replication.add_handle(move |event: Event<'_>| {
+            assert!(event.changes.is_empty());
+            assert_eq!(event.source_id, "east");
+            assert_eq!(event.checkpoint.position, 240);
+            handle_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let result = replication.run_once();
+        if outcome == "truncated" {
+            assert!(
+                matches!(result, Err(Error::Sources(message)) if message.contains("stream ended inside a transaction"))
+            );
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            usize::from(outcome == "filtered"),
+            "{outcome}"
+        );
+        assert_eq!(
+            State::read(&path).unwrap().position,
+            if outcome == "truncated" { 4 } else { 240 },
+            "{outcome}"
+        );
+    }
+}
+
+#[test]
+fn replication_handle_failure_or_panic_prevents_peer_callbacks_and_checkpoints() {
+    use mysql_replication::{Event, Replication};
+    for panic in [false, true] {
+        let temp = Temp::new();
+        let east = temp.config("east");
+        let west = temp.config("west");
+        let paths = [
+            east.config.state_file.clone(),
+            west.config.state_file.clone(),
+        ];
+        let rt = runtime(FakePlugin {
+            barrier: Some(Arc::new(Barrier::new(2))),
+            same_uuid: false,
+            broken: false,
+        });
+        let mut replication = Replication::with_runtime(
+            AppConfig {
+                sources: vec![east, west],
+            },
+            rt,
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle_calls = Arc::clone(&calls);
+        replication.add_handle(move |_: Event<'_>| {
+            handle_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(!panic, "listener panic");
+            Err(Error::Sink("listener failure".into()))
+        });
+        let result = replication.run_once();
+        assert!(
+            matches!(result, Err(Error::Sources(ref message)) if message.contains(if panic { "source worker panicked" } else { "listener failure" }))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        for path in paths {
+            assert_eq!(State::read(&path).unwrap().position, 4);
+        }
+    }
 }

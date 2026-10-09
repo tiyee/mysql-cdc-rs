@@ -1,16 +1,14 @@
 #![forbid(unsafe_code)]
-use pikachu_rs::protocol::mysql::event_type as event;
-use pikachu_rs::{
-    Error, Result,
+mod print_handle;
+
+use mysql_replication::protocol::mysql::event_type as event;
+use mysql_replication::{
+    Error, Replication, Result,
     config::AppConfig,
-    engine::{Processor, Runtime, checkpoint::State},
+    engine::{Processor, checkpoint::State},
     protocol::mysql::file::BinlogFile,
-    sink::JsonLinesSink,
 };
-use std::{
-    io::{BufReader, BufWriter, Write},
-    path::Path,
-};
+use std::{io::BufReader, path::Path};
 
 fn main() {
     if let Err(error) = run() {
@@ -25,7 +23,6 @@ fn run() -> Result<()> {
         println!("{usage}");
         return Ok(());
     }
-    let mut output = BufWriter::with_capacity(256 * 1024, std::io::stdout());
     match args[1].as_str() {
         "replay" if args.len() == 4 => {
             let state = State::read(Path::new(&args[2]))?;
@@ -35,7 +32,7 @@ fn run() -> Result<()> {
                     "replay filename must match the state's binlog file".into(),
                 ));
             }
-            let sink = JsonLinesSink::new(&mut output);
+            let sink = print_handle::PrintHandle::new();
             let start = state.position;
             let mut processor = Processor::new(state, None, 64 * 1024 * 1024)?;
             let mut file = BinlogFile::new(BufReader::new(std::fs::File::open(path)?))?;
@@ -67,23 +64,21 @@ fn run() -> Result<()> {
         command @ ("check" | "init" | "run")
             if args.len() == 3 || command == "run" && args.len() == 4 && args[3] == "--once" =>
         {
-            let config = AppConfig::read(Path::new(&args[2]))?;
-            let runtime = Runtime::default();
+            let mut replication = Replication::new(AppConfig::read(Path::new(&args[2]))?)?;
             match command {
-                "check" => runtime.check(&config)?,
-                "init" => runtime.initialize(config)?,
-                _ => runtime.run(
-                    config,
-                    args.get(3).is_some_and(|a| a == "--once"),
-                    std::sync::Arc::new(JsonLinesSink::new(BufWriter::with_capacity(
-                        256 * 1024,
-                        std::io::stdout(),
-                    ))),
-                )?,
+                "check" => replication.check()?,
+                "init" => replication.initialize()?,
+                _ => {
+                    replication.add_handle(print_handle::PrintHandle::new());
+                    if args.get(3).is_some_and(|a| a == "--once") {
+                        replication.run_once()?;
+                    } else {
+                        replication.run()?;
+                    }
+                }
             }
         }
         _ => return Err(Error::Invalid(usage.into())),
     }
-    output.flush()?;
     Ok(())
 }

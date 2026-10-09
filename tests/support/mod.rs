@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-pub use pikachu_rs::protocol::mysql::event_type::*;
-use pikachu_rs::{ColumnMeta, TableMeta, engine::checkpoint::State};
+pub use mysql_replication::protocol::mysql::event_type::*;
+use mysql_replication::{ColumnMeta, TableMeta, engine::checkpoint::State};
 
 pub fn column(name: &str, ty: &str, pk: bool) -> ColumnMeta {
     ColumnMeta {

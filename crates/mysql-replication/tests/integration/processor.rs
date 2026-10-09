@@ -2,7 +2,7 @@
 mod common;
 const UNKNOWN_TEST_EVENT: u8 = 99;
 use common::*;
-use pikachu_rs::{
+use mysql_replication::{
     Error,
     engine::checkpoint::{State, StateLock},
     engine::processor::Processor,
@@ -20,7 +20,7 @@ fn feed(
     pos: u32,
     data: &[u8],
     out: &mut (impl Write + Send),
-) -> pikachu_rs::Result<()> {
+) -> mysql_replication::Result<()> {
     p.process(
         EventView {
             event_type: ty,

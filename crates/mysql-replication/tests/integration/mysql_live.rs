@@ -5,7 +5,7 @@ mod live;
 
 use live::{CapturedOutput, Fixture, expected};
 use mysql::prelude::Queryable;
-use pikachu_rs::{
+use mysql_replication::{
     Error, OwnedChange, Result,
     engine::checkpoint::State,
     protocol::mysql::event_type as event,

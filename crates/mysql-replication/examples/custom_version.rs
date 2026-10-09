@@ -1,14 +1,14 @@
 //! Template only: replace series/version checks after validating the actual wire
 //! format. Registration does not certify compatibility with an untested server.
-use pikachu_rs::{
-    Result,
+use mysql_replication::{
+    Event, Replication, Result,
     config::AppConfig,
     engine::runtime::Runtime,
     protocol::mysql::{
         events::{EventParser, MysqlEventParser},
         version::{FormatDescription, ServerVersion, VersionAdapter},
     },
-    sink::JsonLinesSink,
+    sink::{JsonLinesSink, TransactionSink},
 };
 use std::{io::BufWriter, path::Path, sync::Arc};
 struct CustomMysql;
@@ -37,14 +37,15 @@ impl VersionAdapter for CustomMysql {
 }
 fn main() -> Result<()> {
     let Some(path) = std::env::args().nth(1) else {
-        eprintln!("usage: cargo run --example custom_version -- CONFIG.toml");
+        eprintln!("usage: cargo run -p mysql-replication --example custom_version -- CONFIG.toml");
         return Ok(());
     };
     let mut runtime = Runtime::default();
     runtime.versions.register(Arc::new(CustomMysql))?;
-    runtime.run(
-        AppConfig::read(Path::new(&path))?,
-        false,
-        Arc::new(JsonLinesSink::new(BufWriter::new(std::io::stdout()))),
-    )
+    let mut replication = Replication::with_runtime(AppConfig::read(Path::new(&path))?, runtime)?;
+    let output = JsonLinesSink::new(BufWriter::new(std::io::stdout()));
+    replication.add_handle(move |event: Event<'_>| {
+        output.commit(event.source_id, event.checkpoint, event.changes)
+    });
+    replication.run()
 }

@@ -39,11 +39,11 @@ jobs:
         with:
           key: ${{ matrix.image }}
       - name: Compile integration test before starting MySQL
-        run: cargo test --test mysql_live --locked --no-run
+        run: cargo test -p mysql-replication --test mysql_live --locked --no-run
       - run: docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
       - name: Verify ROW/MINIMAL change monitoring scenarios
         # Schema setup/teardown emits DDL; do not run these fixtures concurrently.
-        run: cargo test --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+        run: cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
       - if: always()
         run: docker compose -f tests/infra/compose.yaml logs --no-color
       - if: always()

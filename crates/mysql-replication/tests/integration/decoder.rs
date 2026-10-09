@@ -1,10 +1,10 @@
 #[path = "../support/mod.rs"]
 mod common;
 use common::*;
-use pikachu_rs::{Decoder, Error, Operation, PrimaryKey};
+use mysql_replication::{Decoder, Error, Operation, PrimaryKey};
 use std::{borrow::Cow, sync::Arc};
 
-fn collect(ty: u8, data: &[u8]) -> Vec<pikachu_rs::OwnedChange> {
+fn collect(ty: u8, data: &[u8]) -> Vec<mysql_replication::OwnedChange> {
     let mut decoder = Decoder::new(vec![basic()]).unwrap();
     decoder
         .table_map(&table_map(7, &basic(), &[3, 15, 3], &[100, 0]))
@@ -105,7 +105,7 @@ fn insert_delete_v1_v2() {
 
 #[test]
 fn sparse_insert_after_column_64_uses_present_columns_and_compact_null_bits() {
-    let meta = pikachu_rs::TableMeta {
+    let meta = mysql_replication::TableMeta {
         schema: "app".into(),
         table: "wide".into(),
         columns: (0..80)
@@ -173,7 +173,7 @@ fn every_signed_and_unsigned_integer_width() {
             if unsigned {
                 col.column_type.push_str(" unsigned");
             }
-            let meta = pikachu_rs::TableMeta {
+            let meta = mysql_replication::TableMeta {
                 schema: "app".into(),
                 table: "keys".into(),
                 columns: vec![col],
@@ -254,7 +254,7 @@ fn decimal_key_is_exact() {
     let mut col = column("id", "decimal", true);
     col.numeric_precision = Some(10);
     col.numeric_scale = Some(2);
-    let meta = pikachu_rs::TableMeta {
+    let meta = mysql_replication::TableMeta {
         schema: "app".into(),
         table: "money".into(),
         columns: vec![col],
@@ -288,7 +288,7 @@ fn more_than_64_columns_and_pk_after_nulls() {
     let columns = (0..300)
         .map(|i| column(&format!("c{i}"), "int", i == 299))
         .collect();
-    let meta = pikachu_rs::TableMeta {
+    let meta = mysql_replication::TableMeta {
         schema: "app".into(),
         table: "wide".into(),
         columns,
@@ -360,7 +360,7 @@ fn skip_mixed_types_before_key_without_decoding_values() {
     cols.push(column("id", "bigint", true));
     types.push(8);
     values.extend(i64::MIN.to_le_bytes());
-    let meta = pikachu_rs::TableMeta {
+    let meta = mysql_replication::TableMeta {
         schema: "app".into(),
         table: "mixed".into(),
         columns: cols,
@@ -528,7 +528,7 @@ fn char_latin1_ascii_and_two_byte_string_prefix() {
         let mut key = column("id", ty, true);
         key.charset = Some(charset.into());
         key.octet_length = Some(300);
-        let meta = pikachu_rs::TableMeta {
+        let meta = mysql_replication::TableMeta {
             schema: "app".into(),
             table: "keys".into(),
             columns: vec![key],
@@ -573,7 +573,7 @@ fn decimal_groups_fractional_only_large_values_and_invalid_groups() {
         let mut key = column("id", "decimal", true);
         key.numeric_precision = Some((int.len() + frac.len()) as u32);
         key.numeric_scale = Some(frac.len() as u32);
-        let meta = pikachu_rs::TableMeta {
+        let meta = mysql_replication::TableMeta {
             schema: "app".into(),
             table: "keys".into(),
             columns: vec![key],
