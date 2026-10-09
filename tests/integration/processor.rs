@@ -114,6 +114,33 @@ fn incomplete_transaction_and_unsupported_events_stop() {
     .unwrap();
 }
 
+#[test]
+fn ddl_reports_statement_without_advancing_saved_checkpoint() {
+    let path = temporary("ddl");
+    state().save(&path).unwrap();
+    let mut p = Processor::new(state(), Some(path.clone()), 1024 * 1024).unwrap();
+    let mut out = Vec::new();
+    start(&mut p, &mut out);
+    feed(&mut p, XID_EVENT, 300, &[0; 8], &mut out).unwrap();
+    let checkpoint = State::read(&path).unwrap();
+    out.clear();
+
+    let sql = "ALTER TABLE app.users ADD COLUMN extra INT";
+    let error = feed(&mut p, QUERY_EVENT, 350, &query(sql), &mut out)
+        .expect_err("DDL must stop consumption");
+    assert!(
+        matches!(&error, Error::Statement(statement) if statement == sql),
+        "expected the DDL statement error, got {error:?}"
+    );
+    assert!(out.is_empty());
+    let saved = State::read(&path).unwrap();
+    assert_eq!(
+        (saved.file.as_str(), saved.position),
+        (checkpoint.file.as_str(), checkpoint.position)
+    );
+    fs::remove_file(path).unwrap();
+}
+
 struct FailFlush;
 impl Write for FailFlush {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {

@@ -295,11 +295,16 @@ fn mysql_wide_sparse_null_images_with_key_after_column_64() {
     fixture.sql("INSERT INTO wide (id,c0,c79) VALUES (-42,11,79)");
     fixture.sql("UPDATE wide SET c0=NULL, c65=65, c79=NULL WHERE id=-42");
     fixture.sql("DELETE FROM wide WHERE id=-42");
-    let names: Vec<_> = names.iter().map(String::as_str).collect();
     assert_eq!(
         fixture.collect(&fixture.initial).0,
         [
-            expected(&fixture.schema, "wide", "insert", key(-42), &names),
+            expected(
+                &fixture.schema,
+                "wide",
+                "insert",
+                key(-42),
+                &["c0", "id", "c79"]
+            ),
             expected(
                 &fixture.schema,
                 "wide",
@@ -531,10 +536,13 @@ fn mysql_ddl_stops_without_acknowledging_new_schema() {
     fixture.sql("UPDATE items SET extra=5 WHERE id=1");
     let output = CapturedOutput::default();
     let sink = JsonLinesSink::new(output.clone());
-    assert!(matches!(
-        fixture.consume(&checkpoint, &sink),
-        Err(Error::Unsupported(_))
-    ));
+    let error = fixture
+        .consume(&checkpoint, &sink)
+        .expect_err("ALTER TABLE must stop consumption");
+    assert!(
+        matches!(&error, Error::Statement(sql) if sql == "ALTER TABLE items ADD COLUMN extra INT"),
+        "expected the DDL statement error, got {error:?}"
+    );
     assert!(output.is_empty());
     let saved = fixture.saved();
     assert_eq!(

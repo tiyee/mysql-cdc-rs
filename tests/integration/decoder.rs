@@ -104,6 +104,62 @@ fn insert_delete_v1_v2() {
 }
 
 #[test]
+fn sparse_insert_after_column_64_uses_present_columns_and_compact_null_bits() {
+    let meta = pikachu_rs::TableMeta {
+        schema: "app".into(),
+        table: "wide".into(),
+        columns: (0..80)
+            .map(|i| {
+                if i == 69 {
+                    column("id", "bigint", true)
+                } else {
+                    column(&format!("c{i}"), "int", false)
+                }
+            })
+            .collect(),
+    };
+    let mut types = vec![3; 80];
+    types[69] = 8;
+    let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
+    decoder
+        .table_map(&table_map(1, &meta, &types, &[]))
+        .unwrap();
+    let mut present = [0; 10];
+    for index in [0, 69, 79] {
+        present[index / 8] |= 1 << (index % 8);
+    }
+    let mut data = vec![0];
+    data.extend(11i32.to_le_bytes());
+    data.extend((-42i64).to_le_bytes());
+    data.extend(79i32.to_le_bytes());
+    // Only three columns are present: bits 0 and 2 mark c0 and c79 NULL.
+    // The primary key is the second present column, despite its table ordinal.
+    data.push(0b101);
+    data.extend((-43i64).to_le_bytes());
+    let mut out = Vec::new();
+    decoder
+        .rows(
+            WRITE_ROWS_EVENT,
+            &rows(1, WRITE_ROWS_EVENT, 80, &present, &[], &data),
+            |change| {
+                out.push(change.into_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(out.len(), 2);
+    for (change, pk) in out.iter().zip([-42, -43]) {
+        assert_eq!(change.operation, Operation::Insert);
+        assert_eq!(change.pk, PrimaryKey::Signed(pk));
+        assert_eq!(
+            change.changed_names().collect::<Vec<_>>(),
+            ["c0", "id", "c79"]
+        );
+    }
+    assert!(Arc::ptr_eq(&out[0].changed, &out[1].changed));
+}
+
+#[test]
 fn every_signed_and_unsigned_integer_width() {
     for (sql, ty, n) in [
         ("tinyint", 1, 1),
