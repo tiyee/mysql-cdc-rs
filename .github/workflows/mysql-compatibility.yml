@@ -1,0 +1,48 @@
+name: MySQL compatibility
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  mysql:
+    name: MySQL ${{ matrix.series }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Historical baselines plus every released LTS series.
+        # Series tags follow patch updates; avoid `lts`, which drops older LTS lines.
+        include:
+          - series: "5.7"
+            image: mysql:5.7.44
+          - series: "8.0"
+            image: mysql:8.0
+          - series: "8.4"
+            image: mysql:8.4
+          - series: "9.7"
+            image: mysql:9.7
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+      MYSQL_IMAGE: ${{ matrix.image }}
+      CDC_TEST_MYSQL_SERIES: ${{ matrix.series }}
+      CDC_TEST_MYSQL_URL: mysql://root:cdc-test-only@127.0.0.1:13306
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.image }}
+      - name: Compile integration test before starting MySQL
+        run: cargo test --test mysql_live --locked --no-run
+      - run: docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
+      - run: cargo test --test mysql_live --locked -- --ignored --nocapture
+      - if: always()
+        run: docker compose -f tests/infra/compose.yaml logs --no-color
+      - if: always()
+        run: docker compose -f tests/infra/compose.yaml down -v
