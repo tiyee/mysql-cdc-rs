@@ -13,13 +13,13 @@
 | 代码质量 | stable Rust：rustfmt、Clippy（warnings 拒绝）、rustdoc（warnings 拒绝） |
 | Rust 测试 | Ubuntu / Rust 1.89.0、Ubuntu / stable、macOS / stable |
 | 目标编译 | 同一 Rust 矩阵检查库、CLI、示例和 benchmark |
-| 实库测试 | Ubuntu / MySQL 5.7、8.0、8.4 LTS、9.7 LTS，ROW + MINIMAL |
+| 实库测试 | Ubuntu / MySQL 5.7、8.0、8.4 LTS、9.7 LTS，分别运行 ROW + MINIMAL / FULL |
 | 发布包 | `cargo publish --workspace --dry-run --locked --registry crates-io` |
 | 发布保护 | Python 测试验证 tag 必须精确匹配 Cargo 版本，包括预发布版本 |
 
 所有矩阵独立执行，单项失败不会取消其他项。`CI success` 汇总所有任务，可设为分支保护的必需检查。MySQL 矩阵由 `mysql-compatibility.yml` 统一维护，也可单独手动运行。当前运行时的位点持久化依赖 Unix 文件/目录同步语义，因此测试系统先覆盖 Linux 与 macOS。
 
-每个 MySQL 版本先编译三层 `mysql_live`，再启动专用容器，按 `mysql-replication`（2 个）→ `mysql-canal`（12 个）→ `pikachu`（2 个）串行执行全部 16 个场景。复制库独立校验指定表主键预检和真实稀疏行镜像（精确值、NULL、借用字节及非选中表仍交付）；CLI 通过构建后的可执行文件校验 check/init/run、完整 JSON Lines、过滤、回滚、恢复不重复及 DDL/预检失败位点。Canal 校验 check/init 及首次/恢复消费的启动主键检测（包括无主键、只有 UNIQUE 索引、联合主键和不支持的类型/字符集，失败不写检查点）、单行/多行 INSERT、UPDATE、DELETE、NULL 稀疏字段、整数边界、字符串/DECIMAL/数值主键变更、80 列位图、跨库表白名单、实时提交可见性、回滚、位点恢复、sink 失败重放，以及 DDL 停止边界。测试实际执行 SQL 并逐条比较 CDC 输出，不仅检查是否能连接服务器。普通协议回归另行覆盖 NOT NULL 列的非法 NULL、未知 ROTATE post-header 长度、畸形生产者版本及 MariaDB 标识拒绝，并检查错误类别与磁盘检查点；原始行解码另有独立字节 fixture，覆盖 v1/v2、多行及 before/after 配对、稀疏位图、NULL、借用生命周期、整数边界、精确 DECIMAL 与畸形字段；`decode_rows` 示例随复制库打包。这些合成场景不计为实库验证。测试失败、少/多/重复输出或位点错误均阻止发布；完整覆盖表见 [README: Testing](../README.md#testing) 或[中文版“验证”](../README.zh-CN.md#验证)。
+每个 MySQL 版本分别以 MINIMAL 和 FULL 启动独立专用容器，通过 `CDC_TEST_ROW_IMAGE=minimal|full` 配置服务器及写入会话。先编译三层 `mysql_live`，再启动专用容器，按 `mysql-replication`（4 个）→ `mysql-canal`（12 个）→ `pikachu`（3 个）串行执行全部 19 个场景。复制库独立校验指定表主键预检、上游模式不匹配及跳过设置检查、真实稀疏/完整镜像、`next_view()` 泛型宽表多行增改删（精确值、紧凑 NULL 位图、借用字节、共享字段索引及非选中表仍交付）；CLI 通过构建后的可执行文件校验 check/init/run、完整 JSON Lines、过滤、回滚、恢复不重复及 DDL/预检失败位点。Canal 校验 check/init 及首次/恢复消费的启动主键检测（包括无主键、只有 UNIQUE 索引、联合主键和不支持的类型/字符集，失败不写检查点）、单行/多行 INSERT、UPDATE、DELETE、NULL 稀疏字段、整数边界、字符串/DECIMAL/数值主键变更、80 列位图、跨库表白名单、实时提交可见性、回滚、位点恢复、sink 失败重放，以及 DDL 停止边界。测试实际执行 SQL 并逐条比较 CDC 输出，不仅检查是否能连接服务器。普通协议回归另行覆盖 NOT NULL 列的非法 NULL、未知 ROTATE post-header 长度、畸形生产者版本及 MariaDB 标识拒绝，并检查错误类别与磁盘检查点；原始行解码另有独立字节 fixture，覆盖 v1/v2、多行及 before/after 配对、稀疏位图、NULL、借用生命周期、整数边界、精确 DECIMAL 与畸形字段；`decode_rows` 与 `decode_typed_rows` 示例随复制库打包，后者通过 `[[example]] test = true` 注册默认 workspace 测试，执行参数选择、完整输出、稀疏拒绝、映射边界及失败传播；编译失败文档测试验证模式隔离与借用生命周期。这些合成场景不计为实库验证。测试失败、少/多/重复输出或位点错误均阻止发布；完整覆盖表见 [README: Testing](../README.md#testing) 或[中文版“验证”](../README.zh-CN.md#验证)。
 
 截至 2026-10，MySQL 矩阵保留 5.7 与 8.0 历史基线，并覆盖其后全部已发布 LTS 系列 8.4、9.7，依据 [MySQL 官方版本说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)。5.7 固定最终版 `mysql:5.7.44`，其余分别使用 `mysql:8.0`、`mysql:8.4`、`mysql:9.7` 系列标签跟踪可用补丁；不用 `latest` 或 `lts` 替代显式系列。实际补丁版本会写入测试日志，并用 `CDC_TEST_MYSQL_SERIES` 校验镜像确实属于对应系列。新 LTS 系列发布时，在矩阵和 `VersionRegistry` 中同时增加对应项。9.0 是 Innovation 系列，适配器保留，但不列入 LTS CI 矩阵。
 
@@ -64,7 +64,9 @@ cargo publish --locked --registry crates-io --package pikachu
 
 ## 发布版本
 
-当前四个包的清单版本为 `1.0.0`，[`v1.0.0`](https://github.com/tiyee/mysql-cdc-rs/tree/v1.0.0) 已推送，指向版本提交 `edb1c72714e69c92cbf0ef412e77de3bdaacd85c`。不要重新创建、移动或强推该标签。标签存在不代表完整 CI 或 crates.io 上传成功；需分别查看 [Actions](https://github.com/tiyee/mysql-cdc-rs/actions) 和各 crate 的实际版本。
+当前四个包的清单版本为 `2.0.0`，尚未因本次修改创建标签或发布。2.0 增加公开配置字段 `SourceConfig::row_image`，Rust 结构体字面量须补充该字段，因此采用主版本升级；旧 TOML 默认 MINIMAL，旧构造函数及 v1 检查点保持原行为。FULL 的 `changed` 仍按 after-image 位图输出，不比较新旧字段值。自定义适配器须显式支持 FULL。
+
+历史标签 [`v1.0.0`](https://github.com/tiyee/mysql-cdc-rs/tree/v1.0.0) 已推送，指向版本提交 `edb1c72714e69c92cbf0ef412e77de3bdaacd85c`。不要重新创建、移动或强推该标签。标签存在不代表完整 CI 或 crates.io 上传成功；需分别查看 [Actions](https://github.com/tiyee/mysql-cdc-rs/actions) 和各 crate 的实际版本。
 
 后续版本按以下顺序准备：
 
@@ -117,10 +119,10 @@ git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}"
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "1.0.0"
+mysql-cdc-rs = "2.0.0"
 ```
 
-统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu --version 1.0.0 --locked` 安装，命令名为 `pikachu-cdc`。四个包清单版本均为 `1.0.0`；旧包 `pikachu-rs 0.0.1` 的记录不代表这些包已发布。工作流本身不会创建 GitHub Release 或推送 Git tag。
+统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu --version 2.0.0 --locked` 安装，命令名为 `pikachu-cdc`。四个包清单版本均为 `2.0.0`；旧包 `pikachu-rs 0.0.1` 的记录不代表这些包已发布。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 四个包发布不是原子操作。若部分包已上传而后续包失败，先确认各 crate 的实际状态，不要直接重跑整个发布 job 重复上传；可按依赖顺序恢复尚未发布的包。已成功上传的版本不能重复发布；修改内容需要同步增加四个包的版本号，并使用匹配的新 tag。
 

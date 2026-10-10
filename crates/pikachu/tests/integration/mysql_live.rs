@@ -1,6 +1,8 @@
 //! Real SQL through the CLI, including JSON output and persisted checkpoints.
 use mysql::{Conn, Opts, prelude::Queryable};
-use mysql_canal::{engine::checkpoint::State, protocol::mysql::version::ServerVersion};
+use mysql_canal::{
+    config::RowImageMode, engine::checkpoint::State, protocol::mysql::version::ServerVersion,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -54,11 +56,14 @@ impl Fixture {
             fixture.schema
         ));
         fixture.sql(&format!("USE `{}`", fixture.schema));
-        fixture.sql("SET SESSION binlog_format='ROW', binlog_row_image='MINIMAL'");
+        fixture.sql(&format!(
+            "SET SESSION binlog_format='ROW', binlog_row_image='{}'",
+            row_image_mode().server_value()
+        ));
         fixture.sql("CREATE TABLE items (id INT PRIMARY KEY, note VARCHAR(80)) ENGINE=InnoDB");
         fixture.sql("CREATE TABLE excluded (id INT) ENGINE=InnoDB");
         fs::write(&fixture.config, format!(
-            "[[sources]]\nid = 'cli-live'\nstate_file = 'state.json'\n[sources.source]\nurl_env = 'CDC_TEST_MYSQL_URL'\nserver_id = 903001\n[[sources.tables]]\nschema = '{}'\ntable = 'items'\n", fixture.schema
+            "[[sources]]\nid = 'cli-live'\nstate_file = 'state.json'\n[sources.source]\nurl_env = 'CDC_TEST_MYSQL_URL'\nserver_id = 903001\nrow_image = '{}'\n[[sources.tables]]\nschema = '{}'\ntable = 'items'\n", row_image_mode(), fixture.schema
         )).unwrap();
         fixture
     }
@@ -89,6 +94,11 @@ impl Fixture {
             .collect()
     }
     fn expected(&self, operation: &str, id: i32, changed: &[&str]) -> Value {
+        let changed = if row_image_mode() == RowImageMode::Full && operation != "delete" {
+            &["id", "note"]
+        } else {
+            changed
+        };
         json!({"source":"cli-live", "schema":self.schema, "table":"items", "operation":operation, "pk":{"type":"signed", "value":id}, "changed":changed})
     }
 }
@@ -218,4 +228,80 @@ fn mysql_cli_primary_key_errors_preserve_fresh_and_existing_state() {
             }
         }
     }
+}
+
+fn row_image_mode() -> RowImageMode {
+    std::env::var("CDC_TEST_ROW_IMAGE")
+        .unwrap_or_else(|_| "minimal".into())
+        .parse()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires dedicated MySQL; run with --ignored --test-threads=1"]
+fn mysql_cli_source_override_controls_preflight_and_decoder() {
+    let mut fixture = Fixture::new();
+    let requested = row_image_mode();
+    let opposite = if requested == RowImageMode::Full {
+        "minimal"
+    } else {
+        "full"
+    };
+    let config = fs::read_to_string(&fixture.config).unwrap().replace(
+        &format!("row_image = '{requested}'"),
+        &format!("row_image = '{opposite}'"),
+    );
+    fs::write(&fixture.config, config).unwrap();
+    let result = fixture.execute("check");
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("requires binlog_row_image="));
+    assert!(!fixture.state.exists());
+    let execute = |command: &str| {
+        let mut process = Command::new(env!("CARGO_BIN_EXE_pikachu-cdc"));
+        process
+            .arg(command)
+            .arg(&fixture.config)
+            .arg("--row-image")
+            .arg(format!("cli-live={requested}"));
+        if command == "run" {
+            process.arg("--once");
+        }
+        process.output().unwrap()
+    };
+    for command in ["check", "init"] {
+        let result = execute(command);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stdout.is_empty());
+    }
+    fixture.sql("INSERT INTO items VALUES (1,'old')");
+    fixture.sql("UPDATE items SET note=NULL WHERE id=1");
+    let result = Command::new(env!("CARGO_BIN_EXE_pikachu-cdc"))
+        .arg("run")
+        .arg(&fixture.config)
+        .args(["--once", "--row-image"])
+        .arg(format!("cli-live={requested}"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let actual: Vec<Value> = String::from_utf8(result.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            fixture.expected("insert", 1, &["id", "note"]),
+            fixture.expected("update", 1, &["note"])
+        ]
+    );
 }

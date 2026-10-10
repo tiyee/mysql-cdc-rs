@@ -15,8 +15,9 @@ pub use control::{
 pub use gtid::{GtidEvent, TaggedGtidEvent};
 pub use header::EventHeader;
 pub use rows::{
-    ColumnDefinition, ColumnType, DecimalValue, IntegerValue, Row, RowField, RowFields, RowImage,
-    RowImages, RowValue, Rows, RowsDecoder, RowsEvent, RowsKind,
+    ColumnDefinition, ColumnType, CompleteImage, DecimalValue, Full, ImageMode, IntegerValue,
+    Minimal, Row, RowField, RowFields, RowImage, RowImages, RowValue, Rows, RowsDecoder, RowsEvent,
+    RowsKind, SparseImage, TypedRow, TypedRows, TypedRowsDecoder, TypedRowsEvent,
 };
 use std::{fmt::Debug, io::Write};
 pub use table_map::{TableColumns, TableMapEvent};

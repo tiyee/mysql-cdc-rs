@@ -139,3 +139,64 @@ fn ddl_is_a_valid_protocol_event_and_an_explicit_cdc_error() {
         matches!(converter.convert_binlog(&event,&mut |_|panic!("DDL cannot emit CDC changes")),Err(Error::Statement(statement)) if statement=="ALTER TABLE app.users ADD note TEXT")
     );
 }
+
+#[test]
+fn full_converter_preserves_mode_across_fde_and_borrows_utf8_keys() {
+    use mysql_canal::{config::RowImageMode, protocol::mysql::file::EventView};
+    let mut table = basic();
+    table.columns[0] = column("id", "varchar", true);
+    table.columns[0].charset = Some("utf8mb4".into());
+    table.columns[0].octet_length = Some(100);
+    let mut converter = EventConverter::with_row_image(
+        vec![table.clone()],
+        VersionRegistry::default(),
+        None,
+        RowImageMode::Full,
+    );
+    for version in ["8.4.6", "5.7.44-log"] {
+        let mut fde = format();
+        fde[2..52].fill(0);
+        fde[2..2 + version.len()].copy_from_slice(version.as_bytes());
+        let view = |event_type, data| EventView {
+            event_type,
+            flags: 0,
+            log_pos: 0,
+            data,
+        };
+        converter
+            .convert(view(FORMAT_DESCRIPTION_EVENT, &fde), &mut |_| {
+                panic!("no change")
+            })
+            .unwrap();
+        let mapping = table_map(7, &table, &[15, 15, 3], &[100, 0, 100, 0]);
+        converter
+            .convert(view(TABLE_MAP_EVENT, &mapping), &mut |_| {
+                panic!("no change")
+            })
+            .unwrap();
+        let mut data = vec![0, 3];
+        data.extend(b"old");
+        data.extend([1, b'x']);
+        data.extend(20i32.to_le_bytes());
+        data.extend([2, 3]);
+        data.extend("新".as_bytes());
+        data.extend(20i32.to_le_bytes());
+        let body = rows(7, UPDATE_ROWS_EVENT, 3, &[7], &[7], &data);
+        let mut emitted = 0;
+        converter
+            .convert(view(UPDATE_ROWS_EVENT, &body), &mut |change| {
+                let PrimaryKey::Text(ref key) = change.pk else {
+                    panic!("text key expected")
+                };
+                assert!(matches!(key, std::borrow::Cow::Borrowed(_)));
+                assert_eq!(key.as_ref(), "新");
+                assert_eq!(key.as_ptr(), body[body.len() - 7..].as_ptr());
+                assert_eq!(change.previous_pk, Some(PrimaryKey::Text("old".into())));
+                assert_eq!(change.changed.as_ref(), &[0, 1, 2]);
+                emitted += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(emitted, 1);
+    }
+}

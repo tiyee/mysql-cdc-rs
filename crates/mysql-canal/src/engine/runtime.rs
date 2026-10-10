@@ -155,12 +155,13 @@ impl Runtime {
                         _lock,
                     } = prepared;
                     let result = (|| {
-                        let mut processor = Processor::with_registry(
+                        let mut processor = Processor::with_row_image(
                             state,
                             Some(entry.config.state_file.clone()),
                             entry.config.max_transaction_bytes,
                             registry,
                             entry.config.source.adapter.clone(),
+                            entry.config.source.row_image,
                         )?;
                         let mut stream = session.start(&entry.config, processor.state(), once)?;
                         while !cancelled.load(Ordering::Acquire) {

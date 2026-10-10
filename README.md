@@ -4,9 +4,9 @@ English | [简体中文](README.zh-CN.md)
 
 MySQL binlog consumption is organized into three layers: `mysql-replication` subscribes to and parses binlog events, with opt-in decoding of raw insert/update/delete row images; `mysql-canal` interprets selected row events as lightweight CDC changes and manages transactions and recovery; `pikachu` provides the `pikachu-cdc` CLI on top of `mysql-canal`. `mysql-cdc-rs` (`mysql_cdc_rs`) is a unified library entry point that re-exports both libraries.
 
-CDC keeps only the source and **database names, table names, single-column primary keys, and changed column names**, without materializing full rows. Ordinary SELECT reads do not produce CDC changes. Built-in `ROW + MINIMAL` adapters cover Oracle MySQL 5.7, 8.0, 8.1–8.4, 9.0 and 9.7, with concurrent consumption from multiple instances. Real-server compatibility tests must be run separately.
+CDC keeps only the source and **database names, table names, single-column primary keys, and changed column names**, without materializing full rows. Ordinary SELECT reads do not produce CDC changes. Built-in `ROW + MINIMAL / FULL` adapters cover Oracle MySQL 5.7, 8.0, 8.1–8.4, 9.0 and 9.7, with concurrent consumption from multiple instances. Real-server compatibility tests must be run separately.
 
-All four workspace packages use version **1.0.0**. Choose the package by the API you need:
+All four workspace packages use version **2.0.0**. Choose the package by the API you need:
 
 | Package | Entry point | Purpose |
 | --- | --- | --- |
@@ -68,17 +68,17 @@ docs/releasing.md        # CI and publishing guide (Chinese)
 
 Use `Cdc` for configuration-driven CDC and `TransactionHandler` for committed transactions. `mysql_cdc_rs::replication::BinlogEvent` describes one protocol event; `mysql_cdc_rs::CommittedTransaction` describes converted, committed changes. `engine::converter::EventConverter` explicitly converts binlog views into changes and transaction actions; `Processor` buffers the changes and delivers them only at commit. A QUERY containing DDL is valid in the replication layer; the CDC layer stops with `Error::Statement`.
 
-CDC uses the replication library's `next_view()` network path to borrow the driver body directly, without assembling a second raw buffer. Offline replay uses `next_frame()`. Both paths delay ROWS image parsing until table selection, decode only the primary key and skip other values by their encoded lengths. Table layout metadata is still required to locate fields safely. MINIMAL is checked against the upstream setting; replication cannot request individual columns from an existing binlog. See the [replication API](crates/mysql-replication/README.md) for raw events, parser configuration and transport limits.
+CDC uses the replication library's `next_view()` network path to borrow the driver body directly, without assembling a second raw buffer. Offline replay uses `next_frame()`. Both paths delay ROWS image parsing until table selection, decode only the primary key and skip other values by their encoded lengths. Table layout metadata is still required to locate fields safely. The selected row-image mode is checked against the upstream setting; replication cannot request individual columns from an existing binlog. See the [replication API](crates/mysql-replication/README.md) for raw events, parser configuration and transport limits.
 
 For opt-in raw row inspection, `mysql_replication::events::RowsDecoder` returns borrowed, sparse before/after images independently from the CDC path; see [row decoding](crates/mysql-replication/README.md#decoding-raw-row-images).
 
 ## Usage
 
-Build the CLI from this workspace with `cargo build --release --locked -p pikachu`; once the version is available on crates.io, install it with `cargo install pikachu --version 1.0.0 --locked`. For library integration, depend only on `mysql-cdc-rs`:
+Build the CLI from this workspace with `cargo build --release --locked -p pikachu`; once the version is available on crates.io, install it with `cargo install pikachu --version 2.0.0 --locked`. For library integration, depend only on `mysql-cdc-rs`:
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "1.0.0"
+mysql-cdc-rs = "2.0.0"
 ```
 
 ```rust,no_run
@@ -122,6 +122,20 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 | `pikachu-cdc run CONFIG.toml --once` | Consume currently available events and exit |
 | `pikachu-cdc replay STATE.json BINLOG_FILE` | Replay one local file using the saved historical schema without modifying state |
 
+Set `row_image = "minimal"` or `row_image = "full"` under each `[sources.source]`; omitted values default to `minimal`. Sources may use different modes. Online commands accept repeatable `--row-image SOURCE_ID=minimal|full` overrides, including with `run --once`. Replay accepts `--row-image minimal|full` and defaults to `minimal`:
+
+```sh
+./target/release/pikachu-cdc check cdc.toml --row-image east=full
+./target/release/pikachu-cdc run cdc.toml --once --row-image east=full --row-image west=minimal
+./target/release/pikachu-cdc replay east-state.json /path/to/binlog.000001 --row-image full
+```
+
+These options validate the input; they never change MySQL settings or request different bytes from an existing binlog. MINIMAL requires key-only UPDATE/DELETE before images for the supported single-key tables. FULL requires every column in each existing image. NOBLOB and automatic mode detection are not CDC options. Image bitmaps cannot always distinguish producer settings, for example on single-column tables.
+
+The v1 checkpoint format remains unchanged and does not store the image mode. Replay must select the mode appropriate for the historical file. A current GLOBAL setting does not describe historical logs. To switch modes, pause writers, consume through a commit boundary with the old mode, stop the consumer, update the server and writer sessions, then restart with the new mode. Do not reinitialize checkpoints to skip unconsumed data. Mixed historical modes can fail validation.
+
+Version 2 adds `SourceConfig::row_image`; Rust struct literals must supply `RowImageMode::Minimal` or `RowImageMode::Full` from `config`. Existing TOML files and `Decoder::new`, `EventConverter::new`, `Processor::new` / `with_registry` retain MINIMAL defaults. Explicit constructors use `with_row_image`. Custom version adapters must opt into FULL through `validate_server_with_row_image` and `create_decoder_with_row_image`; their defaults preserve MINIMAL and reject FULL.
+
 All configurations use the `[[sources]]` list, including deployments with just one named source. Each entry must explicitly specify an `id` and the credentials environment variable in `sources.source.url_env`. Source IDs and state paths must be distinct, and state parent directories must already exist. Subscriptions to the same upstream instance UUID must also use distinct replication `server_id` values. Different instances may reuse replication IDs, although assigning them centrally is easier to operate.
 
 Each source owns its thread, connection, schema, `table_id` mappings, transaction budget, and committed position. TABLE_MAP entries never cross source boundaries. There is no global transaction or global ordering across sources.
@@ -148,7 +162,7 @@ binlog-transaction-compression=OFF
 binlog-row-value-options=
 ```
 
-Writer connections must also use `ROW + MINIMAL`. Changing GLOBAL settings does not update SESSION settings on existing connections. The consumer checks global settings and rejects before images that do not meet MINIMAL expectations for whitelisted tables. The CDC `server_id` must be nonzero and differ from the upstream server and other replication consumers.
+Writer connections must use ROW and the configured MINIMAL or FULL image mode. Changing GLOBAL settings does not update SESSION settings on existing connections. The consumer checks global settings and validates whitelisted row images against the selected policy. The CDC `server_id` must be nonzero and differ from the upstream server and other replication consumers.
 
 Example permissions; an administrator should replace the address, password, and database:
 
@@ -172,7 +186,9 @@ Output contains one JSON object per line. Events from each source follow binlog 
 
 `source` is the stable source ID from configuration, distinguishing identical database/table/key combinations on different instances. `operation` is `insert`, `update`, or `delete`. When a primary key changes, `pk` holds the new value and `previous_pk` holds the old value. For INSERT, `changed` lists columns present in the after image. For DELETE, it is empty. For UPDATE, it lists columns in the after-image bitmap, including columns written as NULL and modified primary keys.
 
-**A "changed column" means a column recorded in the binlog after image; it does not guarantee that its value differs.** MINIMAL does not retain old non-key values, and columns specified by SQL may appear even when their values stay the same. The log alone cannot support a value-by-value comparison. See the [MySQL binlog_row_image documentation](https://dev.mysql.com/doc/refman/8.0/en/replication-options-binary-log.html) and [confirmed MySQL issue #83418](https://bugs.mysql.com/bug.php?id=83418).
+**In FULL mode, INSERT/UPDATE `changed` contains every after-image column, including unchanged values and the unchanged primary key. No before/after value comparison is performed.** The CDC output still contains no full row values.
+
+**A "changed column" means a column recorded in the binlog after image; it does not guarantee that its value differs.** MINIMAL does not retain old non-key values, and columns specified by SQL may appear even when their values stay the same. MINIMAL logs alone cannot support a value-by-value comparison. See the [MySQL binlog_row_image documentation](https://dev.mysql.com/doc/refman/8.0/en/replication-options-binary-log.html) and [confirmed MySQL issue #83418](https://bugs.mysql.com/bug.php?id=83418).
 
 Supported primary keys:
 
@@ -221,7 +237,7 @@ Plugins are linked at compile time and registered at runtime through object-safe
 
 `VersionRegistry` includes `mysql57`, `mysql80`, `mysql81`, `mysql82`, `mysql83`, `mysql84`, `mysql90`, and `mysql97`. Connections select an adapter using `SELECT VERSION()`. Each binlog file selects again from its FDE producer version, allowing recovery from logs written before a server upgrade. MySQL 5.7 and 8.0–8.3 use `SHOW MASTER STATUS`; 8.4, 9.0, and 9.7 use `SHOW BINARY LOG STATUS`.
 
-Adapters check ROW/MINIMAL settings, transaction compression and partial-JSON options, the common header, and relevant post-header lengths, including an exact 8-byte ROTATE post-header. Raw parsing and CDC use the same complete numeric `major.minor.patch` syntax, with optional nonempty `-` or `+` suffixes; built-in parsers and adapters reject MariaDB producer identifiers. Custom adapters may explicitly validate other layouts. The 9.7 adapter reuses strictly validated binlog v4 layouts; see the [MySQL 9.7.2 format description source](https://raw.githubusercontent.com/mysql/mysql-server/mysql-9.7.2/libs/mysql/binlog/event/control_events.cpp). Real-server compatibility remains subject to the CI matrix.
+Adapters check ROW and the selected MINIMAL/FULL settings, transaction compression and partial-JSON options, the common header, and relevant post-header lengths, including an exact 8-byte ROTATE post-header. Raw parsing and CDC use the same complete numeric `major.minor.patch` syntax, with optional nonempty `-` or `+` suffixes; built-in parsers and adapters reject MariaDB producer identifiers. Custom adapters may explicitly validate other layouts. The 9.7 adapter reuses strictly validated binlog v4 layouts; see the [MySQL 9.7.2 format description source](https://raw.githubusercontent.com/mysql/mysql-server/mysql-9.7.2/libs/mysql/binlog/event/control_events.cpp). Real-server compatibility remains subject to the CI matrix.
 
 Unregistered series are rejected. A condition such as `major >= 5` is not sufficient to establish compatibility. Oracle MySQL has no 5.8 series; 5.7.8 belongs to 5.7. See the [official version reference](https://downloads.mysql.com/docs/mysqld-version-reference-en.pdf). Vendor versions require adapters based on their actual versions and log layouts.
 
@@ -262,7 +278,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 ```
 
-Default tests cover event adaptation and zero-copy behavior, source thread isolation, identical table IDs with different column orders, source identity binding, independent checkpoints, sink failures, version selection, historical-file adapter selection, custom parsers/decoders, and registry conflicts. Independently constructed protocol bytes cover sign extension, sparse NULL images, multiple rows, key changes, long CHAR values, mixed skip types, more than 64 columns, table ID reuse, truncation, CRC32/NONE, transaction visibility, checkpoint ordering, and file locks. These are synthetic fixtures, not mysqlbinlog exports.
+Default tests cover event adaptation and zero-copy behavior, source thread isolation, identical table IDs with different column orders, source identity binding, independent checkpoints, sink failures, version selection, historical-file adapter selection, custom parsers/decoders, and registry conflicts. Independently constructed protocol bytes cover sign extension, sparse NULL images, multiple rows, key changes, long CHAR values, mixed skip types, more than 64 columns, table ID reuse, truncation, CRC32/NONE, transaction visibility, checkpoint ordering, and file locks. The registered `decode_typed_rows` example tests execute default/explicit mode selection, exact operation output, sparse rejection, table remapping and boundary clearing, truncated updates, and output failures on every Rust CI target. Compile-fail doctests check mode separation and borrowed image lifetimes. These are synthetic fixtures, not mysqlbinlog exports.
 
 GitHub Actions runs tests on Ubuntu with Rust 1.89.0 and stable, and macOS with stable, for PRs and pushes to main/master. It also runs formatting, Clippy, documentation, the MySQL matrix below, and crates.io package verification. Releases are triggered by `v<package.version>` tags after the full CI passes. All four packages share the same version. `release.yml` authenticates through GitHub OIDC Trusted Publishing and publishes `mysql-replication`, `mysql-canal`, `mysql-cdc-rs`, then `pikachu` in dependency order. All four packages use the temporary token from `rust-lang/crates-io-auth-action@v1`; no long-lived publishing secret is required. Configure the trusted publisher separately for each crate before releasing. CI only verifies the workspace packages with `--dry-run` and requires no publishing credentials. See the [CI and publishing guide](docs/releasing.md) (Chinese).
 
@@ -270,6 +286,7 @@ Run real-MySQL tests explicitly against a dedicated test server. The fixtures cr
 
 ```sh
 cargo test -p mysql-replication -p mysql-canal -p pikachu --test mysql_live --locked --no-run
+export CDC_TEST_ROW_IMAGE='minimal' # Use full to test FULL images.
 MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
 export CDC_TEST_MYSQL_SERIES='8.4'
@@ -279,17 +296,17 @@ cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test
 docker compose -f tests/infra/compose.yaml down -v
 ```
 
-Always run `down -v` after this dedicated test run, including when startup or tests fail. When switching the image, update `CDC_TEST_MYSQL_SERIES` to match and remove the old test volume first.
+Always run `down -v` after this dedicated test run, including when startup or tests fail. When switching the image or `CDC_TEST_ROW_IMAGE`, update the series/mode accordingly and remove the old test volume first. Both the server and writer sessions use the selected mode.
 
 Each processing layer has its own registered `mysql_live` test target. The MySQL matrix compiles all three before starting its disposable container, then runs them serially:
 
 | Package | Scenarios | Contract |
 | --- | --- | --- |
-| `mysql-replication` | 2 | Selected-table primary-key preflight and actual sparse raw images; exact values, NULL, key changes, borrowed bytes and delivery of unselected tables |
+| `mysql-replication` | 4 | Primary-key preflight, upstream mode mismatch/unchecked selection, raw and typed sparse/full images, borrowed `next_view()` decoding, wide multirow operations, exact values, NULL and delivery of unselected tables |
 | `mysql-canal` | 12 | CDC conversion, committed transactions, source startup validation and checkpoint recovery |
-| `pikachu` | 2 | Online `check`/`init`/`run --once`, complete JSON Lines, filtering, rollback, resume without duplicates, DDL and preflight failure checkpoints |
+| `pikachu` | 3 | Online `check`/`init`/`run --once`, complete JSON Lines, filtering, rollback, resume without duplicates, DDL and preflight failure checkpoints, source mode overrides |
 
-These 16 scenarios consume actual server-generated binlogs or query real metadata. Default workspace tests compile them but leave them ignored; synthetic events do not replace real mutations. Canal's 12 scenarios use the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. CDC assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
+These 19 scenarios consume actual server-generated binlogs or query real metadata. Default workspace tests compile them but leave them ignored; synthetic events do not replace real mutations. Canal's 12 scenarios use the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. CDC assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
 
 | Scenario | Checks |
 | --- | --- |
@@ -308,7 +325,7 @@ These 16 scenarios consume actual server-generated binlogs or query real metadat
 
 Run these scenarios serially: fixture creation and cleanup produce DDL, and the consumer stops on DDL in any database. Each fixture uses independent schemas, a replication ID, and temporary state, and attempts cleanup on completion or assertion failure.
 
-Set `MYSQL_IMAGE` to `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4`, or `mysql:9.7` to test each series. Remove the previous test volume before switching versions. `.github/workflows/mysql-compatibility.yml` runs all 16 scenarios across the three packages for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. Explicit series tags follow patch updates; the moving `lts` tag is not used. CI checks the actual server series and logs its patch version and selected CDC adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). Add both a matrix entry and a version adapter when supporting a new LTS series. Real-server tests require a Docker/MySQL environment.
+Set `MYSQL_IMAGE` to `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4`, or `mysql:9.7` to test each series. Remove the previous test volume before switching versions. `.github/workflows/mysql-compatibility.yml` runs all 19 scenarios in both MINIMAL and FULL modes across the three packages for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. Explicit series tags follow patch updates; the moving `lts` tag is not used. CI checks the actual server series and logs its patch version and selected CDC adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). Add both a matrix entry and a version adapter when supporting a new LTS series. Real-server tests require a Docker/MySQL environment.
 
 Offline replay requires a state/schema matching the starting position and a binlog retaining its initial FORMAT_DESCRIPTION:
 

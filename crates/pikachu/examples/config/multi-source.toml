@@ -9,6 +9,8 @@ max_transaction_bytes = 67108864
 plugin = "mysql"
 url_env = "MYSQL_EAST_URL"
 server_id = 901001
+# Use "full" when this source and its writer sessions log FULL images.
+row_image = "minimal"
 # adapter = "mysql57" # optional; auto-select from server/FDE version by default
 # tls_ca = "/path/to/ca.pem"
 [[sources.tables]]
@@ -26,6 +28,7 @@ max_transaction_bytes = 67108864
 plugin = "mysql"
 url_env = "MYSQL_WEST_URL"
 server_id = 901002
+row_image = "minimal"
 [[sources.tables]]
 schema = "app"
 table = "users"

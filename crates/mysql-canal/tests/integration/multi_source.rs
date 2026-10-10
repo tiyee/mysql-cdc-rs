@@ -49,6 +49,7 @@ impl Temp {
                 source: SourceConfig {
                     plugin: "fake".into(),
                     adapter: None,
+                    row_image: Default::default(),
                     url_env: id.into(),
                     server_id: 100,
                     tls_ca: None,
@@ -162,6 +163,17 @@ impl SourcePlugin for FakePlugin {
             version: version.clone(),
             adapter: adapter.name().into(),
         };
+        let mut source_packets = packets(&version.raw, if east { 11 } else { 22 }, !east);
+        if config.source.row_image == mysql_canal::config::RowImageMode::Full {
+            let mut values = Vec::new();
+            for _ in 0..2 {
+                values.push(0);
+                values.extend((if east { 11i32 } else { 20 }).to_le_bytes());
+                values.extend([1, b'x']);
+                values.extend((if east { 20i32 } else { 22 }).to_le_bytes());
+            }
+            source_packets[3].body = rows(7, UPDATE_ROWS_EVENT, 3, &[7], &[7], &values);
+        }
         Ok(Box::new(FakeSession {
             info,
             barrier: self.barrier.clone(),
@@ -172,7 +184,7 @@ impl SourcePlugin for FakePlugin {
                     body: vec![],
                 }]
             } else {
-                packets(&version.raw, if east { 11 } else { 22 }, !east)
+                source_packets
             },
         }))
     }
@@ -1050,4 +1062,131 @@ fn replication_handle_failure_or_panic_prevents_peer_callbacks_and_checkpoints()
             assert_eq!(State::read(&path).unwrap().position, 4);
         }
     }
+}
+
+#[test]
+fn config_defaults_to_minimal_and_accepts_only_supported_image_modes() {
+    use mysql_canal::config::RowImageMode;
+    let base = "url_env='DB_URL'\nserver_id=123\n";
+    let config: SourceConfig = toml::from_str(base).unwrap();
+    assert_eq!(config.row_image, RowImageMode::Minimal);
+    for (value, expected) in [
+        ("minimal", RowImageMode::Minimal),
+        ("full", RowImageMode::Full),
+    ] {
+        let config: SourceConfig = toml::from_str(&format!("{base}row_image='{value}'")).unwrap();
+        assert_eq!(config.row_image, expected);
+        assert_eq!(value.parse::<RowImageMode>().unwrap(), expected);
+    }
+    for value in ["auto", "noblob", "FULL", "", "full "] {
+        assert!(toml::from_str::<SourceConfig>(&format!("{base}row_image='{value}'")).is_err());
+        assert!(matches!(
+            value.parse::<RowImageMode>(),
+            Err(Error::Invalid(_))
+        ));
+    }
+}
+
+#[test]
+fn full_capabilities_are_opt_in_and_keep_other_safety_checks() {
+    use mysql_canal::config::RowImageMode;
+    let mut variables = std::collections::BTreeMap::from([
+        ("log_bin".into(), "ON".into()),
+        ("binlog_format".into(), "ROW".into()),
+        ("binlog_row_image".into(), "FULL".into()),
+        ("server_id".into(), "1".into()),
+    ]);
+    for version in ["5.7.44", "8.0.45", "8.4.6", "9.7.2"] {
+        let adapter = VersionRegistry::default()
+            .resolve(&ServerVersion::parse(version).unwrap(), None)
+            .unwrap();
+        adapter
+            .validate_server_with_row_image(&variables, 100, RowImageMode::Full)
+            .unwrap();
+        assert!(
+            matches!(adapter.validate_server_with_row_image(&variables, 100, RowImageMode::Minimal), Err(Error::Unsupported(message)) if message == "requires binlog_row_image=MINIMAL")
+        );
+        assert!(matches!(
+            adapter.validate_server_with_row_image(&variables, 1, RowImageMode::Full),
+            Err(Error::Schema(_))
+        ));
+        for (key, value) in [
+            ("binlog_row_image", "MINIMAL"),
+            ("binlog_row_image", "NOBLOB"),
+            ("binlog_format", "STATEMENT"),
+            ("binlog_transaction_compression", "ON"),
+            ("binlog_row_value_options", "PARTIAL_JSON"),
+        ] {
+            let mut invalid = variables.clone();
+            invalid.insert(key.into(), value.into());
+            assert!(matches!(
+                adapter.validate_server_with_row_image(&invalid, 100, RowImageMode::Full),
+                Err(Error::Unsupported(_))
+            ));
+        }
+    }
+    variables.insert("binlog_row_image".into(), "MINIMAL".into());
+    struct Legacy;
+    impl VersionAdapter for Legacy {
+        fn name(&self) -> &str {
+            "legacy"
+        }
+        fn supports(&self, _: &ServerVersion) -> bool {
+            true
+        }
+        fn status_query(&self) -> &str {
+            "SHOW MASTER STATUS"
+        }
+    }
+    Legacy
+        .validate_server_with_row_image(&variables, 100, RowImageMode::Minimal)
+        .unwrap();
+    assert!(
+        matches!(Legacy.validate_server_with_row_image(&variables, 100, RowImageMode::Full), Err(Error::Unsupported(message)) if message.contains("legacy"))
+    );
+    let fde = format();
+    let format = FormatDescription::parse(&fde).unwrap();
+    assert!(
+        matches!(Legacy.create_decoder_with_row_image(vec![basic()], &format, RowImageMode::Full), Err(Error::Unsupported(message)) if message.contains("legacy"))
+    );
+}
+
+#[test]
+fn concurrent_sources_select_full_and_minimal_independently() {
+    use mysql_canal::config::RowImageMode;
+    let temp = Temp::new();
+    let mut east = temp.config("east");
+    east.config.source.row_image = RowImageMode::Full;
+    let west = temp.config("west");
+    let east_path = east.config.state_file.clone();
+    let west_path = west.config.state_file.clone();
+    let output = SharedWriter::default();
+    let rt = runtime(FakePlugin {
+        barrier: Some(Arc::new(Barrier::new(2))),
+        same_uuid: false,
+        broken: false,
+    });
+    rt.run(
+        AppConfig {
+            sources: vec![east, west],
+        },
+        true,
+        Arc::new(JsonLinesSink::new(output.clone())),
+    )
+    .unwrap();
+    let mut changes: Vec<serde_json::Value> = String::from_utf8(output.0.lock().unwrap().clone())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    changes.sort_by_key(|change| change["source"].as_str().unwrap().to_owned());
+    assert_eq!(
+        changes,
+        vec![
+            serde_json::json!({"source":"east","schema":"app","table":"users","operation":"update","pk":{"type":"signed","value":11},"changed":["id","name","age"]}),
+            serde_json::json!({"source":"west","schema":"app","table":"users","operation":"update","pk":{"type":"signed","value":22},"changed":["age"]}),
+        ]
+    );
+    assert_eq!(State::read(&east_path).unwrap().position, 240);
+    assert_eq!(State::read(&west_path).unwrap().position, 240);
 }

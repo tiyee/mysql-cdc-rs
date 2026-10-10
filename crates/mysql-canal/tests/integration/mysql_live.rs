@@ -65,6 +65,7 @@ fn mysql_primary_key_preflight_stops_fresh_and_resumed_consumption() {
                                 tls_ca: fixture.config.source.tls_ca.clone(),
                                 plugin: fixture.config.source.plugin.clone(),
                                 adapter: fixture.config.source.adapter.clone(),
+                                row_image: fixture.config.source.row_image,
                             },
                             state_file: fixture.config.state_file.clone(),
                             max_transaction_bytes: fixture.config.max_transaction_bytes,
@@ -129,7 +130,7 @@ fn mysql_insert_update_delete_assert_complete_changes() {
         changes,
         [
             expected(
-                &fixture.schema,
+                &fixture,
                 "users",
                 "insert",
                 pk.clone(),
@@ -145,14 +146,8 @@ fn mysql_insert_update_delete_assert_complete_changes() {
                     "raw_data"
                 ]
             ),
-            expected(
-                &fixture.schema,
-                "users",
-                "update",
-                pk.clone(),
-                &["name", "body"]
-            ),
-            expected(&fixture.schema, "users", "delete", pk, &[]),
+            expected(&fixture, "users", "update", pk.clone(), &["name", "body"]),
+            expected(&fixture, "users", "delete", pk, &[]),
         ]
     );
 }
@@ -166,7 +161,7 @@ fn mysql_multi_row_insert_update_delete_and_zero_matches() {
     live::assert_unordered(
         changes,
         (1..=3)
-            .map(|id| expected(&fixture.schema, "items", "insert", key(id), &["id", "note"]))
+            .map(|id| expected(&fixture, "items", "insert", key(id), &["id", "note"]))
             .collect(),
     );
     fixture.sql("UPDATE items SET note=NULL WHERE id IN (1,3)");
@@ -174,7 +169,7 @@ fn mysql_multi_row_insert_update_delete_and_zero_matches() {
     live::assert_unordered(
         changes,
         [1, 3]
-            .map(|id| expected(&fixture.schema, "items", "update", key(id), &["note"]))
+            .map(|id| expected(&fixture, "items", "update", key(id), &["note"]))
             .to_vec(),
     );
     fixture.sql("DELETE FROM items WHERE id IN (1,2,3)");
@@ -182,7 +177,7 @@ fn mysql_multi_row_insert_update_delete_and_zero_matches() {
     live::assert_unordered(
         changes,
         (1..=3)
-            .map(|id| expected(&fixture.schema, "items", "delete", key(id), &[]))
+            .map(|id| expected(&fixture, "items", "delete", key(id), &[]))
             .collect(),
     );
     fixture.sql("UPDATE items SET note='absent' WHERE id=999");
@@ -249,22 +244,10 @@ fn mysql_all_integer_key_widths_and_signed_unsigned_boundaries() {
         let min_pk = json!({"type": kind, "value": minimum});
         let max_pk = json!({"type": kind, "value": maximum});
         wanted.extend([
-            expected(
-                &fixture.schema,
-                table,
-                "insert",
-                min_pk.clone(),
-                &["note", "id"],
-            ),
-            expected(
-                &fixture.schema,
-                table,
-                "insert",
-                max_pk.clone(),
-                &["note", "id"],
-            ),
-            expected(&fixture.schema, table, "update", min_pk, &["note"]),
-            expected(&fixture.schema, table, "delete", max_pk, &[]),
+            expected(&fixture, table, "insert", min_pk.clone(), &["note", "id"]),
+            expected(&fixture, table, "insert", max_pk.clone(), &["note", "id"]),
+            expected(&fixture, table, "update", min_pk, &["note"]),
+            expected(&fixture, table, "delete", max_pk, &[]),
         ]);
     }
     live::assert_unordered(fixture.collect(&fixture.initial).0, wanted);
@@ -343,18 +326,12 @@ fn mysql_text_decimal_and_numeric_primary_key_changes() {
         fixture.sql(&format!("DELETE FROM {table} WHERE id='{new_sql}'"));
         let old_pk = json!({"type": kind, "value": old});
         let new_pk = json!({"type": kind, "value": new});
-        let mut updated = expected(
-            &fixture.schema,
-            table,
-            "update",
-            new_pk.clone(),
-            &["id", "note"],
-        );
+        let mut updated = expected(&fixture, table, "update", new_pk.clone(), &["id", "note"]);
         updated["previous_pk"] = old_pk.clone();
         wanted.extend([
-            expected(&fixture.schema, table, "insert", old_pk, &["id", "note"]),
+            expected(&fixture, table, "insert", old_pk, &["id", "note"]),
             updated,
-            expected(&fixture.schema, table, "delete", new_pk, &[]),
+            expected(&fixture, table, "delete", new_pk, &[]),
         ]);
     }
     assert_eq!(fixture.collect(&fixture.initial).0, wanted);
@@ -390,21 +367,9 @@ fn mysql_wide_sparse_null_images_with_key_after_column_64() {
     assert_eq!(
         fixture.collect(&fixture.initial).0,
         [
-            expected(
-                &fixture.schema,
-                "wide",
-                "insert",
-                key(-42),
-                &["c0", "id", "c79"]
-            ),
-            expected(
-                &fixture.schema,
-                "wide",
-                "update",
-                key(-42),
-                &["c0", "c65", "c79"]
-            ),
-            expected(&fixture.schema, "wide", "delete", key(-42), &[]),
+            expected(&fixture, "wide", "insert", key(-42), &["c0", "id", "c79"]),
+            expected(&fixture, "wide", "update", key(-42), &["c0", "c65", "c79"]),
+            expected(&fixture, "wide", "delete", key(-42), &[]),
         ]
     );
 }
@@ -429,9 +394,9 @@ fn mysql_whitelist_filters_tables_and_same_named_tables_in_other_schema() {
     assert_eq!(
         changes,
         [
-            expected(&fixture.schema, "items", "insert", key(1), &["id", "note"]),
-            expected(&fixture.schema, "items", "update", key(1), &["note"]),
-            expected(&fixture.schema, "items", "delete", key(1), &[]),
+            expected(&fixture, "items", "insert", key(1), &["id", "note"]),
+            expected(&fixture, "items", "update", key(1), &["note"]),
+            expected(&fixture, "items", "delete", key(1), &[]),
         ]
     );
     fixture.sql("INSERT INTO excluded VALUES (2,'filtered transaction')");
@@ -505,10 +470,10 @@ fn mysql_live_monitor_buffers_rows_until_transaction_commit() {
     assert_eq!(
         observed.changes(),
         [
-            expected(&fixture.schema, "items", "insert", key(1), &["id", "note"]),
-            expected(&fixture.schema, "items", "insert", key(2), &["id", "note"]),
-            expected(&fixture.schema, "items", "update", key(1), &["note"]),
-            expected(&fixture.schema, "items", "delete", key(2), &[]),
+            expected(&fixture, "items", "insert", key(1), &["id", "note"]),
+            expected(&fixture, "items", "insert", key(2), &["id", "note"]),
+            expected(&fixture, "items", "update", key(1), &["note"]),
+            expected(&fixture, "items", "delete", key(2), &[]),
         ]
     );
     assert!(fixture.saved().position > fixture.initial.position);
@@ -538,13 +503,7 @@ fn mysql_rollback_discards_insert_update_delete() {
     fixture.sql("UPDATE items SET note='committed' WHERE id=1");
     assert_eq!(
         fixture.collect(&checkpoint).0,
-        [expected(
-            &fixture.schema,
-            "items",
-            "update",
-            key(1),
-            &["note"]
-        )]
+        [expected(&fixture, "items", "update", key(1), &["note"])]
     );
 }
 
@@ -557,7 +516,7 @@ fn mysql_restart_from_persisted_checkpoint_only_emits_new_changes() {
     assert_eq!(
         first,
         [expected(
-            &fixture.schema,
+            &fixture,
             "items",
             "insert",
             key(1),
@@ -575,8 +534,8 @@ fn mysql_restart_from_persisted_checkpoint_only_emits_new_changes() {
     assert_eq!(
         fixture.collect(&saved).0,
         [
-            expected(&fixture.schema, "items", "update", key(1), &["note"]),
-            expected(&fixture.schema, "items", "insert", key(2), &["id", "note"]),
+            expected(&fixture, "items", "update", key(1), &["note"]),
+            expected(&fixture, "items", "insert", key(2), &["id", "note"]),
         ]
     );
     assert!(fixture.collect(&fixture.saved()).0.is_empty());
@@ -609,7 +568,7 @@ fn mysql_sink_failure_preserves_checkpoint_and_allows_replay() {
     assert_eq!(
         fixture.collect(&saved).0,
         [expected(
-            &fixture.schema,
+            &fixture,
             "items",
             "insert",
             key(1),

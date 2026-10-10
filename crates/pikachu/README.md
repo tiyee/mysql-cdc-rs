@@ -44,8 +44,19 @@ The filename must match `state.file`, and the file must retain its initial FORMA
 
 Consumption errors are written to stderr and produce a nonzero exit status; change records use stdout. The default handler flushes stdout before saving a checkpoint, but this is not downstream durable acknowledgement. Consumers must tolerate replay. Any QUERY other than BEGIN/COMMIT/ROLLBACK stops CDC with `Error::Statement`; DDL does not automatically refresh the schema and continue.
 
-Once version 1.0.0 is available on crates.io, install with `cargo install pikachu --version 1.0.0 --locked`. The installed command is `pikachu-cdc`. For embedded CDC and raw replication through one dependency, use `mysql-cdc-rs` (`mysql_cdc_rs`); `mysql-canal` and `mysql-replication` remain available separately. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for setup, the output contract, compatibility and limitations.
+Once version 2.0.0 is available on crates.io, install with `cargo install pikachu --version 2.0.0 --locked`. The installed command is `pikachu-cdc`. For embedded CDC and raw replication through one dependency, use `mysql-cdc-rs` (`mysql_cdc_rs`); `mysql-canal` and `mysql-replication` remain available separately. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for setup, the output contract, compatibility and limitations.
 
 Run CLI regression tests with `cargo test --locked -p pikachu`.
 
-Two ignored `mysql_live` tests exercise the built executable against a dedicated disposable MySQL server: check/init/run, complete JSON Lines, filtering, rollback, checkpoint recovery, DDL stops and primary-key startup failures for fresh and existing states. The shared MySQL matrix runs replication, CDC and CLI tests serially. Fixtures create/drop databases and remove temporary state; use the [project testing guide](https://github.com/tiyee/mysql-cdc-rs#testing) for setup and container cleanup.
+Three ignored `mysql_live` tests exercise the built executable against a dedicated disposable MySQL server: check/init/run, complete JSON Lines, filtering, rollback, checkpoint recovery, DDL stops and primary-key startup failures for fresh and existing states. The shared MySQL matrix runs replication, CDC and CLI tests serially. Fixtures create/drop databases and remove temporary state; use the [project testing guide](https://github.com/tiyee/mysql-cdc-rs#testing) for setup and container cleanup.
+
+## Row image mode
+
+Each `[sources.source]` accepts `row_image = "minimal"` (default) or `"full"`. Override selected sources for check/init/run with repeatable `--row-image SOURCE_ID=minimal|full`; `--once` remains specific to run. For example:
+
+```sh
+pikachu-cdc run cdc.toml --once --row-image east=full --row-image west=minimal
+pikachu-cdc replay east-state.json /path/to/binlog.000001 --row-image full
+```
+
+Replay defaults to MINIMAL and leaves the v1 checkpoint unchanged. FULL INSERT/UPDATE output lists every after-image column in `changed`, including unchanged values; it does not print full row values. The mode checks upstream settings and actual image shape without changing MySQL. Writer sessions and historical logs must match the selected policy; drain old-mode transactions before coordinating a mode switch. Unknown sources, unsupported modes and duplicate overrides fail before connecting.

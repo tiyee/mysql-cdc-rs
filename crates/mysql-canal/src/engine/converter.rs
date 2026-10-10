@@ -1,6 +1,7 @@
 //! Explicit conversion from borrowed binlog views into lightweight CDC changes.
 use crate::{
     Change, Result, TableMeta,
+    config::RowImageMode,
     error::invalid,
     protocol::mysql::{
         event_type as event,
@@ -13,6 +14,7 @@ use std::sync::Arc;
 
 /// Per-source conversion state. Transaction visibility and persistence belong to Processor.
 pub struct EventConverter {
+    row_image: RowImageMode,
     tables: Vec<TableMeta>,
     decoder: Option<Box<dyn RowDecoder>>,
     parser: Option<Box<dyn EventParser>>,
@@ -26,7 +28,17 @@ impl EventConverter {
         registry: VersionRegistry,
         selected_adapter: Option<String>,
     ) -> Self {
+        Self::with_row_image(tables, registry, selected_adapter, RowImageMode::Minimal)
+    }
+
+    pub fn with_row_image(
+        tables: Vec<TableMeta>,
+        registry: VersionRegistry,
+        selected_adapter: Option<String>,
+        row_image: RowImageMode,
+    ) -> Self {
         Self {
+            row_image,
             tables,
             decoder: None,
             parser: None,
@@ -64,7 +76,11 @@ impl EventConverter {
                 .resolve(&format.server, self.selected_adapter.as_deref())?;
             adapter.validate_format(&format)?;
             let parser = adapter.create_event_parser(&format)?;
-            let decoder = adapter.create_decoder(self.tables.clone(), &format)?;
+            let decoder = adapter.create_decoder_with_row_image(
+                self.tables.clone(),
+                &format,
+                self.row_image,
+            )?;
             self.parser = Some(parser);
             self.decoder = Some(decoder);
             self.adapter = Some(adapter);

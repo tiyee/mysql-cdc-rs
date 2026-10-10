@@ -10,7 +10,7 @@ services:
       - --server-id=1
       - --log-bin=binlog
       - --binlog-format=ROW
-      - --binlog-row-image=MINIMAL
+      - --binlog-row-image=${CDC_TEST_ROW_IMAGE:-minimal}
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pcdc-test-only"]
       interval: 2s

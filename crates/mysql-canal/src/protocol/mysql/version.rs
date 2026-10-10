@@ -2,7 +2,7 @@
 //! They are object safe; row values still borrow the input event across this boundary.
 use super::events::{EventParser, MysqlEventParser, RowsEvent, TableMapEvent};
 use super::{decoder::Decoder, event_type as event, file::EventView, wire::Cursor};
-use crate::{Change, Error, Result, TableMeta, error::invalid};
+use crate::{Change, Error, Result, TableMeta, config::RowImageMode, error::invalid};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +128,21 @@ pub trait VersionAdapter: Send + Sync {
     ) -> Result<()> {
         validate_server_variables(variables, consumer_id)
     }
+    /// Existing adapters retain their MINIMAL validation; FULL is opt-in.
+    fn validate_server_with_row_image(
+        &self,
+        variables: &BTreeMap<String, String>,
+        consumer_id: u32,
+        row_image: RowImageMode,
+    ) -> Result<()> {
+        if row_image != RowImageMode::Minimal {
+            return Err(Error::Unsupported(format!(
+                "adapter {} does not support FULL row images",
+                self.name()
+            )));
+        }
+        self.validate_server(variables, consumer_id)
+    }
     fn validate_format(&self, format: &FormatDescription<'_>) -> Result<()> {
         validate_mysql_v4(format)
     }
@@ -141,6 +156,21 @@ pub trait VersionAdapter: Send + Sync {
         _format: &FormatDescription<'_>,
     ) -> Result<Box<dyn RowDecoder>> {
         Ok(Box::new(Decoder::new(tables)?))
+    }
+    /// Existing custom decoders must explicitly opt into FULL images.
+    fn create_decoder_with_row_image(
+        &self,
+        tables: Vec<TableMeta>,
+        format: &FormatDescription<'_>,
+        row_image: RowImageMode,
+    ) -> Result<Box<dyn RowDecoder>> {
+        if row_image != RowImageMode::Minimal {
+            return Err(Error::Unsupported(format!(
+                "adapter {} does not support FULL row images",
+                self.name()
+            )));
+        }
+        self.create_decoder(tables, format)
     }
     fn classify<'a>(&self, event: EventView<'a>) -> Result<EventAction<'a>> {
         classify_mysql_event(event)
@@ -219,6 +249,22 @@ struct MysqlVersion {
     name: &'static str,
 }
 impl VersionAdapter for MysqlVersion {
+    fn validate_server_with_row_image(
+        &self,
+        variables: &BTreeMap<String, String>,
+        consumer_id: u32,
+        row_image: RowImageMode,
+    ) -> Result<()> {
+        validate_server_variables_with_row_image(variables, consumer_id, row_image)
+    }
+    fn create_decoder_with_row_image(
+        &self,
+        tables: Vec<TableMeta>,
+        _format: &FormatDescription<'_>,
+        row_image: RowImageMode,
+    ) -> Result<Box<dyn RowDecoder>> {
+        Ok(Box::new(Decoder::with_row_image(tables, row_image)?))
+    }
     fn name(&self) -> &str {
         self.name
     }
@@ -240,10 +286,18 @@ pub fn validate_server_variables(
     variables: &BTreeMap<String, String>,
     consumer_id: u32,
 ) -> Result<()> {
+    validate_server_variables_with_row_image(variables, consumer_id, RowImageMode::Minimal)
+}
+
+pub fn validate_server_variables_with_row_image(
+    variables: &BTreeMap<String, String>,
+    consumer_id: u32,
+    row_image: RowImageMode,
+) -> Result<()> {
     for (name, expected) in [
         ("log_bin", "ON"),
         ("binlog_format", "ROW"),
-        ("binlog_row_image", "MINIMAL"),
+        ("binlog_row_image", row_image.server_value()),
     ] {
         if !variables
             .get(name)

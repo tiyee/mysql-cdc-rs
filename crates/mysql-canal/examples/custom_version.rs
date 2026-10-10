@@ -32,6 +32,8 @@ impl VersionAdapter for CustomMysql {
         Ok(Box::new(MysqlEventParser::from_format(format)?))
     }
     // Override validate_server/validate_format for new capability/layout rules.
+    // Opt into FULL with validate_server_with_row_image and
+    // create_decoder_with_row_image; their defaults accept MINIMAL only.
     // Override create_decoder if the column metadata or row value encoding also
     // changes. classify is the fallback for additional control event codes.
 }

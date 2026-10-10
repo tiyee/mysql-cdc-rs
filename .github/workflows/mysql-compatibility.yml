@@ -9,12 +9,14 @@ permissions:
 
 jobs:
   mysql:
-    name: MySQL ${{ matrix.series }}
+    name: MySQL ${{ matrix.series }} / ${{ matrix.row_image }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        series: ["5.7", "8.0", "8.4", "9.7"]
+        row_image: [minimal, full]
         # Historical baselines plus every released LTS series.
         # Series tags follow patch updates; avoid `lts`, which drops older LTS lines.
         include:
@@ -31,17 +33,18 @@ jobs:
       RUST_BACKTRACE: "1"
       MYSQL_IMAGE: ${{ matrix.image }}
       CDC_TEST_MYSQL_SERIES: ${{ matrix.series }}
+      CDC_TEST_ROW_IMAGE: ${{ matrix.row_image }}
       CDC_TEST_MYSQL_URL: mysql://root:cdc-test-only@127.0.0.1:13306
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.image }}
+          key: ${{ matrix.image }}-${{ matrix.row_image }}
       - name: Compile all three layers before starting MySQL
         run: cargo test -p mysql-replication -p mysql-canal -p pikachu --test mysql_live --locked --no-run
       - run: docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
-      - name: Verify replication preflight and raw ROW/MINIMAL images
+      - name: Verify replication settings, typed images and borrowed network views
         run: cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
       - name: Verify CDC conversion, transactions and recovery
         # Schema setup/teardown emits DDL; do not run these fixtures concurrently.

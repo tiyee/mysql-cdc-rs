@@ -160,6 +160,7 @@ impl RowsDecoder {
 
 #[derive(Debug)]
 struct ImagePlan {
+    column_count: usize,
     indices: Arc<[u16]>,
     columns: Vec<ColumnDefinition>,
 }
@@ -184,6 +185,7 @@ impl ImagePlan {
             return Err(invalid("empty row image"));
         }
         Ok(Arc::new(Self {
+            column_count: columns.len(),
             indices: indices.into(),
             columns: present,
         }))
@@ -223,6 +225,10 @@ pub struct RowImage<'a> {
     data: &'a [u8],
 }
 impl<'a> RowImage<'a> {
+    /// Total number of table columns, including columns absent from this image.
+    pub fn column_count(&self) -> usize {
+        self.plan.column_count
+    }
     /// Absolute zero-based table column indices, in wire order.
     pub fn column_indices(&self) -> &[u16] {
         &self.plan.indices
@@ -307,6 +313,19 @@ impl<'a> Iterator for Rows<'a> {
     }
 }
 impl FusedIterator for Rows<'_> {}
+
+impl Rows<'_> {
+    pub(super) fn require_complete(&self) -> Result<()> {
+        for plan in self.before.iter().chain(&self.after) {
+            if plan.indices.len() != plan.column_count {
+                return Err(Error::Unsupported(
+                    "FULL row images must contain every table column".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 
 fn bit(bitmap: &[u8], index: usize) -> bool {
     bitmap[index / 8] & (1 << (index % 8)) != 0

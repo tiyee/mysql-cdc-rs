@@ -101,3 +101,7 @@ Offline: replication BinlogFile::next_frame ──> canal EventView
 `replay` 通过 canal 的帧读取器和 `Processor` 读取一个本地文件，使用传入检查点的位点及历史 schema，输出已提交变更，不更新 state 文件，也不查询当前服务器 schema。
 
 协议检查使用 `mysql-replication`，嵌入式已提交 CDC 使用 `mysql-canal`，需要一个依赖覆盖二者时使用 [`mysql-cdc-rs`](../crates/mysql-cdc/src/lib.rs)。聚合库根路径的 `Error`/`Result` 属于 canal，原始操作使用 `replication::Error`/`replication::Result`。
+
+## 镜像策略
+
+`config::RowImageMode` 按来源独立设置，默认 MINIMAL。Runtime 将模式传给在线服务器检查，以及 Processor → EventConverter → VersionAdapter → Decoder；每次 FDE 重建解码器都保留该策略。离线回放显式传入模式。原始 `RowsEvent`、`RowsDecoder` 继续按位图工作，不依赖 CDC 策略。FULL 要求完整镜像，仍仅解码主键，保留 UTF-8 主键借用和共享 after-image 字段索引。检查点保持 v1 格式与历史 schema；模式属于运行参数，不能从当前服务器设置或 FDE 推断历史文件的模式。

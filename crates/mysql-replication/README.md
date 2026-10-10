@@ -10,7 +10,7 @@ For a single dependency covering raw replication and CDC, use `mysql-cdc-rs` and
 
 ```toml
 [dependencies]
-mysql-replication = "1.0.0"
+mysql-replication = "2.0.0"
 ```
 
 ```rust,no_run
@@ -112,6 +112,52 @@ Run the complete offline inspection example with a binlog file that includes its
 cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
 ```
 
+## Choose image types with generics
+
+`RowsEvent` remains the common borrowed wire event. `TypedRowsDecoder<M>` binds a TABLE_MAP plan to an image policy and returns `TypedRowsEvent<'a, M>` / `TypedRow<'a, M>`:
+
+| Mode | Image type | `field(index)` result |
+| --- | --- | --- |
+| `Minimal` | `SparseImage<'a>` | `Result<Option<RowValue<'a>>>`; absent is `None`, SQL NULL is `Some(RowValue::Null)` |
+| `Full` | `CompleteImage<'a>` | `Result<RowValue<'a>>`; every in-range column exists, SQL NULL is `RowValue::Null` |
+
+```rust,no_run
+use mysql_replication::{Result, events::{
+    Full, Minimal, RowValue, RowsEvent, TableMapEvent, TypedRowsDecoder,
+}};
+
+fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
+    let full = TypedRowsDecoder::<Full>::new(table)?;
+    for row in full.rows(event)? {
+        if let Some(after) = row?.after {
+            let value: RowValue<'_> = after.field(0)?;
+            println!("{value:?}");
+        }
+    }
+    let minimal = TypedRowsDecoder::<Minimal>::new(table)?;
+    for row in minimal.rows(event)? {
+        if let Some(after) = row?.after {
+            let value: Option<RowValue<'_>> = after.field(0)?;
+            println!("{value:?}");
+        }
+    }
+    Ok(())
+}
+```
+
+`TypedRowsDecoder::<Full>::event` rejects an incomplete bitmap in either existing image before iteration with `Error::Unsupported`. Values and complete UPDATE pairs are validated before yielding each row; malformed input yields one error and stops. WRITE has only `after`, DELETE only `before`, and UPDATE both. The generic changes the image type, not whether an operation has a before or after image. `CompleteImage::try_from(raw_image)` checks the same completeness invariant.
+
+`column_count()` reports the total TABLE_MAP column count, including absent columns. `fields()` streams present fields with absolute column indices and is preferred for sequential access. `field(index)` scans up to that column without allocating; FULL returns `Error::Invalid` for an out-of-range index, MINIMAL returns `None`. Bytes remain borrowed and rows share the compiled column-index plan. Typed events and rows can outlive their decoder, but not the input bytes. `AsRef<RowImage>` permits common generic code; no full-row vector is created.
+
+Use `raw_event.with_mode::<Full>(&raw_decoder)` to reuse an existing `RowsDecoder`. `TypedRowsDecoder::<Full>::from(raw_decoder)` also reuses its plan. Modes are sealed to preserve the completeness check. MINIMAL accepts complete bitmaps too: an INSERT or a table without a primary key can have all columns even under MINIMAL logging. The bytes cannot establish the producer's setting; online callers separately set `required_row_image` to check that setting.
+
+For a runtime parameter, select the generic implementation once at the boundary with `match mode { ... run::<Minimal>(), ... run::<Full>() }`. The example defaults to MINIMAL and accepts both values:
+
+```sh
+cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image full
+cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image minimal
+```
+
 The structured parser selects advertised layouts from every file's FDE and accepts the registered MySQL series 5.7, 8.0–8.4, 9.0 and 9.7. Producer versions must have numeric `major.minor.patch` components, optionally followed by a nonempty `-` or `+` suffix (such as `5.7.44-log` or `8.0.45-0ubuntu0.24.04.1`). Malformed versions and MariaDB identifiers are rejected, using the same numeric parsing rules as CDC. Unknown series/layouts fail explicitly. `next_frame()` permits custom body parsers. When switching between frame/view and structured-event methods, feed encountered FDE frames into your own `BinlogParser`; the built-in structured parser only observes `next_event()` calls.
 
 Offline files must retain their initial FDE. CRC32/NONE are supported; truncated tails and oversized events fail, with a 64 MiB bound. Network transport uses `mysql`'s driver, which pre-parses FDE/TABLE_MAP/ROTATE and allocates before this library can check event size. Custom framing may require another transport. Full raw network events preserve the driver's original header fields, body, algorithm and stored checksum; they never call the driver's checksum-recalculating serializer. `next_view()` avoids this assembly entirely. Disconnects propagate errors without silent reconnects.
@@ -121,4 +167,8 @@ cargo test -p mysql-replication --locked
 cargo test -p mysql-canal --locked
 ```
 
-Synthetic protocol tests verify headers, raw-byte preservation, CRC32/NONE, optional/tagged GTID metadata, lazy ROWS parsing, decoded before/after images, wide sparse/NULL bitmaps, signed/unsigned integer boundaries, exact DECIMAL, malformed fields and owned lifetimes. The two ignored `mysql_live` tests independently verify selected-table primary-key preflight and real sparse insert/update/delete images, including exact values, NULL, borrowed string bytes and unselected tables. They require a dedicated disposable MySQL server and serial execution, and create/drop test databases. CDC and CLI have their own live tests; see the [project README](https://github.com/tiyee/mysql-cdc-rs#testing) for the shared matrix and container cleanup.
+Synthetic protocol tests verify headers, raw-byte preservation, CRC32/NONE, optional/tagged GTID metadata, lazy ROWS parsing, decoded before/after images, wide sparse/NULL bitmaps, signed/unsigned integer boundaries, exact DECIMAL, malformed fields and owned lifetimes. The four ignored `mysql_live` tests verify selected-table primary-key preflight, upstream mode mismatch and unchecked selection, real sparse/full insert/update/delete images, and typed `next_view()` decoding of 80-column multirow operations. Assertions include exact values, compact NULL bitmaps, shared column indices, borrowed string bytes and unselected tables. They require a dedicated disposable MySQL server and serial execution, and create/drop test databases. CDC and CLI have their own live tests; see the [project README](https://github.com/tiyee/mysql-cdc-rs#testing) for the shared matrix and container cleanup.
+
+The registered `decode_typed_rows` example harness runs in ordinary workspace tests on every Rust CI target; compile-fail doctests verify mode separation and borrowed lifetimes.
+
+`RowsEvent` and `RowsDecoder` support both MINIMAL sparse images and FULL images using the same bitmap-based layout. Set `config.required_row_image = Some(RowImage::Full)` to require FULL upstream logging; `None` skips that setting check. `ParserConfig::minimal()` reduces metadata parsing and does not require MINIMAL row images. Raw images retain every column present in the input; CDC policy belongs to canal. The real-server matrix exercises both modes via `CDC_TEST_ROW_IMAGE=minimal|full`.

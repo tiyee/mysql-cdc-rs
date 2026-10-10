@@ -2,8 +2,45 @@ use crate::{Error, Result};
 use serde::Deserialize;
 use std::{
     collections::HashSet,
+    fmt,
     path::{Path, PathBuf},
+    str::FromStr,
 };
+
+/// Required upstream row image and CDC image validation policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowImageMode {
+    #[default]
+    Minimal,
+    Full,
+}
+impl RowImageMode {
+    pub fn server_value(self) -> &'static str {
+        match self {
+            Self::Minimal => "MINIMAL",
+            Self::Full => "FULL",
+        }
+    }
+}
+impl fmt::Display for RowImageMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+        })
+    }
+}
+impl FromStr for RowImageMode {
+    type Err = Error;
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "minimal" => Ok(Self::Minimal),
+            "full" => Ok(Self::Full),
+            _ => Err(Error::Invalid("row_image must be minimal or full".into())),
+        }
+    }
+}
 
 /// Settings owned by one entry in the application's source list.
 #[derive(Debug, Deserialize)]
@@ -24,6 +61,9 @@ pub struct SourceConfig {
     #[serde(default = "mysql_plugin")]
     pub plugin: String,
     pub adapter: Option<String>,
+    /// Defaults to MINIMAL; this never changes a server setting.
+    #[serde(default)]
+    pub row_image: RowImageMode,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

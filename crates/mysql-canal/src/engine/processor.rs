@@ -1,5 +1,6 @@
 use crate::{
     Result,
+    config::RowImageMode,
     engine::checkpoint::State,
     engine::transaction::TransactionBuffer,
     error::invalid,
@@ -40,12 +41,32 @@ impl Processor {
         registry: VersionRegistry,
         selected_adapter: Option<String>,
     ) -> Result<Self> {
+        Self::with_row_image(
+            state,
+            state_path,
+            transaction_budget,
+            registry,
+            selected_adapter,
+            RowImageMode::Minimal,
+        )
+    }
+
+    /// Uses the saved schema with an explicit policy for online or offline input.
+    pub fn with_row_image(
+        state: State,
+        state_path: Option<PathBuf>,
+        transaction_budget: usize,
+        registry: VersionRegistry,
+        selected_adapter: Option<String>,
+        row_image: RowImageMode,
+    ) -> Result<Self> {
         state.validate()?;
         Ok(Self {
-            converter: super::converter::EventConverter::new(
+            converter: super::converter::EventConverter::with_row_image(
                 state.tables.clone(),
                 registry,
                 selected_adapter,
+                row_image,
             ),
             transaction: TransactionBuffer::new(transaction_budget),
             state,

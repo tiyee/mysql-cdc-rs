@@ -2,7 +2,7 @@
 use mysql::{Conn, prelude::Queryable};
 use mysql_canal::{
     Result,
-    config::{Config, SourceConfig, WhitelistTable},
+    config::{Config, RowImageMode, SourceConfig, WhitelistTable},
     engine::{checkpoint::State, processor::Processor},
     protocol::mysql::version::VersionRegistry,
     sink::{JsonLinesSink, TransactionSink},
@@ -78,6 +78,7 @@ impl Fixture {
                 tls_ca: None,
                 plugin: "mysql".into(),
                 adapter: None,
+                row_image: row_image_mode(),
             },
             state_file: directory.join("state.json"),
             max_transaction_bytes: 1024 * 1024,
@@ -106,7 +107,10 @@ impl Fixture {
         connection.query_drop(format!("USE `{schema}`")).unwrap();
         connection.query_drop("SET NAMES utf8mb4").unwrap();
         connection
-            .query_drop("SET SESSION binlog_format='ROW', binlog_row_image='MINIMAL'")
+            .query_drop(format!(
+                "SET SESSION binlog_format='ROW', binlog_row_image='{}'",
+                config.source.row_image.server_value()
+            ))
             .unwrap();
         for (table, definition) in tables {
             connection
@@ -156,10 +160,13 @@ impl Fixture {
         State::read(&self.config.state_file).unwrap()
     }
     pub fn processor(&self, checkpoint: &State) -> Processor {
-        Processor::new(
+        Processor::with_row_image(
             checkpoint.clone(),
             Some(self.config.state_file.clone()),
             self.config.max_transaction_bytes,
+            VersionRegistry::default(),
+            self.config.source.adapter.clone(),
+            self.config.source.row_image,
         )
         .unwrap()
     }
@@ -217,8 +224,36 @@ impl Write for CapturedOutput {
     }
 }
 
-pub fn expected(schema: &str, table: &str, operation: &str, pk: Value, changed: &[&str]) -> Value {
-    json!({"source": SOURCE_ID, "schema": schema, "table": table, "operation": operation, "pk": pk, "changed": changed})
+pub fn row_image_mode() -> RowImageMode {
+    std::env::var("CDC_TEST_ROW_IMAGE")
+        .unwrap_or_else(|_| "minimal".into())
+        .parse()
+        .unwrap()
+}
+
+pub fn expected(
+    fixture: &Fixture,
+    table: &str,
+    operation: &str,
+    pk: Value,
+    changed: &[&str],
+) -> Value {
+    let changed = if fixture.config.source.row_image == RowImageMode::Full && operation != "delete"
+    {
+        fixture
+            .initial
+            .tables
+            .iter()
+            .find(|meta| meta.table == table)
+            .unwrap()
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>()
+    } else {
+        changed.to_vec()
+    };
+    json!({"source": SOURCE_ID, "schema": fixture.schema, "table": table, "operation": operation, "pk": pk, "changed": changed})
 }
 
 pub fn assert_unordered(actual: Vec<Value>, expected: Vec<Value>) {

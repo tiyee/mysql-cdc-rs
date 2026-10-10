@@ -10,7 +10,7 @@
 
 ```toml
 [dependencies]
-mysql-replication = "1.0.0"
+mysql-replication = "2.0.0"
 ```
 
 ```rust,no_run
@@ -112,6 +112,52 @@ fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
 cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
 ```
 
+## 通过泛型选择镜像类型
+
+`RowsEvent` 保留通用的借用协议事件结构。`TypedRowsDecoder<M>` 将 TABLE_MAP 执行计划绑定到镜像模式，返回 `TypedRowsEvent<'a, M>` / `TypedRow<'a, M>`：
+
+| 模式 | 镜像类型 | `field(index)` 返回值 |
+| --- | --- | --- |
+| `Minimal` | `SparseImage<'a>` | `Result<Option<RowValue<'a>>>`；缺失为 `None`，SQL NULL 为 `Some(RowValue::Null)` |
+| `Full` | `CompleteImage<'a>` | `Result<RowValue<'a>>`；范围内的列全部存在，SQL NULL 为 `RowValue::Null` |
+
+```rust,no_run
+use mysql_replication::{Result, events::{
+    Full, Minimal, RowValue, RowsEvent, TableMapEvent, TypedRowsDecoder,
+}};
+
+fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
+    let full = TypedRowsDecoder::<Full>::new(table)?;
+    for row in full.rows(event)? {
+        if let Some(after) = row?.after {
+            let value: RowValue<'_> = after.field(0)?;
+            println!("{value:?}");
+        }
+    }
+    let minimal = TypedRowsDecoder::<Minimal>::new(table)?;
+    for row in minimal.rows(event)? {
+        if let Some(after) = row?.after {
+            let value: Option<RowValue<'_>> = after.field(0)?;
+            println!("{value:?}");
+        }
+    }
+    Ok(())
+}
+```
+
+`TypedRowsDecoder::<Full>::event` 在迭代前检查所有存在镜像的位图，不完整时返回 `Error::Unsupported`。字段值及 UPDATE 完整配对在交付每行前校验；畸形输入只返回一次错误，随后结束迭代。WRITE 只有 `after`，DELETE 只有 `before`，UPDATE 两者都有。泛型改变镜像类型，不改变操作本身是否存在前后镜像。`CompleteImage::try_from(raw_image)` 同样校验完整性。
+
+`column_count()` 返回 TABLE_MAP 的总列数，包含缺失列。`fields()` 按绝对列序号流式遍历存在字段，顺序读取优先使用该接口。`field(index)` 无分配地扫描至目标列；越界时 FULL 返回 `Error::Invalid`，MINIMAL 返回 `None`。字节值保持借用，各行共享编译后的字段索引计划；类型化事件及行可以比解码器存活更久，但不能超过输入字节的生命周期。通过 `AsRef<RowImage>` 编写通用泛型逻辑，不分配完整行向量。
+
+已有 `RowsDecoder` 可调用 `raw_event.with_mode::<Full>(&raw_decoder)`，或通过 `TypedRowsDecoder::<Full>::from(raw_decoder)` 复用执行计划。模式 trait 封闭，不能绕过完整性校验。MINIMAL 也接受完整位图：INSERT 或没有主键的表即使使用 MINIMAL 日志，也可能包含全部列。仅凭字节不能确定生产者设置；在线调用方另行通过 `required_row_image` 校验服务器设置。
+
+运行时参数在入口通过 `match mode { ... run::<Minimal>(), ... run::<Full>() }` 选择泛型实现。以下示例默认 MINIMAL，也接受两种参数值：
+
+```sh
+cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image full
+cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image minimal
+```
+
 结构化解析器根据每个文件的 FDE 选择声明的布局，支持已注册 MySQL 5.7、8.0–8.4、9.0、9.7 系列。生产者版本须包含完整数字 `major.minor.patch`，允许非空的 `-` 或 `+` 后缀（如 `5.7.44-log` 或 `8.0.45-0ubuntu0.24.04.1`）。畸形版本与 MariaDB 标识明确拒绝，数字版本解析规则与 CDC 共用。未知系列或布局明确失败；`next_frame()` 可交给自定义事件体解析器。混用帧/视图与结构化读取时，需要将读取到的 FDE 帧交给自己的 `BinlogParser`；内置结构化解析器只观察 `next_event()` 调用。
 
 离线文件必须保留开头 FDE，支持 CRC32/NONE，截断尾部和超过 64 MiB 的事件报错。在线传输复用 `mysql` 驱动；驱动会预解析 FDE/TABLE_MAP/ROTATE，并在本库校验事件大小之前分配内存，特殊 framing 可能需要其他传输实现。完整在线原始事件保留驱动读取的原头部字段、body、算法字节及存储的 checksum，不调用会重新计算 checksum 的序列化方法。`next_view()` 完全跳过这次原始帧组装。断线传播错误，不静默重连。
@@ -121,4 +167,6 @@ cargo test -p mysql-replication --locked
 cargo test -p mysql-canal --locked
 ```
 
-独立合成协议测试覆盖公共头、原始字节保真、CRC32/NONE、可选/Tagged GTID、延迟 ROWS、解码后的 before/after 镜像、宽表稀疏/NULL 位图、整数符号边界、精确 DECIMAL、畸形字段和 owned 生命周期。两个默认忽略的 `mysql_live` 测试独立验证指定表主键预检和真实增改删稀疏镜像，包含精确值、NULL、字符串字节借用和非选中表。实库测试需要专用可销毁 MySQL 实例，串行执行，会创建/删除测试库；CDC 与 CLI 各自维护实库测试。共享矩阵与容器清理见[项目验证说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md#验证)。
+独立合成协议测试覆盖公共头、原始字节保真、CRC32/NONE、可选/Tagged GTID、延迟 ROWS、解码后的 before/after 镜像、宽表稀疏/NULL 位图、整数符号边界、精确 DECIMAL、畸形字段和 owned 生命周期。四个默认忽略的 `mysql_live` 测试验证指定表主键预检、上游模式不匹配及跳过设置检查、真实稀疏/完整增改删镜像，以及通过 `next_view()` 泛型解码 80 列多行操作；校验精确值、紧凑 NULL 位图、共享字段索引、字符串字节借用和非选中表。已注册的 `decode_typed_rows` 示例测试随普通 workspace 测试在每个 Rust CI 目标执行；编译失败文档测试验证模式隔离与借用生命周期。实库测试需要专用可销毁 MySQL 实例，串行执行，会创建/删除测试库；CDC 与 CLI 各自维护实库测试。共享矩阵与容器清理见[项目验证说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md#验证)。
+
+`RowsEvent` 与 `RowsDecoder` 使用同一套位图布局，同时支持 MINIMAL 稀疏镜像和 FULL 完整镜像。设置 `config.required_row_image = Some(RowImage::Full)` 可要求上游使用 FULL，`None` 跳过该设置检查。`ParserConfig::minimal()` 用于减少元数据解析，不要求行镜像为 MINIMAL。原始镜像保留输入中实际存在的列，CDC 策略由 canal 负责；实库矩阵通过 `CDC_TEST_ROW_IMAGE=minimal|full` 验证两种模式。

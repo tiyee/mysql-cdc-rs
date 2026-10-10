@@ -2,8 +2,9 @@ use mysql_replication::{
     BinlogParser, Error, Event, EventData, EventHeader, FrameDecoder,
     event_type::*,
     events::{
-        ColumnType, GtidEvent, PreviousGtidsEvent, QueryEvent, RowValue, RowsDecoder, RowsEvent,
-        RowsKind, TableMapEvent, TaggedGtidEvent, XidEvent,
+        ColumnType, CompleteImage, Full, GtidEvent, ImageMode, Minimal, PreviousGtidsEvent,
+        QueryEvent, RowValue, RowsDecoder, RowsEvent, RowsKind, SparseImage, TableMapEvent,
+        TaggedGtidEvent, TypedRow, TypedRowsDecoder, TypedRowsEvent, XidEvent,
     },
     file::BinlogFile,
     parser::{ParserConfig, RowsDecode},
@@ -943,6 +944,35 @@ fn row_decoder_remaps_are_explicit_and_owned_views_decode_without_copying_values
         .position(|w| w == b"abc")
         .unwrap();
     assert_eq!(data.as_ptr(), owned.raw_data()[offset..].as_ptr());
+    for image in [
+        rows.with_mode::<Minimal>(&decoder)
+            .unwrap()
+            .rows()
+            .next()
+            .unwrap()
+            .unwrap()
+            .after
+            .unwrap()
+            .as_ref()
+            .clone(),
+        rows.with_mode::<Full>(&decoder)
+            .unwrap()
+            .rows()
+            .next()
+            .unwrap()
+            .unwrap()
+            .after
+            .unwrap()
+            .as_ref()
+            .clone(),
+    ] {
+        assert_eq!(image.column_count(), 1);
+        let RowValue::Bytes(text) = image.fields().next().unwrap().unwrap().value else {
+            panic!("bytes expected")
+        };
+        assert_eq!(text, b"abc");
+        assert_eq!(text.as_ptr(), data.as_ptr());
+    }
     let remapped = rows_decoder(&[3], &[], &[0]);
     let body = rows_body(1, &[1], &[0, 42, 0, 0, 0], false);
     let image = rows_event(&body, RowsKind::Write, false)
@@ -1040,4 +1070,401 @@ fn decoded_null_bitmap_crosses_bytes_using_present_column_ordinals() {
     }
     assert_eq!(fields[9].column_index, 75);
     assert_eq!(fields[9].value, RowValue::Null);
+}
+
+#[test]
+fn full_rows_decode_v1_v2_insert_update_delete_and_borrow_text() {
+    let decoder = rows_decoder(&[3, 15], &[10, 0], &[2]);
+    for v2 in [false, true] {
+        for kind in [RowsKind::Write, RowsKind::Update, RowsKind::Delete] {
+            let mut values = vec![0];
+            values.extend(42i32.to_le_bytes());
+            values.extend([3, b'o', b'l', b'd']);
+            if kind == RowsKind::Update {
+                values.push(2);
+                values.extend(43i32.to_le_bytes());
+            }
+            let bitmaps: &[u8] = if kind == RowsKind::Update {
+                &[3, 3]
+            } else {
+                &[3]
+            };
+            let body = rows_body(2, bitmaps, &values, v2);
+            let event = rows_event(&body, kind, v2);
+            let rows = event
+                .rows(&decoder)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            assert_eq!(row.before.is_some(), kind != RowsKind::Write);
+            assert_eq!(row.after.is_some(), kind != RowsKind::Delete);
+            for (after, image) in [(false, &row.before), (true, &row.after)] {
+                let Some(image) = image else { continue };
+                assert_eq!(image.column_indices(), &[0, 1]);
+                let fields = image.fields().collect::<Result<Vec<_>, _>>().unwrap();
+                let RowValue::Integer(key) = fields[0].value else {
+                    panic!("integer expected")
+                };
+                assert_eq!(
+                    key.signed(),
+                    if after && kind == RowsKind::Update {
+                        43
+                    } else {
+                        42
+                    }
+                );
+                if after && kind == RowsKind::Update {
+                    assert_eq!(fields[1].value, RowValue::Null);
+                } else {
+                    let RowValue::Bytes(text) = fields[1].value else {
+                        panic!("text expected")
+                    };
+                    assert_eq!(text, b"old");
+                    assert_eq!(
+                        text.as_ptr(),
+                        body[body.len() - values.len() + 6..].as_ptr()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_full_events_preserve_v1_v2_operations_and_borrowed_values() {
+    let decoder = TypedRowsDecoder::<Full>::from(rows_decoder(&[3, 15], &[10, 0], &[2]));
+    assert_eq!(decoder.table_id(), 1);
+    assert_eq!(decoder.columns().len(), 2);
+    for v2 in [false, true] {
+        for kind in [RowsKind::Write, RowsKind::Update, RowsKind::Delete] {
+            let mut values = vec![0];
+            values.extend(42i32.to_le_bytes());
+            values.extend([3, b'o', b'l', b'd']);
+            if kind == RowsKind::Update {
+                values.push(2);
+                values.extend(43i32.to_le_bytes());
+            }
+            let bitmaps: &[u8] = if kind == RowsKind::Update {
+                &[3, 3]
+            } else {
+                &[3]
+            };
+            let body = rows_body(2, bitmaps, &values, v2);
+            let event = rows_event(&body, kind, v2);
+            let typed: TypedRowsEvent<'_, Full> = decoder.event(&event).unwrap();
+            assert_eq!(typed.table_id(), 1);
+            assert_eq!(typed.column_count(), 2);
+            assert_eq!(typed.kind(), kind);
+            assert_eq!(typed.flags(), event.flags);
+            let mut rows = typed.rows();
+            let row: TypedRow<'_, Full> = rows.next().unwrap().unwrap();
+            assert!(rows.next().is_none());
+            assert!(rows.next().is_none());
+            assert_eq!(row.before.is_some(), kind != RowsKind::Write);
+            assert_eq!(row.after.is_some(), kind != RowsKind::Delete);
+            for (after, image) in [(false, row.before), (true, row.after)] {
+                let Some(image): Option<CompleteImage<'_>> = image else {
+                    continue;
+                };
+                assert_eq!(image.column_count(), 2);
+                assert_eq!(image.fields().count(), 2);
+                let RowValue::Integer(value) = image.field(0).unwrap() else {
+                    panic!("integer expected")
+                };
+                assert_eq!(
+                    value.signed(),
+                    if after && kind == RowsKind::Update {
+                        43
+                    } else {
+                        42
+                    }
+                );
+                if after && kind == RowsKind::Update {
+                    assert_eq!(image.field(1).unwrap(), RowValue::Null);
+                } else {
+                    let RowValue::Bytes(text) = image.field(1).unwrap() else {
+                        panic!("bytes expected")
+                    };
+                    assert_eq!(text, b"old");
+                    assert_eq!(
+                        text.as_ptr(),
+                        body[body.len() - values.len() + 6..].as_ptr()
+                    );
+                }
+                assert!(matches!(image.field(2), Err(Error::Invalid(message))
+                    if message == "column index outside complete row image"));
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_minimal_images_distinguish_absent_null_and_present_columns() {
+    let decoder = rows_decoder(&[3, 15, 3], &[10, 0], &[2]);
+    let body = rows_body(3, &[5, 2], &[0, 1, 0, 0, 0, 10, 0, 0, 0, 1], true);
+    let event = rows_event(&body, RowsKind::Update, true);
+    let typed = event.with_mode::<Minimal>(&decoder).unwrap();
+    let row: TypedRow<'_, Minimal> = typed.rows().next().unwrap().unwrap();
+    let before: SparseImage<'_> = row.before.unwrap();
+    let after: SparseImage<'_> = row.after.unwrap();
+    assert_eq!(before.column_count(), 3);
+    assert_eq!(before.column_indices(), &[0, 2]);
+    assert_eq!(before.field(1).unwrap(), None);
+    let Some(RowValue::Integer(value)) = before.field(2).unwrap() else {
+        panic!("integer expected")
+    };
+    assert_eq!(value.signed(), 10);
+    assert_eq!(after.column_count(), 3);
+    assert_eq!(after.column_indices(), &[1]);
+    assert_eq!(after.field(0).unwrap(), None);
+    assert_eq!(after.field(1).unwrap(), Some(RowValue::Null));
+    assert_eq!(after.field(2).unwrap(), None);
+    assert_eq!(after.field(3).unwrap(), None);
+    assert!(matches!(CompleteImage::try_from(before.as_ref().clone()),
+        Err(Error::Unsupported(message)) if message == "FULL row images must contain every table column"));
+
+    // A complete bitmap is valid in MINIMAL too; bytes cannot prove the producer setting.
+    let body = rows_body(3, &[7], &[2, 1, 0, 0, 0, 10, 0, 0, 0], false);
+    let event = rows_event(&body, RowsKind::Write, false);
+    let row = event
+        .with_mode::<Minimal>(&decoder)
+        .unwrap()
+        .rows()
+        .next()
+        .unwrap()
+        .unwrap();
+    let image = CompleteImage::try_from(row.after.unwrap().as_ref().clone()).unwrap();
+    assert_eq!(image.column_count(), 3);
+    assert_eq!(image.field(1).unwrap(), RowValue::Null);
+}
+
+#[test]
+fn typed_full_rejects_sparse_shapes_before_iteration_including_sparse_prefixes() {
+    let decoder = rows_decoder(&[1, 1, 1], &[], &[0]);
+    for v2 in [false, true] {
+        for (kind, bitmaps) in [
+            (RowsKind::Write, &[3][..]),
+            (RowsKind::Delete, &[3][..]),
+            (RowsKind::Update, &[3, 7][..]),
+            (RowsKind::Update, &[7, 3][..]),
+        ] {
+            // Shape validation precedes value validation, even for truncated values.
+            let body = rows_body(3, bitmaps, &[0], v2);
+            let event = rows_event(&body, kind, v2);
+            assert!(matches!(event.with_mode::<Full>(&decoder),
+                Err(Error::Unsupported(message)) if message == "FULL row images must contain every table column"));
+        }
+    }
+    let body = rows_body(3, &[3], &[0, 5, 6], true);
+    let event = rows_event(&body, RowsKind::Write, true);
+    let row = event.rows(&decoder).unwrap().next().unwrap().unwrap();
+    let image = row.after.unwrap();
+    assert_eq!(image.column_indices(), &[0, 1]);
+    assert_eq!(image.column_count(), 3);
+    assert!(matches!(
+        CompleteImage::try_from(image),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
+fn typed_full_wide_images_keep_shared_plans_after_decoder_is_dropped() {
+    let mut nullable = [0; 10];
+    nullable[9] = 8;
+    let mut values = Vec::new();
+    for offset in [0, 80] {
+        let mut nulls = [0; 10];
+        nulls[9] = 8;
+        values.extend(nulls);
+        for column in 0..80u8 {
+            if column != 75 {
+                values.push(column + offset);
+            }
+        }
+    }
+    let body = rows_body(80, &[255; 10], &values, true);
+    let event = rows_event(&body, RowsKind::Write, true);
+    let typed = {
+        let map_body = table_body(1, &[1; 80], &[], &nullable);
+        let mut map = TableMapEvent::default();
+        map.decode(&map_body).unwrap();
+        let decoder = TypedRowsDecoder::<Full>::new(&map).unwrap();
+        decoder.event(&event).unwrap()
+    };
+    let rows = typed.rows().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(rows.len(), 2);
+    let first = rows[0].after.as_ref().unwrap();
+    let second = rows[1].after.as_ref().unwrap();
+    assert_eq!(
+        first.as_ref().column_indices().as_ptr(),
+        second.as_ref().column_indices().as_ptr()
+    );
+    for (offset, image) in [(0, first), (80, second)] {
+        assert_eq!(image.column_count(), 80);
+        assert_eq!(image.field(75).unwrap(), RowValue::Null);
+        let RowValue::Integer(value) = image.field(79).unwrap() else {
+            panic!("integer expected")
+        };
+        assert_eq!(value.unsigned(), 79 + offset);
+        assert_eq!(image.fields().count(), 80);
+    }
+}
+
+#[test]
+fn typed_decoding_preserves_errors_and_never_yields_partial_updates() {
+    let decoder = TypedRowsDecoder::<Full>::from(rows_decoder(&[3], &[], &[0]));
+    let body = rows_body(1, &[1, 1], &[0, 1, 0, 0, 0, 0, 2], true);
+    let event = rows_event(&body, RowsKind::Update, true);
+    let mut rows = decoder.rows(&event).unwrap();
+    assert!(matches!(
+        rows.next(),
+        Some(Err(Error::Truncated { need: 4, have: 1 }))
+    ));
+    assert!(rows.next().is_none());
+    assert!(rows.next().is_none());
+
+    let body = rows_body(1, &[1], &[1], false);
+    let event = rows_event(&body, RowsKind::Write, false);
+    let mut rows = decoder.rows(&event).unwrap();
+    assert!(matches!(rows.next(), Some(Err(Error::Invalid(message)))
+        if message == "NULL in a NOT NULL column"));
+    assert!(rows.next().is_none());
+
+    let body = rows_body(2, &[3], &[0, 1, 2], true);
+    let event = rows_event(&body, RowsKind::Write, true);
+    assert!(matches!(decoder.event(&event), Err(Error::Invalid(message))
+        if message == "ROWS column count differs from TABLE_MAP"));
+    let body = rows_body(1, &[1], &[0, 1, 0, 0, 0], true);
+    let mut event = rows_event(&body, RowsKind::Write, true);
+    event.table_id = 2;
+    assert!(matches!(decoder.rows(&event), Err(Error::Invalid(message))
+        if message == "ROWS table ID differs from TABLE_MAP"));
+}
+
+#[test]
+fn typed_minimal_v1_v2_wide_multirow_operations_share_plans_and_borrow_text() {
+    let mut types = [1; 80];
+    types[75] = 15;
+    let mut nullable = [0; 10];
+    nullable[9] = 8;
+    let decoder = TypedRowsDecoder::<Minimal>::from(rows_decoder(&types, &[20, 0], &nullable));
+    let mut before = [0; 10];
+    before[8] = 64;
+    let mut after = [0; 10];
+    after[9] = 8;
+    for v2 in [false, true] {
+        for kind in [RowsKind::Write, RowsKind::Update, RowsKind::Delete] {
+            let (bitmaps, values) = match kind {
+                RowsKind::Write => {
+                    let mut bitmap = after;
+                    bitmap[0] = 1;
+                    (
+                        bitmap.to_vec(),
+                        [vec![0, 10, 3], "中".as_bytes().to_vec(), vec![2, 11]].concat(),
+                    )
+                }
+                RowsKind::Update => (
+                    [before.as_slice(), after.as_slice()].concat(),
+                    [vec![0, 20, 0, 3], "中".as_bytes().to_vec(), vec![0, 21, 1]].concat(),
+                ),
+                RowsKind::Delete => (before.to_vec(), vec![0, 20, 0, 21]),
+            };
+            let body = rows_body(80, &bitmaps, &values, v2);
+            let event = rows_event(&body, kind, v2);
+            let rows = decoder
+                .rows(&event)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row.before.is_some(), kind != RowsKind::Write);
+                assert_eq!(row.after.is_some(), kind != RowsKind::Delete);
+                if let Some(image) = &row.before {
+                    assert_eq!(image.column_count(), 80);
+                    assert_eq!(image.column_indices(), &[70]);
+                    assert_eq!(image.field(0).unwrap(), None);
+                    let Some(RowValue::Integer(value)) = image.field(70).unwrap() else {
+                        panic!("integer expected")
+                    };
+                    assert_eq!(value.unsigned(), 20 + index as u64);
+                }
+                if let Some(image) = &row.after {
+                    assert_eq!(image.column_count(), 80);
+                    assert_eq!(
+                        image.column_indices(),
+                        if kind == RowsKind::Write {
+                            &[0, 75][..]
+                        } else {
+                            &[75][..]
+                        }
+                    );
+                    assert_eq!(image.field(70).unwrap(), None);
+                    if kind == RowsKind::Write {
+                        let Some(RowValue::Integer(value)) = image.field(0).unwrap() else {
+                            panic!("integer expected")
+                        };
+                        assert_eq!(value.unsigned(), 10 + index as u64);
+                    }
+                    if index == 0 {
+                        let Some(RowValue::Bytes(text)) = image.field(75).unwrap() else {
+                            panic!("bytes expected")
+                        };
+                        assert_eq!(text, "中".as_bytes());
+                        let offset = body
+                            .windows(text.len())
+                            .position(|value| value == text)
+                            .unwrap();
+                        assert_eq!(text.as_ptr(), body[offset..].as_ptr());
+                    } else {
+                        assert_eq!(image.field(75).unwrap(), Some(RowValue::Null));
+                    }
+                }
+            }
+            for (first, second) in [
+                (&rows[0].before, &rows[1].before),
+                (&rows[0].after, &rows[1].after),
+            ] {
+                if let (Some(first), Some(second)) = (first, second) {
+                    assert_eq!(
+                        first.column_indices().as_ptr(),
+                        second.column_indices().as_ptr()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn typed_late_error<M: ImageMode>() {
+    let decoder = TypedRowsDecoder::<M>::from(rows_decoder(&[3], &[], &[0]));
+    for v2 in [false, true] {
+        let values = [0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4];
+        let body = rows_body(1, &[1, 1], &values, v2);
+        let event = rows_event(&body, RowsKind::Update, v2);
+        let mut rows = decoder.rows(&event).unwrap();
+        let row = rows.next().unwrap().unwrap();
+        for (image, expected) in [(row.before, 1), (row.after, 2)] {
+            let image = image.unwrap();
+            let field = image.as_ref().fields().next().unwrap().unwrap();
+            let RowValue::Integer(value) = field.value else {
+                panic!("integer expected")
+            };
+            assert_eq!(value.unsigned(), expected);
+        }
+        assert!(matches!(
+            rows.next(),
+            Some(Err(Error::Truncated { need: 4, have: 1 }))
+        ));
+        assert!(rows.next().is_none());
+        assert!(rows.next().is_none());
+    }
+}
+
+#[test]
+fn typed_modes_return_valid_rows_before_one_late_error_and_then_stop() {
+    typed_late_error::<Minimal>();
+    typed_late_error::<Full>();
 }

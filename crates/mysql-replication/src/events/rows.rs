@@ -3,10 +3,15 @@ use crate::{Result, error::invalid, wire::Cursor};
 use std::io::Write;
 
 mod decoder;
+mod typed;
 mod value;
 
 pub use decoder::{ColumnDefinition, Row, RowField, RowFields, RowImage, Rows, RowsDecoder};
 pub use mysql_common::constants::ColumnType;
+pub use typed::{
+    CompleteImage, Full, ImageMode, Minimal, SparseImage, TypedRow, TypedRows, TypedRowsDecoder,
+    TypedRowsEvent,
+};
 pub use value::{DecimalValue, IntegerValue, RowValue};
 
 /// Protocol operation, independent from a CDC change or table whitelist.
@@ -73,6 +78,12 @@ impl<'a> RowsEvent<'a> {
     /// Values borrow the event; the returned iterator does not borrow the decoder.
     pub fn rows(&self, decoder: &RowsDecoder) -> Result<Rows<'a>> {
         decoder.rows(self)
+    }
+
+    /// Validates image shape and binds a typed view to this TABLE_MAP layout.
+    /// Row values are validated lazily before each typed row is returned.
+    pub fn with_mode<M: ImageMode>(&self, decoder: &RowsDecoder) -> Result<TypedRowsEvent<'a, M>> {
+        TypedRowsEvent::new(*self, decoder)
     }
 }
 impl<'a> Event<'a> for RowsEvent<'a> {

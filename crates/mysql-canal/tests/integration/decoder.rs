@@ -711,3 +711,201 @@ fn decimal_groups_fractional_only_large_values_and_invalid_groups() {
         );
     }
 }
+
+fn full_image(id: i32, name: Option<&str>, age: i32) -> Vec<u8> {
+    let mut data = vec![if name.is_none() { 2 } else { 0 }];
+    data.extend(id.to_le_bytes());
+    if let Some(name) = name {
+        data.push(name.len() as u8);
+        data.extend(name.as_bytes());
+    }
+    data.extend(age.to_le_bytes());
+    data
+}
+
+#[test]
+fn full_v1_v2_images_preserve_operations_keys_nulls_and_shared_changed_fields() {
+    use mysql_canal::config::RowImageMode;
+    for ty in [
+        WRITE_ROWS_EVENT_V1,
+        WRITE_ROWS_EVENT,
+        UPDATE_ROWS_EVENT_V1,
+        UPDATE_ROWS_EVENT,
+        DELETE_ROWS_EVENT_V1,
+        DELETE_ROWS_EVENT,
+    ] {
+        let update = matches!(ty, UPDATE_ROWS_EVENT_V1 | UPDATE_ROWS_EVENT);
+        let delete = matches!(ty, DELETE_ROWS_EVENT_V1 | DELETE_ROWS_EVENT);
+        let mut data = Vec::new();
+        for id in [1, 2] {
+            data.extend(full_image(id, Some("old"), 20));
+            if update {
+                data.extend(full_image(if id == 1 { 10 } else { id }, None, 20));
+            }
+        }
+        let mut decoder = Decoder::with_row_image(vec![basic()], RowImageMode::Full).unwrap();
+        decoder
+            .table_map(&table_map(7, &basic(), &[3, 15, 3], &[100, 0]))
+            .unwrap();
+        let mut out = Vec::new();
+        decoder
+            .rows(ty, &rows(7, ty, 3, &[0xff], &[0xff], &data), |c| {
+                out.push(c.into_owned());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].pk, PrimaryKey::Signed(if update { 10 } else { 1 }));
+        assert_eq!(out[0].previous_pk, update.then_some(PrimaryKey::Signed(1)));
+        assert_eq!(out[1].pk, PrimaryKey::Signed(2));
+        assert_eq!(out[1].previous_pk, None);
+        for change in &out {
+            assert_eq!(
+                change.operation,
+                if update {
+                    Operation::Update
+                } else if delete {
+                    Operation::Delete
+                } else {
+                    Operation::Insert
+                }
+            );
+            assert_eq!(
+                change.changed_names().collect::<Vec<_>>(),
+                if delete {
+                    vec![]
+                } else {
+                    vec!["id", "name", "age"]
+                }
+            );
+        }
+        assert!(Arc::ptr_eq(&out[0].changed, &out[1].changed));
+    }
+}
+
+#[test]
+fn image_policies_reject_mismatched_bitmaps_before_emitting() {
+    use mysql_canal::config::RowImageMode;
+    for (mode, ty, first, second) in [
+        (RowImageMode::Minimal, UPDATE_ROWS_EVENT, 7, 7),
+        (RowImageMode::Minimal, DELETE_ROWS_EVENT, 7, 7),
+        (RowImageMode::Full, WRITE_ROWS_EVENT, 1, 1),
+        (RowImageMode::Full, DELETE_ROWS_EVENT, 1, 1),
+        (RowImageMode::Full, UPDATE_ROWS_EVENT, 1, 7),
+        (RowImageMode::Full, UPDATE_ROWS_EVENT, 7, 2),
+    ] {
+        let mut decoder = Decoder::with_row_image(vec![basic()], mode).unwrap();
+        decoder
+            .table_map(&table_map(7, &basic(), &[3, 15, 3], &[100, 0]))
+            .unwrap();
+        let mut emitted = 0;
+        let result = decoder.rows(
+            ty,
+            &rows(7, ty, 3, &[first], &[second], &full_image(1, None, 20)),
+            |_| {
+                emitted += 1;
+                Ok(())
+            },
+        );
+        assert!(
+            matches!(result, Err(Error::Unsupported(_))),
+            "{mode} / {ty}: {result:?}"
+        );
+        assert_eq!(emitted, 0);
+    }
+}
+
+#[test]
+fn full_images_validate_null_constraints_in_both_images_and_truncated_values() {
+    use mysql_canal::config::RowImageMode;
+    let mut meta = basic();
+    meta.columns[2].nullable = false;
+    for (before, after, missing_pk) in [
+        (true, false, false),
+        (false, true, false),
+        (true, false, true),
+        (false, true, true),
+    ] {
+        let valid = full_image(1, Some("x"), 20);
+        let mut invalid = vec![if missing_pk { 1 } else { 4 }];
+        if !missing_pk {
+            invalid.extend(1i32.to_le_bytes());
+        }
+        invalid.extend([1, b'x']);
+        if missing_pk {
+            invalid.extend(20i32.to_le_bytes());
+        }
+        let mut values = if before {
+            invalid.clone()
+        } else {
+            valid.clone()
+        };
+        values.extend(if after { invalid } else { valid });
+        let mut decoder = Decoder::with_row_image(vec![meta.clone()], RowImageMode::Full).unwrap();
+        decoder
+            .table_map(&table_map(7, &meta, &[3, 15, 3], &[100, 0]))
+            .unwrap();
+        let result = decoder.rows(
+            UPDATE_ROWS_EVENT,
+            &rows(7, UPDATE_ROWS_EVENT, 3, &[7], &[7], &values),
+            |_| panic!("invalid row emitted"),
+        );
+        if missing_pk {
+            assert!(matches!(result, Err(Error::MissingPrimaryKey)));
+        } else {
+            assert!(matches!(result, Err(Error::Schema(message)) if message.contains("NOT NULL")));
+        }
+    }
+    let values = full_image(1, Some("abc"), 20);
+    for len in 0..values.len() {
+        let mut decoder = Decoder::with_row_image(vec![meta.clone()], RowImageMode::Full).unwrap();
+        decoder
+            .table_map(&table_map(7, &meta, &[3, 15, 3], &[100, 0]))
+            .unwrap();
+        let result = decoder.rows(
+            WRITE_ROWS_EVENT,
+            &rows(7, WRITE_ROWS_EVENT, 3, &[7], &[], &values[..len]),
+            |_| panic!("truncated row emitted"),
+        );
+        if len == 0 {
+            assert!(matches!(result, Err(Error::Invalid(_))));
+        } else {
+            assert!(matches!(result, Err(Error::Truncated { .. })));
+        }
+    }
+}
+
+#[test]
+fn full_wide_images_keep_late_primary_keys_and_null_bitmap_ordinals() {
+    use mysql_canal::config::RowImageMode;
+    let meta = mysql_canal::TableMeta {
+        schema: "app".into(),
+        table: "wide".into(),
+        columns: (0..80)
+            .map(|i| column(&format!("c{i}"), "int", i == 69))
+            .collect(),
+    };
+    let mut data = Vec::new();
+    for pk in [42i32, 43] {
+        let mut nulls = [0xff; 10];
+        nulls[8] &= !(1 << 5);
+        data.extend(nulls);
+        data.extend(pk.to_le_bytes());
+    }
+    let mut decoder = Decoder::with_row_image(vec![meta.clone()], RowImageMode::Full).unwrap();
+    decoder
+        .table_map(&table_map(7, &meta, &[3; 80], &[]))
+        .unwrap();
+    decoder
+        .rows(
+            UPDATE_ROWS_EVENT,
+            &rows(7, UPDATE_ROWS_EVENT, 80, &[0xff; 10], &[0xff; 10], &data),
+            |change| {
+                assert_eq!(change.pk, PrimaryKey::Signed(43));
+                assert_eq!(change.previous_pk, Some(PrimaryKey::Signed(42)));
+                assert_eq!(change.changed.as_ref(), &(0..80).collect::<Vec<u16>>());
+                Ok(())
+            },
+        )
+        .unwrap();
+}

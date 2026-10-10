@@ -101,3 +101,7 @@ Current-primary-key preflight is a startup eligibility check; saved historical s
 `replay` reads one local file using canal's frame reader and `Processor`, starting from the supplied checkpoint's position and historical schema. It emits committed changes without updating the state file or querying the current server schema.
 
 Use `mysql-replication` for protocol inspection, `mysql-canal` for embedded committed CDC, or [`mysql-cdc-rs`](../crates/mysql-cdc/src/lib.rs) for both through one dependency. The facade's root `Error`/`Result` are canal's; raw operations use `replication::Error`/`replication::Result`.
+
+## Image policies
+
+`config::RowImageMode` is source-local and defaults to MINIMAL. Runtime passes it to online server checks and to Processor → EventConverter → VersionAdapter → Decoder; each FDE rebinds the decoder with the same policy. Offline replay supplies the mode explicitly. Raw `RowsEvent` and `RowsDecoder` remain bitmap-driven and independent of this CDC policy. FULL requires complete images but retains selective key decoding, borrowed UTF-8 keys and shared after-image column indices. Checkpoints retain their v1 format and historical schemas; the mode is a runtime option, not a property inferred from the current server or FDE.

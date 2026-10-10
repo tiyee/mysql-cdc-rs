@@ -3,6 +3,7 @@ use super::events::{
 };
 use crate::{
     Change, ColumnMeta, Error, Operation, PrimaryKey, Result, TableMeta,
+    config::RowImageMode,
     error::invalid,
     model::schema::{KeyDecoder, key_decoder},
     protocol::mysql::wire::{Cursor, bit, set_bits},
@@ -91,6 +92,7 @@ impl ImagePlan {
 /// TABLE_MAP preprocessing + sparse ROWS decoding. The callback borrows event bytes.
 /// Only white-listed tables are compiled; other tables' ROWS payloads are skipped.
 pub struct Decoder {
+    row_image: RowImageMode,
     tables: BTreeMap<String, BTreeMap<String, Arc<TableMeta>>>,
     compiled: BTreeMap<String, BTreeMap<String, Arc<TablePlan>>>,
     index: Vec<(u64, Option<Arc<TablePlan>>)>,
@@ -98,7 +100,13 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(tables: Vec<TableMeta>) -> Result<Self> {
+        Self::with_row_image(tables, RowImageMode::Minimal)
+    }
+
+    /// Compiles layouts for the selected image policy without materializing rows.
+    pub fn with_row_image(tables: Vec<TableMeta>, row_image: RowImageMode) -> Result<Self> {
         let mut out = Self {
+            row_image,
             tables: BTreeMap::new(),
             compiled: BTreeMap::new(),
             index: Vec::new(),
@@ -229,13 +237,26 @@ impl Decoder {
         if operation == Operation::Update && after.columns.is_empty() {
             return Err(invalid("empty after row image"));
         }
-        // With MINIMAL + a single PK, the before image must contain that PK only.
-        if operation != Operation::Insert
-            && (before.columns.len() != 1 || !bit(first, table.pk_index))
-        {
-            return Err(Error::Unsupported(
-                "expected MINIMAL before image containing only the primary key".into(),
-            ));
+        // Validate once per event, before the row loop and any callback.
+        match self.row_image {
+            RowImageMode::Minimal => {
+                if operation != Operation::Insert
+                    && (before.columns.len() != 1 || !bit(first, table.pk_index))
+                {
+                    return Err(Error::Unsupported(
+                        "expected MINIMAL before image containing only the primary key".into(),
+                    ));
+                }
+            }
+            RowImageMode::Full => {
+                if before.columns.len() != count
+                    || operation == Operation::Update && after.columns.len() != count
+                {
+                    return Err(Error::Unsupported(
+                        "expected FULL row images containing every column".into(),
+                    ));
+                }
+            }
         }
         let changed: Arc<[u16]> = if operation == Operation::Delete {
             Arc::from([])

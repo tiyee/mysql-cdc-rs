@@ -364,3 +364,131 @@ fn offline_eof_does_not_hide_partial_event_header() {
     let mut empty = BinlogFile::new([0xfe, b'b', b'i', b'n'].as_slice()).unwrap();
     assert!(empty.next_event().is_err());
 }
+
+#[test]
+fn full_transactions_commit_and_resume_but_mismatches_do_not_advance_disk_state() {
+    use mysql_canal::{config::RowImageMode, protocol::mysql::version::VersionRegistry};
+    let path = temporary("full-mode");
+    let initial = state();
+    initial.save(&path).unwrap();
+    let mut output = Vec::new();
+    let mut processor = Processor::with_row_image(
+        initial,
+        Some(path.clone()),
+        100_000,
+        VersionRegistry::default(),
+        None,
+        RowImageMode::Full,
+    )
+    .unwrap();
+    feed(
+        &mut processor,
+        FORMAT_DESCRIPTION_EVENT,
+        0,
+        &format(),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut processor,
+        QUERY_EVENT,
+        100,
+        &query("BEGIN"),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut processor,
+        TABLE_MAP_EVENT,
+        150,
+        &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+        &mut output,
+    )
+    .unwrap();
+    let mut data = vec![2];
+    data.extend(42i32.to_le_bytes());
+    data.extend(20i32.to_le_bytes());
+    feed(
+        &mut processor,
+        WRITE_ROWS_EVENT,
+        200,
+        &rows(7, WRITE_ROWS_EVENT, 3, &[7], &[], &data),
+        &mut output,
+    )
+    .unwrap();
+    assert!(output.is_empty());
+    assert_eq!(State::read(&path).unwrap().position, state().position);
+    feed(&mut processor, XID_EVENT, 240, &[0; 8], &mut output).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
+        serde_json::json!({"source":"test", "schema":"app", "table":"users", "operation":"insert", "pk":{"type":"signed", "value":42}, "changed":["id","name","age"]})
+    );
+    let mut resumed = Processor::with_row_image(
+        State::read(&path).unwrap(),
+        Some(path.clone()),
+        100_000,
+        VersionRegistry::default(),
+        None,
+        RowImageMode::Full,
+    )
+    .unwrap();
+    output.clear();
+    feed(
+        &mut resumed,
+        FORMAT_DESCRIPTION_EVENT,
+        0,
+        &format(),
+        &mut output,
+    )
+    .unwrap();
+    feed(&mut resumed, QUERY_EVENT, 260, &query("BEGIN"), &mut output).unwrap();
+    feed(
+        &mut resumed,
+        TABLE_MAP_EVENT,
+        280,
+        &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut resumed,
+        WRITE_ROWS_EVENT,
+        300,
+        &rows(7, WRITE_ROWS_EVENT, 3, &[7], &[], &data),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut resumed,
+        QUERY_EVENT,
+        320,
+        &query("ROLLBACK"),
+        &mut output,
+    )
+    .unwrap();
+    assert!(output.is_empty());
+    assert_eq!(State::read(&path).unwrap().position, 320);
+    let saved = std::fs::read(&path).unwrap();
+    feed(&mut resumed, QUERY_EVENT, 340, &query("BEGIN"), &mut output).unwrap();
+    feed(
+        &mut resumed,
+        TABLE_MAP_EVENT,
+        360,
+        &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+        &mut output,
+    )
+    .unwrap();
+    assert!(matches!(
+        feed(
+            &mut resumed,
+            DELETE_ROWS_EVENT,
+            400,
+            &rows(7, DELETE_ROWS_EVENT, 3, &[1], &[], &[0, 42, 0, 0, 0]),
+            &mut output
+        ),
+        Err(Error::Unsupported(_))
+    ));
+    assert!(output.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), saved);
+    std::fs::remove_file(path).unwrap();
+}

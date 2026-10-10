@@ -2,7 +2,7 @@
 use super::{EventStream, ServerInfo, SourcePlugin, SourceSession};
 use crate::{
     ColumnMeta, Error, Result, TableMeta,
-    config::Config,
+    config::{Config, RowImageMode},
     engine::checkpoint::State,
     error::invalid,
     protocol::mysql::{
@@ -25,11 +25,12 @@ impl SourcePlugin for MysqlSource {
         versions: &VersionRegistry,
     ) -> Result<Box<dyn SourceSession>> {
         let mut conn = connect(config)?;
-        let (uuid, version, adapter) = inspect_server(
+        let (uuid, version, adapter) = inspect_server_with_row_image(
             &mut conn,
             config.source.server_id,
             versions,
             config.source.adapter.as_deref(),
+            config.source.row_image,
         )?;
         mysql_replication::primary_key::validate_primary_keys(
             &mut conn,
@@ -80,7 +81,10 @@ impl SourceSession for MysqlSession {
         let mut replication =
             ReplicationConfig::new(config.source.server_id, &state.file, state.position);
         replication.non_blocking = once;
-        replication.required_row_image = Some(RowImage::Minimal);
+        replication.required_row_image = Some(match config.source.row_image {
+            RowImageMode::Minimal => RowImage::Minimal,
+            RowImageMode::Full => RowImage::Full,
+        });
         replication.parser = mysql_replication::parser::ParserConfig::minimal();
         Ok(Box::new(MysqlEvents {
             stream: ReplicationStream::from_connection_with_tables(
@@ -118,15 +122,30 @@ pub fn inspect_server(
     crate::protocol::mysql::version::ServerVersion,
     std::sync::Arc<dyn crate::protocol::mysql::version::VersionAdapter>,
 )> {
+    inspect_server_with_row_image(conn, server_id, registry, selected, RowImageMode::Minimal)
+}
+
+pub fn inspect_server_with_row_image(
+    conn: &mut Conn,
+    server_id: u32,
+    registry: &VersionRegistry,
+    selected: Option<&str>,
+    row_image: RowImageMode,
+) -> Result<(
+    String,
+    crate::protocol::mysql::version::ServerVersion,
+    Arc<dyn VersionAdapter>,
+)> {
     let raw: String = conn
         .query_first("SELECT VERSION()")?
         .ok_or_else(|| invalid("no VERSION()"))?;
     let version = crate::protocol::mysql::version::ServerVersion::parse(&raw)?;
     let adapter = registry.resolve(&version, selected)?;
     let variables: Vec<(String, String)> = conn.query("SHOW GLOBAL VARIABLES WHERE Variable_name IN ('log_bin','binlog_format','binlog_row_image','binlog_transaction_compression','binlog_row_value_options','server_id')")?;
-    adapter.validate_server(
+    adapter.validate_server_with_row_image(
         &variables.into_iter().collect::<BTreeMap<_, _>>(),
         server_id,
+        row_image,
     )?;
     let uuid = conn
         .query_first("SELECT @@server_uuid")?
