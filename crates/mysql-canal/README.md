@@ -37,6 +37,8 @@ CDC output contains only the source, schema/table, operation, exact primary key,
 
 Use `Cdc::with_runtime` to register `SourcePlugin` or `VersionAdapter` implementations. `EventParser` handles event layout differences; `RowDecoder` handles field encodings. Each FDE selects its producer's adapter again, including historical files from before an upgrade. Built-in adapters cover validated MySQL 5.7, 8.0–8.4, 9.0 and 9.7 series. The default ROTATE post-header must be exactly 8 bytes. Producer versions require numeric `major.minor.patch` components with optional nonempty `-` or `+` suffixes, and built-in adapters reject MariaDB identifiers. Unknown layouts, compressed transactions, XA, partial JSON and unregistered series are rejected. Real-server verification is separate from synthetic protocol tests. See [custom_version.rs](examples/custom_version.rs), [listen.rs](examples/listen.rs), and the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for the CLI, output contract and compatibility matrix.
 
+Validation errors preserve the commit boundary: NULL in a NOT NULL non-key column produces `Error::Schema`, a NULL primary key produces `Error::MissingPrimaryKey`, malformed producer versions produce `Error::Invalid`, and unsupported vendors or FDE layouts produce `Error::Unsupported`. The protocol regressions check error categories and unchanged disk checkpoints separately from real-server compatibility tests.
+
 ```sh
 cargo test -p mysql-canal --locked
 cargo bench -p mysql-canal --bench minimal_rows

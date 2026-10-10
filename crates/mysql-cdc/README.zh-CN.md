@@ -45,6 +45,8 @@ fn convert(converter: &mut EventConverter, event: &BinlogEvent<'_>) -> Result<()
 }
 ```
 
+`EventConverter` 在处理 ROWS 时即回调行变更，早于事务提交，并返回描述控制边界的 `EventAction`。上例仅演示转换；需要交付已提交事务时，应使用 `Cdc`，或将每个事件交给 `Processor`。直接转换回调不负责事务缓冲、丢弃回滚变更或检查点持久化。转换行事件之前须先处理该文件的 FDE。
+
 离线原始事件入口为 `mysql_cdc_rs::replication::file::BinlogFile`，在线复制入口为 `mysql_cdc_rs::replication::stream::ReplicationStream`。完整示例见 [listen.rs](examples/listen.rs) 和 [dump_file.rs](examples/dump_file.rs)。从 workspace 根目录运行：
 
 ```sh
@@ -54,4 +56,4 @@ cargo run -p mysql-cdc-rs --example replication_dump_file -- /path/to/binlog.000
 
 CDC 使用具名来源，各自维护 schema、白名单和检查点。仅交付已提交变更，包含来源、库表、操作、精确主键和变动字段名。回滚丢弃缓冲；失败停止消费，检查点持久化前崩溃可能导致重放。库不注册默认输出处理器；`pikachu` 包提供 `pikachu-cdc` CLI。
 
-底层两个库仍可单独依赖。配置、输出契约、版本支持和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/main/README.zh-CN.md)、[CDC 库](https://docs.rs/mysql-canal)和[复制库](https://docs.rs/mysql-replication)。
+底层两个库仍可单独依赖。配置、输出契约、版本支持和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)、[CDC 库](https://docs.rs/mysql-canal)和[复制库](https://docs.rs/mysql-replication)。

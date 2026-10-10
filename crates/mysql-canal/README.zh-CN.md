@@ -35,7 +35,9 @@ fn main() -> Result<()> {
 
 CDC 输出仅包含来源、库表、操作、精确主键、可选旧主键及变动字段名。支持单列有符号/无符号整数、精确 DECIMAL 和已支持字符集的 CHAR/VARCHAR 主键。INSERT/UPDATE 的变动字段按 after-image 位图，包括 NULL 与主键写入；DELETE 为空。不支持的主键、缺失主键、截断及元数据不匹配明确报错。稀疏镜像中的 NOT NULL 非主键列出现 NULL 同样报错，不交付事务或推进检查点。内置来源要求 ROW + MINIMAL；表匹配后才解析镜像，只解码主键，其余字段按编码长度跳过。转换中的 UTF-8 主键和事件视图保持借用，字段索引共享 `Arc<[u16]>`。传输无法裁剪上游 binlog 已包含的列。
 
-通过 `Cdc::with_runtime` 注册 `SourcePlugin` 或 `VersionAdapter`。`EventParser` 处理事件布局差异，`RowDecoder` 处理字段编码差异。每个 FDE 根据生产者重新选择适配器，支持升级前生成的历史文件。内置适配器覆盖已校验的 MySQL 5.7、8.0–8.4、9.0、9.7 系列；默认 ROTATE post-header 必须精确为 8 字节。生产者版本要求完整数字 `major.minor.patch`，允许非空的 `-` 或 `+` 后缀，内置适配器拒绝 MariaDB 标识；未知布局、压缩事务、XA、partial JSON 及未注册系列明确拒绝。实库验证与合成协议测试分开。参见 [custom_version.rs](examples/custom_version.rs)、[listen.rs](examples/listen.rs) 和[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/main/README.zh-CN.md)中的 CLI、输出契约及兼容矩阵。
+通过 `Cdc::with_runtime` 注册 `SourcePlugin` 或 `VersionAdapter`。`EventParser` 处理事件布局差异，`RowDecoder` 处理字段编码差异。每个 FDE 根据生产者重新选择适配器，支持升级前生成的历史文件。内置适配器覆盖已校验的 MySQL 5.7、8.0–8.4、9.0、9.7 系列；默认 ROTATE post-header 必须精确为 8 字节。生产者版本要求完整数字 `major.minor.patch`，允许非空的 `-` 或 `+` 后缀，内置适配器拒绝 MariaDB 标识；未知布局、压缩事务、XA、partial JSON 及未注册系列明确拒绝。实库验证与合成协议测试分开。参见 [custom_version.rs](examples/custom_version.rs)、[listen.rs](examples/listen.rs) 和[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)中的 CLI、输出契约及兼容矩阵。
+
+校验失败保持提交边界：NOT NULL 非主键列出现 NULL 返回 `Error::Schema`，主键为 NULL 返回 `Error::MissingPrimaryKey`，畸形生产者版本返回 `Error::Invalid`，不支持的厂商或 FDE 布局返回 `Error::Unsupported`。协议回归单独核对错误类别和磁盘检查点不推进，与实库兼容测试区分。
 
 ```sh
 cargo test -p mysql-canal --locked

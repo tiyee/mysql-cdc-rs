@@ -4,6 +4,15 @@ English | [简体中文](README.zh-CN.md)
 
 `mysql-cdc-rs` (`mysql_cdc_rs`) is the unified library entry point, re-exporting `mysql-canal` and `mysql-replication`. `pikachu` provides the CLI (`pikachu-cdc`), which depends on the CDC library `mysql-canal` (`mysql_canal`). The separate `mysql-replication` package provides protocol events and replication transport, with no whitelist, application schema, transaction sink or checkpoint policy. CDC keeps only **database names, table names, single-column primary keys, and changed column names**, without materializing full rows. Built-in `ROW + MINIMAL` adapters cover Oracle MySQL 5.7, 8.0, 8.1–8.4, 9.0 and 9.7, with concurrent consumption from multiple instances. Real-server compatibility tests must be run separately.
 
+All four workspace packages use version **1.0.0**. Choose the package by the API you need:
+
+| Package | Entry point | Purpose |
+| --- | --- | --- |
+| [`mysql-cdc-rs`](crates/mysql-cdc/README.md) | `mysql_cdc_rs` | Unified CDC and raw replication API |
+| [`mysql-canal`](crates/mysql-canal/README.md) | `mysql_canal` | CDC conversion, committed transaction handlers and checkpoints |
+| [`mysql-replication`](crates/mysql-replication/README.md) | `mysql_replication` | Borrowed protocol events, offline files and replication transport |
+| [`pikachu`](crates/pikachu/README.md) | `pikachu-cdc` | CLI with JSON Lines output |
+
 ## Project layout
 
 ```text
@@ -29,6 +38,7 @@ crates/mysql-replication/
 ├── src/events/          # Event trait, common header and concrete binlog events
 ├── src/frame.rs         # Raw bytes, bounds and checksums
 ├── src/parser.rs        # Per-file layouts and configurable lazy parsing
+├── src/version.rs       # Shared numeric producer-version validation
 ├── src/file.rs          # Offline event/frame reader
 ├── src/stream.rs        # Replication transport and borrowed body views
 └── tests/events.rs      # Protocol regression tests
@@ -44,7 +54,7 @@ CDC uses the replication library's `next_view()` network path to borrow the driv
 
 ## Usage
 
-Build the CLI from this workspace with `cargo build --release --locked -p pikachu`; after publication, install it with `cargo install pikachu`. For library integration, depend only on `mysql-cdc-rs`:
+Build the CLI from this workspace with `cargo build --release --locked -p pikachu`; once the version is available on crates.io, install it with `cargo install pikachu --version 1.0.0 --locked`. For library integration, depend only on `mysql-cdc-rs`:
 
 ```toml
 [dependencies]
@@ -75,7 +85,7 @@ CDC types and modules are re-exported at the root (`mysql_cdc_rs::Cdc`, `mysql_c
 The CLI registers its default `PrintHandle`, which writes JSON Lines to stdout. Its command name remains `pikachu-cdc`. Start with `crates/pikachu/examples/config/multi-source.toml`. Each `[[sources]]` entry has its own `id`, `state_file`, `source`, and `tables`:
 
 ```sh
-cargo build --release --locked
+cargo build --release --locked -p pikachu
 cp crates/pikachu/examples/config/multi-source.toml cdc.toml
 # Set each source's [[sources.tables]] to exact database and table names, respecting server case rules.
 export MYSQL_EAST_URL='mysql://cdc:password@east.example:3306'
@@ -83,6 +93,14 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 ./target/release/pikachu-cdc check cdc.toml
 ./target/release/pikachu-cdc run cdc.toml > changes.jsonl
 ```
+
+| Command | Behavior |
+| --- | --- |
+| `pikachu-cdc check CONFIG.toml` | Validate sources, server capabilities and table schemas without consuming events |
+| `pikachu-cdc init CONFIG.toml` | Save initial schemas and current positions without consuming events; reject existing state files |
+| `pikachu-cdc run CONFIG.toml` | Initialize missing states, then consume continuously from each saved position |
+| `pikachu-cdc run CONFIG.toml --once` | Consume currently available events and exit |
+| `pikachu-cdc replay STATE.json BINLOG_FILE` | Replay one local file using the saved historical schema without modifying state |
 
 All configurations use the `[[sources]]` list, including deployments with just one named source. Each entry must explicitly specify an `id` and the credentials environment variable in `sources.source.url_env`. Source IDs and state paths must be distinct, and state parent directories must already exist. Subscriptions to the same upstream instance UUID must also use distinct replication `server_id` values. Different instances may reuse replication IDs, although assigning them centrally is easier to operate.
 
@@ -217,7 +235,9 @@ XA, partial JSON updates, compressed transactions, MariaDB extensions, and unkno
 ```sh
 cargo fmt --all -- --check
 cargo test --workspace --locked
+cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 ```
 
 Default tests cover event adaptation and zero-copy behavior, source thread isolation, identical table IDs with different column orders, source identity binding, independent checkpoints, sink failures, version selection, historical-file adapter selection, custom parsers/decoders, and registry conflicts. Independently constructed protocol bytes cover sign extension, sparse NULL images, multiple rows, key changes, long CHAR values, mixed skip types, more than 64 columns, table ID reuse, truncation, CRC32/NONE, transaction visibility, checkpoint ordering, and file locks. These are synthetic fixtures, not mysqlbinlog exports.
@@ -227,11 +247,14 @@ GitHub Actions runs tests on Ubuntu with Rust 1.89.0 and stable, and macOS with 
 Run real-MySQL tests explicitly against a dedicated test server. The fixtures create and drop uniquely named databases:
 
 ```sh
-MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait
+MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
+export CDC_TEST_MYSQL_SERIES='8.4'
 cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 docker compose -f tests/infra/compose.yaml down -v
 ```
+
+Always run `down -v` after this dedicated test run, including when startup or tests fail. When switching the image, update `CDC_TEST_MYSQL_SERIES` to match and remove the old test volume first.
 
 `mysql_live` contains 11 independent scenarios reading actual server-generated binlogs through the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. Synthetic events do not replace real mutations. Assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
 

@@ -45,6 +45,8 @@ fn convert(converter: &mut EventConverter, event: &BinlogEvent<'_>) -> Result<()
 }
 ```
 
+`EventConverter` emits row changes while processing ROWS, before transaction commit, and returns an `EventAction` describing control boundaries. The example above only demonstrates conversion. Applications delivering committed transactions should use `Cdc` or feed every event through `Processor`; direct conversion callbacks do not buffer transactions, discard rolled-back changes or persist checkpoints. Feed the file's FDE before converting its row events.
+
 For offline raw events, import `mysql_cdc_rs::replication::file::BinlogFile`. For network replication, import `mysql_cdc_rs::replication::stream::ReplicationStream`. See [listen.rs](examples/listen.rs) and [dump_file.rs](examples/dump_file.rs) for complete examples. From the workspace root:
 
 ```sh

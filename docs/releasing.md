@@ -62,11 +62,51 @@ cargo publish --locked --registry crates-io --package pikachu
 
 ## 发布版本
 
-同步修改 `crates/pikachu/Cargo.toml`、`crates/mysql-canal/Cargo.toml`、`crates/mysql-replication/Cargo.toml` 与 `crates/mysql-cdc/Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-canal`、canal 的 `mysql-replication` 和聚合包的两个库精确依赖版本。执行 `cargo check --workspace` 更新 lockfile 并一同提交。版本保护脚本要求四个包同版、tag 精确匹配该版本，并验证库名称、依赖路径与版本；任一不匹配均拒绝发布。先让主分支 CI 通过，再推送与版本完全一致的新 tag。旧包 `pikachu-rs 0.0.1` 已完成首次发布；此记录不代表新包已发布。本次四个包统一为 `1.0.0`，对应标签为：
+当前四个包的清单版本为 `1.0.0`，[`v1.0.0`](https://github.com/tiyee/mysql-cdc-rs/tree/v1.0.0) 已推送，指向版本提交 `edb1c72714e69c92cbf0ef412e77de3bdaacd85c`。不要重新创建、移动或强推该标签。标签存在不代表完整 CI 或 crates.io 上传成功；需分别查看 [Actions](https://github.com/tiyee/mysql-cdc-rs/actions) 和各 crate 的实际版本。
+
+后续版本按以下顺序准备：
+
+1. 同步四个成员 `Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-canal`、canal 的 `mysql-replication`、聚合包两个库的精确依赖版本；同步根目录及各包双语 README 的版本示例。
+2. 执行 `cargo check --workspace --all-targets` 更新根目录 `Cargo.lock`，确认只改变预期的工作区版本，不无关升级依赖。运行下面的本地检查。
+3. 仅暂存本次项目文件，检查暂存内容后提交。保持工作区干净，再执行打包验证，以便包内 `.cargo_vcs_info.json` 对应实际发布提交。
+4. 检查四个包的内容，将版本提交推送到主分支并等待完整 CI。确认每个 crate 的可信发布者配置，以及该版本尚未上传。
+5. 检查远端不存在同名标签，按清单版本创建新的附注标签并推送；发布工作流会在标签提交上重新执行完整 CI。
+
+本地检查从 workspace 根目录执行：
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
+python3 -m unittest discover -s scripts/release -p 'test_*.py'
+```
+
+提交后验证四个发布包：
+
+```sh
+cargo publish --workspace --dry-run --locked --registry crates-io
+```
+
+该命令在临时本地 registry 中解析尚未上传的成员依赖，并逐包解包编译，不实际上传。不要通过删除 `--locked`、跳过验证或先上传库来绕过依赖解析失败。存在自定义 registry 镜像替换时，可在仓库外目录使用独立 `CARGO_HOME`，并通过 `--manifest-path` 指向 workspace；不要修改用户全局配置。
+
+检查 `target/package` 下四个 `<crate>-<version>.crate`（workspace dry-run 可能将归档放在 `tmp-crate/` 子目录）中的文件列表、清单、精确依赖版本及 `.cargo_vcs_info.json`。确认包含预期源码、示例、测试、README、许可证及生成的 lockfile，不包含 AI 协作文件、本地 state 或凭据。需要分发本地归档时，可将验证后的四个包复制出来并生成 SHA256 校验文件；这些构建产物不加入源码提交。
+
+以下是**后续新版本**的标签模板，先将 `v<version>` 替换为四个清单中完全一致的版本。版本保护脚本同时校验包名、内部依赖路径和精确版本。`git ls-remote` 若返回已有同名标签，应停止，不覆盖该标签：
+
+```sh
+set -eu
+RELEASE_TAG='v<version>'
+python3 scripts/release/check_version.py "$RELEASE_TAG"
+EXISTING_RELEASE_TAG=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+if test -n "$EXISTING_RELEASE_TAG"; then
+    printf 'Release tag already exists: %s\n' "$RELEASE_TAG" >&2
+    exit 1
+fi
+git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+git push origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}"
 ```
 
 `release.yml` 只响应 `v*.*.*` tag 推送，按顺序执行：校验 tag → 在该 tag 提交上复用完整 CI → OIDC 认证 → 使用短期 token 发布 `mysql-replication` → 发布 `mysql-canal` → 发布 `mysql-cdc-rs` → 发布 `pikachu`。可信发布者未配置或不匹配、OIDC 认证失败、版本不匹配、任一矩阵失败或打包失败都会阻止发布。`v1.0.0-rc.1` 等预发布 tag 也必须与 Cargo 版本精确一致。
@@ -78,6 +118,17 @@ git push origin v1.0.0
 mysql-cdc-rs = "1.0.0"
 ```
 
-统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu` 安装。本次库与 CLI 均使用 `1.0.0`；不能覆盖旧包已发布的 `pikachu-rs 0.0.1`。工作流本身不会创建 GitHub Release 或推送 Git tag。
+统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu --version 1.0.0 --locked` 安装，命令名为 `pikachu-cdc`。四个包清单版本均为 `1.0.0`；旧包 `pikachu-rs 0.0.1` 的记录不代表这些包已发布。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 四个包发布不是原子操作。若部分包已上传而后续包失败，先确认各 crate 的实际状态，不要直接重跑整个发布 job 重复上传；可按依赖顺序恢复尚未发布的包。已成功上传的版本不能重复发布；修改内容需要同步增加四个包的版本号，并使用匹配的新 tag。
+
+## 发布结果核对
+
+| 状态 | 核对依据 |
+| --- | --- |
+| 本地包验证通过 | 四个包的 dry-run 均成功，解包编译通过，内容及版本已检查 |
+| 标签推送成功 | 远端 `refs/tags/<tag>^{}` 解析到预期发布提交；附注标签本身的对象 ID 与提交 ID 不同 |
+| 完整 CI 通过 | 对应标签的版本校验、质量、Rust 矩阵、MySQL 矩阵、打包及汇总 job 均成功 |
+| crates.io 发布成功 | publish job 的四次上传成功，并逐一确认每个 crate 的对应版本可用 |
+
+不要将 dry-run 日志中的 `Uploading` 行当成上传成功：其后的 `aborting upload due to dry run` 表示未上传。标签推送成功也不能替代 CI 和四包发布结果确认。

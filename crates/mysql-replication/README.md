@@ -74,4 +74,4 @@ cargo test -p mysql-replication --locked
 cargo test -p mysql-canal --locked
 ```
 
-Synthetic protocol tests verify headers, raw-byte preservation, CRC32/NONE, optional/tagged GTID metadata, lazy ROWS parsing, wide sparse bitmaps and owned lifetimes. Real-server CDC compatibility tests and version adapters live in `mysql-canal`; see the [project README](../../README.md).
+Synthetic protocol tests verify headers, raw-byte preservation, CRC32/NONE, optional/tagged GTID metadata, lazy ROWS parsing, wide sparse bitmaps and owned lifetimes. Real-server CDC compatibility tests and version adapters live in `mysql-canal`; see the [project README](https://github.com/tiyee/mysql-cdc-rs#readme).

@@ -4,6 +4,15 @@
 
 `mysql-cdc-rs`（导入路径 `mysql_cdc_rs`）作为统一库入口，重导出 `mysql-canal` 和 `mysql-replication`。`pikachu` 提供 CLI（命令名 `pikachu-cdc`），依赖独立的 CDC 公共库 `mysql-canal`（导入路径 `mysql_canal`）。底层包 `mysql-replication` 提供协议事件和复制传输，不依赖白名单、业务 schema、事务 sink 或检查点策略。CDC 只保留白名单表的**库名、表名、单列主键、变动字段名**，不构建整行值。内置 Oracle MySQL 5.7 / 8.0 / 8.1–8.4 / 9.0 / 9.7 的 `ROW + MINIMAL` 版本适配器，支持多个实例并行消费。实库兼容矩阵需单独运行。
 
+四个 workspace 包统一使用 **1.0.0** 版本，可按所需 API 选择：
+
+| 包 | 入口 | 职责 |
+| --- | --- | --- |
+| [`mysql-cdc-rs`](crates/mysql-cdc/README.zh-CN.md) | `mysql_cdc_rs` | 统一 CDC 与原始复制 API |
+| [`mysql-canal`](crates/mysql-canal/README.zh-CN.md) | `mysql_canal` | CDC 转换、提交事务回调及检查点 |
+| [`mysql-replication`](crates/mysql-replication/README.zh-CN.md) | `mysql_replication` | 借用协议事件、离线文件及复制传输 |
+| [`pikachu`](crates/pikachu/README.zh-CN.md) | `pikachu-cdc` | 输出 JSON Lines 的 CLI |
+
 ## 目录结构
 
 ```text
@@ -29,6 +38,7 @@ crates/mysql-replication/
 ├── src/events/          # Event trait, common header and concrete binlog events
 ├── src/frame.rs         # Raw bytes, bounds and checksums
 ├── src/parser.rs        # Per-file layouts and configurable lazy parsing
+├── src/version.rs       # Shared numeric producer-version validation
 ├── src/file.rs          # Offline event/frame reader
 ├── src/stream.rs        # Replication transport and borrowed body views
 └── tests/events.rs      # Protocol regression tests
@@ -44,7 +54,7 @@ CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不�
 
 ## 运行
 
-从 workspace 构建 CLI：`cargo build --release --locked -p pikachu`；发布后可使用 `cargo install pikachu` 安装。库接入只需依赖 `mysql-cdc-rs`：
+从 workspace 构建 CLI：`cargo build --release --locked -p pikachu`；该版本在 crates.io 可用后，可使用 `cargo install pikachu --version 1.0.0 --locked` 安装。库接入只需依赖 `mysql-cdc-rs`：
 
 ```toml
 [dependencies]
@@ -75,7 +85,7 @@ CDC 类型和模块同时从根路径（如 `mysql_cdc_rs::Cdc`、`mysql_cdc_rs:
 CLI 注册默认 `PrintHandle`，将事件打印为 stdout JSON Lines；命令名继续使用 `pikachu-cdc`。使用 `crates/pikachu/examples/config/multi-source.toml`，每个 `[[sources]]` 都有独立 `id`、`state_file`、`source` 和 `tables`：
 
 ```sh
-cargo build --release --locked
+cargo build --release --locked -p pikachu
 cp crates/pikachu/examples/config/multi-source.toml cdc.toml
 # Set each source's [[sources.tables]] to exact database and table names, respecting server case rules.
 export MYSQL_EAST_URL='mysql://cdc:password@east.example:3306'
@@ -83,6 +93,14 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 ./target/release/pikachu-cdc check cdc.toml
 ./target/release/pikachu-cdc run cdc.toml > changes.jsonl
 ```
+
+| 命令 | 行为 |
+| --- | --- |
+| `pikachu-cdc check CONFIG.toml` | 校验来源、服务器能力及表 schema，不消费事件 |
+| `pikachu-cdc init CONFIG.toml` | 保存初始 schema 和当前位点，不消费事件；已有 state 文件时报错 |
+| `pikachu-cdc run CONFIG.toml` | 初始化缺失的 state，再从各自保存的位点持续消费 |
+| `pikachu-cdc run CONFIG.toml --once` | 消费当前可用事件后退出 |
+| `pikachu-cdc replay STATE.json BINLOG_FILE` | 按历史 schema 回放一个本地文件，不修改 state |
 
 配置统一使用 `[[sources]]` 列表；只连接一个实例时也使用一个具名条目。每个来源必须显式填写 `id` 和凭据环境变量 `sources.source.url_env`。来源的 ID 和 state 路径必须各不相同，state 的父目录须已存在；指向同一实例 UUID 的多个订阅还必须使用不同复制 `server_id`。不同实例可以复用复制 ID，但统一分配更便于运维。每个来源单独持有线程、连接、schema、table_id 映射、事务预算和提交位点。一个来源不能借用另一个来源的 TABLE_MAP，跨来源也没有全局事务或全局顺序。
 
@@ -211,7 +229,9 @@ XA、部分 JSON 更新、压缩事务、MariaDB 扩展、非可忽略未知事�
 ```sh
 cargo fmt --all -- --check
 cargo test --workspace --locked
+cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 ```
 
 默认测试包括事件结构适配与零拷贝、多来源线程隔离、相同 table_id 不同列序、来源身份绑定、独立位点、输出失败、版本系列选择、旧文件重选适配器、自定义事件/行解码器与注册冲突；并使用独立构造的协议字节覆盖符号扩展、稀疏 NULL、多行与主键变更、长 CHAR、多种跳读类型、超过 64 列、table_id 复用、截断、CRC32/NONE、事务可见性、位点保存顺序与文件锁。它们不是 mysqlbinlog 导出的实库 fixture。
@@ -221,11 +241,14 @@ GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、sta
 真实 MySQL 集成测试（显式执行，在独立测试服务上创建并删除唯一命名的测试库）：
 
 ```sh
-MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait
+MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
+export CDC_TEST_MYSQL_SERIES='8.4'
 cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 docker compose -f tests/infra/compose.yaml down -v
 ```
+
+无论专用容器启动或测试成功与否，本次测试结束都要执行 `down -v`。切换镜像时同步修改 `CDC_TEST_MYSQL_SERIES`，并先删除旧测试卷。
 
 `mysql_live` 包含 11 个独立实库场景，均通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径读取服务器实际生成的 binlog；不使用合成事件替代实库变更。输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk 与 changed，缺失、额外或重复的事件都会失败。
 
