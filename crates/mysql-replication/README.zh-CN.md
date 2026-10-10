@@ -62,8 +62,49 @@ fn main() -> Result<()> {
 - `next_frame()` 校验长度/checksum，保留原始字节，事件体留给自定义适配器。
 - 在线 `next_view()` 校验驱动事件并直接借用 body，适合不需要完整原始帧的消费者。
 - `ParserConfig::minimal()` 跳过 GTID 元数据和 Previous GTIDs 解析，保留原事件码及明确的 raw 载荷。
-- ROWS 默认延迟解析镜像，调用 `RowsEvent::images()` 时才读取 extra-data 和稀疏位图。`RowsDecode::ValidateImages` 可要求立即校验。所有模式均不构建完整行值。
+- ROWS 默认延迟解析镜像，调用 `RowsEvent::images()` 时才读取 extra-data 和稀疏位图。`RowsDecode::ValidateImages` 可要求立即校验。这些解析模式不解码字段值；下方独立的 `RowsDecoder` API 按需启用。
 - `TableMapEvent::columns()` 在表匹配后按需校验列结构。
+
+## 解码原始行镜像
+
+事件框架位于 `events`：`BinlogEvent` 是通用容器，`EventHeader` 是公共头，`EventData` 是具体事件体枚举。容器所有权、控制事件、TABLE_MAP 和 ROWS 分别由独立模块实现；现有公共导入路径保持不变。`RowsEvent` 描述协议事件，`RowsDecoder` 独立于 CDC 策略编译列布局。
+
+```rust,no_run
+use mysql_replication::{Result, events::{RowValue, RowsDecoder, RowsEvent, TableMapEvent}};
+
+fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
+    let decoder = RowsDecoder::new(table)?;
+    for row in event.rows(&decoder)? {
+        let row = row?;
+        for (label, image) in [("before", row.before), ("after", row.after)] {
+            if let Some(image) = image {
+                for field in image.fields() {
+                    let field = field?;
+                    match field.value {
+                        RowValue::Null => println!("{label}[{}] = NULL", field.column_index),
+                        RowValue::Decimal(value) => println!("{label}[{}] = {value}", field.column_index),
+                        value => println!("{label}[{}] = {value:?}", field.column_index),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+每个来源为当前有效的 TABLE_MAP 缓存独立解码器。table ID 重映射时替换解码器，文件或语句边界清理映射。解码器检查 table ID 和列数，但不能识别 ID、列数均相同的过期映射。解码器持有编译后的布局，可释放输入 TABLE_MAP。每个 ROWS 迭代器仅编译一次稀疏镜像计划，各行共享字段索引；行载荷保持借用，不分配完整行向量。每次交付行操作前校验其完整边界、字段长度、NULL 约束及压缩 DECIMAL 数字组。解码错误仅返回一次，随后结束该迭代器；此前的行可能已被调用方消费。该 API 不提供事务缓冲。
+
+- WRITE 仅有 `after`，DELETE 仅有 `before`，UPDATE 有配对镜像。不存在的镜像为 `None`。镜像的 `fields()` 仅返回存在列，列索引为从零开始的表绝对序号。`RowValue::Null` 表示存在列的 SQL NULL；缺失列不填充、不推断。紧凑 NULL 位图支持稀疏镜像及超过 64 列的表。
+- 整数通过 `IntegerValue` 保留实际编码宽度。根据已知 SQL 元数据调用 `signed()` 或 `unsigned()`；TABLE_MAP 必需元数据不包含符号信息。`DecimalValue` 保留 precision/scale，校验压缩数字组并精确格式化，包括 65 位数值。FLOAT/DOUBLE、BIT、ENUM 索引、SET 掩码和 YEAR 使用明确的值枚举。
+- CHAR/VARCHAR 和 BLOB 返回借用的 `Bytes`，不含长度前缀，不猜测字符集。时间类型、JSON、geometry 和 vector 返回借用的 `Encoded` 字节；`decoder.columns()` 暴露其类型及编码元数据。该 API 不将它们转换成日期、JSON 对象或向量。旧 DECIMAL、typed array 和未知列类型明确报不支持。
+- 非法长度、不完整 UPDATE 配对、非法元数据及 NOT NULL 列的 NULL 返回原始协议错误。主键限制和 CDC 专用错误保留在 `mysql-canal`。CDC 路径继续跳读非主键值，不调用该解码器。
+
+使用包含 FDE 和 TABLE_MAP 的 binlog 文件运行完整离线示例：
+
+```sh
+cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
+```
 
 结构化解析器根据每个文件的 FDE 选择声明的布局，支持已注册 MySQL 5.7、8.0–8.4、9.0、9.7 系列。生产者版本须包含完整数字 `major.minor.patch`，允许非空的 `-` 或 `+` 后缀（如 `5.7.44-log` 或 `8.0.45-0ubuntu0.24.04.1`）。畸形版本与 MariaDB 标识明确拒绝，数字版本解析规则与 CDC 共用。未知系列或布局明确失败；`next_frame()` 可交给自定义事件体解析器。混用帧/视图与结构化读取时，需要将读取到的 FDE 帧交给自己的 `BinlogParser`；内置结构化解析器只观察 `next_event()` 调用。
 
@@ -74,4 +115,4 @@ cargo test -p mysql-replication --locked
 cargo test -p mysql-canal --locked
 ```
 
-独立合成协议测试覆盖公共头、原始字节保真、CRC32/NONE、可选/Tagged GTID、延迟 ROWS、宽表稀疏位图和 owned 生命周期。实库 CDC 兼容测试与版本适配器位于 `mysql-canal`，见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
+独立合成协议测试覆盖公共头、原始字节保真、CRC32/NONE、可选/Tagged GTID、延迟 ROWS、解码后的 before/after 镜像、宽表稀疏/NULL 位图、整数符号边界、精确 DECIMAL、畸形字段和 owned 生命周期。实库 CDC 兼容测试与版本适配器位于 `mysql-canal`，见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。

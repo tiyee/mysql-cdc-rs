@@ -52,6 +52,8 @@ docs/releasing.md        # CI and publishing guide (Chinese)
 
 CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不额外组装完整原始缓冲区；离线回放使用 `next_frame()`。两者均在匹配表之后解析 ROWS 镜像，只解码主键，其余值按长度跳过。准确定位字段仍需表布局元数据。MINIMAL 检查针对上游配置，复制协议无法从已有 binlog 中按列请求数据。原始事件、解析配置和传输限制见[复制库说明](crates/mysql-replication/README.zh-CN.md)。
 
+原始行检查可按需使用 `mysql_replication::events::RowsDecoder`，返回借用的稀疏 before/after 镜像，独立于 CDC 路径；见[行解码说明](crates/mysql-replication/README.zh-CN.md#解码原始行镜像)。
+
 ## 运行
 
 从 workspace 构建 CLI：`cargo build --release --locked -p pikachu`；该版本在 crates.io 可用后，可使用 `cargo install pikachu --version 1.0.0 --locked` 安装。库接入只需依赖 `mysql-cdc-rs`：

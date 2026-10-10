@@ -62,8 +62,49 @@ Connection configuration controls credentials via an environment variable, TLS C
 - `next_frame()` validates bounds and checksums, retaining raw bytes while leaving body interpretation to custom adapters.
 - Network `next_view()` validates the driver's event and borrows its body directly, avoiding full raw-frame assembly for consumers that do not need it.
 - `ParserConfig::minimal()` skips GTID metadata and Previous GTIDs decoding. They remain explicit raw bodies with their original event codes.
-- ROWS image parsing is deferred by default; `RowsEvent::images()` reads extra data and sparse bitmaps on demand. `RowsDecode::ValidateImages` validates those immediately. No mode materializes full row values.
+- ROWS image parsing is deferred by default; `RowsEvent::images()` reads extra data and sparse bitmaps on demand. `RowsDecode::ValidateImages` validates those immediately. These parser modes do not decode field values; the separate `RowsDecoder` API below is opt-in.
 - `TableMapEvent::columns()` validates column envelopes on demand, after table selection.
+
+## Decoding raw row images
+
+The event framework lives in `events`: `BinlogEvent` is the common container, `EventHeader` the common header, and `EventData` the typed body enum. Container ownership, control events, TABLE_MAP and ROWS have separate implementation modules; existing public import paths remain unchanged. `RowsEvent` describes the wire event and `RowsDecoder` compiles the column layout independently from CDC policy.
+
+```rust,no_run
+use mysql_replication::{Result, events::{RowValue, RowsDecoder, RowsEvent, TableMapEvent}};
+
+fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
+    let decoder = RowsDecoder::new(table)?;
+    for row in event.rows(&decoder)? {
+        let row = row?;
+        for (label, image) in [("before", row.before), ("after", row.after)] {
+            if let Some(image) = image {
+                for field in image.fields() {
+                    let field = field?;
+                    match field.value {
+                        RowValue::Null => println!("{label}[{}] = NULL", field.column_index),
+                        RowValue::Decimal(value) => println!("{label}[{}] = {value}", field.column_index),
+                        value => println!("{label}[{}] = {value:?}", field.column_index),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+Cache one decoder per active TABLE_MAP within each source. Replace it when the table ID is remapped and clear mappings at file/statement boundaries. The decoder checks table ID and column count, but cannot detect a stale mapping with the same ID and column count. It owns the compiled layouts, so the input TABLE_MAP may be released. Each ROWS iterator compiles its sparse image plans once and shares column indices across rows; row payloads are borrowed without allocating a full row vector. Row boundaries, field lengths, NULL constraints and packed DECIMAL groups are validated before each operation is yielded. A decoding error is yielded once and terminates that iterator; earlier rows may already have been consumed. This API provides no transaction buffering.
+
+- WRITE has only `after`, DELETE only `before`, and UPDATE has paired images. A missing image is `None`. Within an image, `fields()` yields only present columns with absolute zero-based indices. `RowValue::Null` means a present SQL NULL; an absent column is not filled in or inferred. Compact NULL bitmaps support sparse images and tables wider than 64 columns.
+- Integers retain their actual wire width in `IntegerValue`. Call `signed()` or `unsigned()` using known SQL metadata; required TABLE_MAP metadata does not identify signedness. `DecimalValue` preserves precision and scale, validates packed digit groups, and formats exactly, including 65-digit values. FLOAT/DOUBLE, BIT, ENUM indices, SET masks and YEAR have explicit value variants.
+- CHAR/VARCHAR and BLOB values are borrowed `Bytes`, excluding length prefixes. Character sets are not guessed. Temporal, JSON, geometry and vector values are borrowed `Encoded` bytes; `decoder.columns()` exposes their type and encoding metadata. This API does not convert them into dates, JSON objects or vectors. Legacy DECIMAL, typed arrays and unknown column types are explicitly unsupported.
+- Invalid lengths, incomplete UPDATE pairs, invalid metadata and NULL in NOT NULL columns return raw protocol errors. Primary-key restrictions and CDC-specific errors remain in `mysql-canal`. The CDC path continues skipping non-key values and does not call this decoder.
+
+Run the complete offline inspection example with a binlog file that includes its FDE and TABLE_MAP events:
+
+```sh
+cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
+```
 
 The structured parser selects advertised layouts from every file's FDE and accepts the registered MySQL series 5.7, 8.0–8.4, 9.0 and 9.7. Producer versions must have numeric `major.minor.patch` components, optionally followed by a nonempty `-` or `+` suffix (such as `5.7.44-log` or `8.0.45-0ubuntu0.24.04.1`). Malformed versions and MariaDB identifiers are rejected, using the same numeric parsing rules as CDC. Unknown series/layouts fail explicitly. `next_frame()` permits custom body parsers. When switching between frame/view and structured-event methods, feed encountered FDE frames into your own `BinlogParser`; the built-in structured parser only observes `next_event()` calls.
 
@@ -74,4 +115,4 @@ cargo test -p mysql-replication --locked
 cargo test -p mysql-canal --locked
 ```
 
-Synthetic protocol tests verify headers, raw-byte preservation, CRC32/NONE, optional/tagged GTID metadata, lazy ROWS parsing, wide sparse bitmaps and owned lifetimes. Real-server CDC compatibility tests and version adapters live in `mysql-canal`; see the [project README](https://github.com/tiyee/mysql-cdc-rs#readme).
+Synthetic protocol tests verify headers, raw-byte preservation, CRC32/NONE, optional/tagged GTID metadata, lazy ROWS parsing, decoded before/after images, wide sparse/NULL bitmaps, signed/unsigned integer boundaries, exact DECIMAL, malformed fields and owned lifetimes. Real-server CDC compatibility tests and version adapters live in `mysql-canal`; see the [project README](https://github.com/tiyee/mysql-cdc-rs#readme).

@@ -52,6 +52,8 @@ Use `Cdc` for configuration-driven CDC and `TransactionHandler` for committed tr
 
 CDC uses the replication library's `next_view()` network path to borrow the driver body directly, without assembling a second raw buffer. Offline replay uses `next_frame()`. Both paths delay ROWS image parsing until table selection, decode only the primary key and skip other values by their encoded lengths. Table layout metadata is still required to locate fields safely. MINIMAL is checked against the upstream setting; replication cannot request individual columns from an existing binlog. See the [replication API](crates/mysql-replication/README.md) for raw events, parser configuration and transport limits.
 
+For opt-in raw row inspection, `mysql_replication::events::RowsDecoder` returns borrowed, sparse before/after images independently from the CDC path; see [row decoding](crates/mysql-replication/README.md#decoding-raw-row-images).
+
 ## Usage
 
 Build the CLI from this workspace with `cargo build --release --locked -p pikachu`; once the version is available on crates.io, install it with `cargo install pikachu --version 1.0.0 --locked`. For library integration, depend only on `mysql-cdc-rs`:

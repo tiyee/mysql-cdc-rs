@@ -1,18 +1,25 @@
 //! Concrete protocol events share decoding and diagnostic output, not CDC semantics.
+mod binlog;
 mod control;
 mod gtid;
 mod header;
 mod rows;
+mod table_map;
 
-use crate::{BinlogFrame, Result};
+use crate::Result;
+pub use binlog::{BinlogEvent, OwnedBinlogEvent};
 pub use control::{
     ChecksumAlgorithm, FormatDescriptionEvent, HeartbeatEvent, PreviousGtidsEvent, QueryEvent,
     RotateEvent, SidIntervals, XidEvent,
 };
 pub use gtid::{GtidEvent, TaggedGtidEvent};
 pub use header::EventHeader;
-pub use rows::{RowImages, RowsEvent, RowsKind, TableColumns, TableMapEvent};
-use std::{fmt::Debug, io::Write, ops::Range, sync::Arc};
+pub use rows::{
+    ColumnDefinition, ColumnType, DecimalValue, IntegerValue, Row, RowField, RowFields, RowImage,
+    RowImages, RowValue, Rows, RowsDecoder, RowsEvent, RowsKind,
+};
+use std::{fmt::Debug, io::Write};
+pub use table_map::{TableColumns, TableMapEvent};
 
 /// A decoder is bound to its file layout before receiving an event body.
 /// Borrowed fields remain valid for the input lifetime. Header decoding receives
@@ -90,70 +97,8 @@ impl<'a> Event<'a> for EventData<'a> {
     }
 }
 
-/// One wire event, borrowing the reader's complete, unmodified event buffer.
-#[derive(Debug, Clone)]
-pub struct BinlogEvent<'a> {
-    pub raw_data: &'a [u8],
-    pub header: EventHeader,
-    pub event: EventData<'a>,
-    pub(crate) body: &'a [u8],
-}
-impl BinlogEvent<'_> {
-    pub fn frame(&self) -> BinlogFrame<'_> {
-        BinlogFrame {
-            raw_data: self.raw_data,
-            header: self.header,
-            body: self.body,
-        }
-    }
-    /// Retains one raw buffer and its layout; typed fields are borrowed on view().
-    pub fn into_owned(self) -> Result<OwnedBinlogEvent> {
-        let start = EventHeader::LEN;
-        let end = start + self.body.len();
-        if self.raw_data.get(start..end) != Some(self.body)
-            || EventHeader::parse(
-                self.raw_data
-                    .get(..start)
-                    .ok_or_else(|| crate::error::invalid("missing common header"))?,
-            )? != self.header
-        {
-            return Err(crate::error::invalid("event fields do not match raw data"));
-        }
-        Ok(OwnedBinlogEvent {
-            raw_data: Arc::from(self.raw_data),
-            header: self.header,
-            body: start..end,
-            template: self.event.layout(),
-        })
-    }
-}
-
-/// No self references: a view borrows this owned raw buffer when requested.
-#[derive(Debug, Clone)]
-pub struct OwnedBinlogEvent {
-    raw_data: Arc<[u8]>,
-    header: EventHeader,
-    body: Range<usize>,
-    template: EventData<'static>,
-}
-impl OwnedBinlogEvent {
-    pub fn raw_data(&self) -> &[u8] {
-        &self.raw_data
-    }
-    pub fn view(&self) -> Result<BinlogEvent<'_>> {
-        let body = &self.raw_data[self.body.clone()];
-        let mut event = self.template.clone();
-        event.decode(body)?;
-        Ok(BinlogEvent {
-            raw_data: &self.raw_data,
-            header: self.header,
-            event,
-            body,
-        })
-    }
-}
 impl EventData<'_> {
-    fn layout(&self) -> EventData<'static> {
+    pub(super) fn layout(&self) -> EventData<'static> {
         match self {
             Self::FormatDescription(v) => EventData::FormatDescription(FormatDescriptionEvent {
                 checksum_algorithm: v.checksum_algorithm,

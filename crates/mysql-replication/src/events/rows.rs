@@ -2,101 +2,19 @@ use super::Event;
 use crate::{Result, error::invalid, wire::Cursor};
 use std::io::Write;
 
+mod decoder;
+mod value;
+
+pub use decoder::{ColumnDefinition, Row, RowField, RowFields, RowImage, Rows, RowsDecoder};
+pub use mysql_common::constants::ColumnType;
+pub use value::{DecimalValue, IntegerValue, RowValue};
+
 /// Protocol operation, independent from a CDC change or table whitelist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowsKind {
     Write,
     Update,
     Delete,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct TableMapEvent<'a> {
-    pub table_id: u64,
-    pub flags: u16,
-    pub schema: &'a [u8],
-    pub table: &'a [u8],
-    /// Column types, per-type metadata, nullability and optional metadata.
-    /// Kept encoded so excluded tables need no column-plan allocation.
-    pub column_data: &'a [u8],
-    pub(crate) post_header: usize,
-}
-impl Default for TableMapEvent<'_> {
-    fn default() -> Self {
-        Self::with_post_header(8)
-    }
-}
-impl TableMapEvent<'_> {
-    pub fn with_post_header(post_header: usize) -> Self {
-        Self {
-            table_id: 0,
-            flags: 0,
-            schema: &[],
-            table: &[],
-            column_data: &[],
-            post_header,
-        }
-    }
-    /// Validates column envelopes only when a consumer needs this table.
-    pub fn columns(&self) -> Result<TableColumns<'_>> {
-        let mut input = Cursor::new(self.column_data);
-        let count = input.lenenc()?;
-        if count == 0 || count > 4096 {
-            return Err(invalid("TABLE_MAP column count outside 1..4096"));
-        }
-        let types = input.take(count)?;
-        let metadata_len = input.lenenc()?;
-        let metadata = input.take(metadata_len)?;
-        let nullable = input.take(count.div_ceil(8))?;
-        Ok(TableColumns {
-            count,
-            types,
-            metadata,
-            nullable,
-            optional_metadata: input.remaining(),
-        })
-    }
-}
-#[derive(Debug, Clone, Copy)]
-pub struct TableColumns<'a> {
-    pub count: usize,
-    pub types: &'a [u8],
-    pub metadata: &'a [u8],
-    pub nullable: &'a [u8],
-    pub optional_metadata: &'a [u8],
-}
-impl<'a> Event<'a> for TableMapEvent<'a> {
-    fn dump(&self, writer: &mut dyn Write) -> Result<()> {
-        writeln!(writer, "Table ID: {}", self.table_id)?;
-        writeln!(writer, "Flags: {}", self.flags)?;
-        writeln!(writer, "Schema: {}", String::from_utf8_lossy(self.schema))?;
-        writeln!(writer, "Table: {}", String::from_utf8_lossy(self.table))?;
-        writeln!(writer, "Column data: {:02x?}", self.column_data)?;
-        writeln!(writer)?;
-        Ok(())
-    }
-
-    fn decode(&mut self, data: &'a [u8]) -> Result<()> {
-        let width = match self.post_header {
-            6 => 4,
-            8 => 6,
-            _ => return Err(invalid("unsupported TABLE_MAP post-header")),
-        };
-        let mut input = Cursor::new(data);
-        let table_id = input.le(width)?;
-        let flags = input.le(2)? as u16;
-        let schema = input.name()?;
-        let table = input.name()?;
-        *self = Self {
-            table_id,
-            flags,
-            schema,
-            table,
-            column_data: input.remaining(),
-            post_header: self.post_header,
-        };
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +27,7 @@ pub struct RowsEvent<'a> {
     pub(crate) post_header: usize,
     pub(crate) v2: bool,
 }
-impl RowsEvent<'_> {
+impl<'a> RowsEvent<'a> {
     pub fn with_layout(kind: RowsKind, post_header: usize, v2: bool) -> Self {
         Self {
             table_id: 0,
@@ -120,7 +38,7 @@ impl RowsEvent<'_> {
             v2,
         }
     }
-    pub fn images(&self) -> Result<RowImages<'_>> {
+    pub fn images(&self) -> Result<RowImages<'a>> {
         let mut input = Cursor::new(self.encoded_images);
         let extra_data = if self.v2 {
             let length = input.le(2)? as usize;
@@ -149,6 +67,12 @@ impl RowsEvent<'_> {
             after_columns: second,
             rows: input.remaining(),
         })
+    }
+
+    /// Decodes row boundaries using a previously compiled TABLE_MAP layout.
+    /// Values borrow the event; the returned iterator does not borrow the decoder.
+    pub fn rows(&self, decoder: &RowsDecoder) -> Result<Rows<'a>> {
+        decoder.rows(self)
     }
 }
 impl<'a> Event<'a> for RowsEvent<'a> {
@@ -182,7 +106,9 @@ impl<'a> Event<'a> for RowsEvent<'a> {
 pub struct RowImages<'a> {
     pub extra_data: &'a [u8],
     pub column_count: usize,
+    /// First wire bitmap; for WRITE this describes the after image.
     pub before_columns: &'a [u8],
+    /// Second UPDATE bitmap, otherwise the same first wire bitmap.
     pub after_columns: &'a [u8],
     pub rows: &'a [u8],
 }
