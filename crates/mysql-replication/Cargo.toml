@@ -23,3 +23,7 @@ crc32fast = "1"
 [[test]]
 name = "events"
 path = "tests/events.rs"
+
+[[test]]
+name = "mysql_live"
+path = "tests/mysql_live.rs"

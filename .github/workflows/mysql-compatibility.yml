@@ -38,12 +38,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.image }}
-      - name: Compile integration test before starting MySQL
-        run: cargo test -p mysql-canal --test mysql_live --locked --no-run
+      - name: Compile all three layers before starting MySQL
+        run: cargo test -p mysql-replication -p mysql-canal -p pikachu --test mysql_live --locked --no-run
       - run: docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
-      - name: Verify ROW/MINIMAL change monitoring scenarios
+      - name: Verify replication preflight and raw ROW/MINIMAL images
+        run: cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+      - name: Verify CDC conversion, transactions and recovery
         # Schema setup/teardown emits DDL; do not run these fixtures concurrently.
         run: cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+      - name: Verify online CLI output, recovery and startup failures
+        run: cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test-threads=1
       - if: always()
         run: docker compose -f tests/infra/compose.yaml logs --no-color
       - if: always()

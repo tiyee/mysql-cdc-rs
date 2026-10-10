@@ -51,4 +51,4 @@ cargo bench -p mysql-canal --bench minimal_rows
 cargo bench -p mysql-canal --bench event_adapter
 ```
 
-默认测试覆盖合成协议、转换、事务、检查点、多来源隔离及适配器。12 个默认忽略的 `mysql_live` 场景包含启动主键检测，需要专用可销毁 MySQL 实例，串行执行，会创建和删除测试数据库。使用仓库 `tests/infra/compose.yaml` 并按项目说明清理，不能连接生产实例。
+默认测试覆盖合成协议、转换、事务、检查点、多来源隔离及适配器。12 个默认忽略的 `mysql_live` 场景包含 check/init 和首次/恢复消费的主键拒绝。原始协议预检/行解码与在线 CLI 行为分别在 `mysql-replication` 和 `pikachu` 独立验证，共享 MySQL 矩阵串行执行三层测试。实库测试需要专用可销毁 MySQL 实例，会创建和删除测试数据库。使用仓库 `tests/infra/compose.yaml` 并按项目说明清理，不能连接生产实例。

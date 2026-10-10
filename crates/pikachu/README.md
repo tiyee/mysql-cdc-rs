@@ -47,3 +47,5 @@ Consumption errors are written to stderr and produce a nonzero exit status; chan
 Once version 1.0.0 is available on crates.io, install with `cargo install pikachu --version 1.0.0 --locked`. The installed command is `pikachu-cdc`. For embedded CDC and raw replication through one dependency, use `mysql-cdc-rs` (`mysql_cdc_rs`); `mysql-canal` and `mysql-replication` remain available separately. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for setup, the output contract, compatibility and limitations.
 
 Run CLI regression tests with `cargo test --locked -p pikachu`.
+
+Two ignored `mysql_live` tests exercise the built executable against a dedicated disposable MySQL server: check/init/run, complete JSON Lines, filtering, rollback, checkpoint recovery, DDL stops and primary-key startup failures for fresh and existing states. The shared MySQL matrix runs replication, CDC and CLI tests serially. Fixtures create/drop databases and remove temporary state; use the [project testing guide](https://github.com/tiyee/mysql-cdc-rs#testing) for setup and container cleanup.

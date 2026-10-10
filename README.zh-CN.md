@@ -263,20 +263,31 @@ GitHub Actions 在 PR / main、master 推送时运行 Ubuntu（Rust 1.89.0、sta
 真实 MySQL 集成测试（显式执行，在独立测试服务上创建并删除唯一命名的测试库）：
 
 ```sh
+cargo test -p mysql-replication -p mysql-canal -p pikachu --test mysql_live --locked --no-run
 MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
 export CDC_TEST_MYSQL_SERIES='8.4'
+cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 docker compose -f tests/infra/compose.yaml down -v
 ```
 
 无论专用容器启动或测试成功与否，本次测试结束都要执行 `down -v`。切换镜像时同步修改 `CDC_TEST_MYSQL_SERIES`，并先删除旧测试卷。
 
-`mysql_live` 包含 12 个独立实库场景，覆盖启动校验及通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径读取服务器实际生成的 binlog；不使用合成事件替代实库变更。输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk 与 changed，缺失、额外或重复的事件都会失败。
+每个处理层都显式注册自己的 `mysql_live` 测试目标。MySQL 矩阵先编译三层测试，再启动专用容器并串行执行：
+
+| 包 | 场景数 | 验证契约 |
+| --- | --- | --- |
+| `mysql-replication` | 2 | 指定表主键预检及真实稀疏原始镜像，校验精确值、NULL、主键变更、字节借用与非选中表仍交付 |
+| `mysql-canal` | 12 | CDC 转换、提交事务、来源启动校验与检查点恢复 |
+| `pikachu` | 2 | 在线 `check`/`init`/`run --once`、完整 JSON Lines、过滤、回滚、恢复不重复、DDL 及预检失败位点 |
+
+这 16 个场景消费服务器实际生成的 binlog 或查询真实元数据。默认 workspace 测试只编译它们，保持忽略；不使用合成事件替代实库变更。Canal 的 12 个场景通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径运行。CDC 输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk 与 changed，缺失、额外或重复的事件都会失败。
 
 | 场景 | 校验内容 |
 | --- | --- |
-| 启动主键检测 | 原始复制及首次/恢复 CDC 在消费前拒绝无主键、只有 UNIQUE 索引、联合主键及不支持的类型/字符集；检查点不变，非白名单表不影响校验 |
+| 启动主键检测 | CDC check/init 及首次/恢复消费拒绝无主键、只有 UNIQUE 索引、联合主键及不支持的类型/字符集；检查点不变，非白名单表不影响校验 |
 | 单行 INSERT / UPDATE / DELETE | 完整输出、只更新指定字段、写入 NULL、DELETE 的 changed 为空；同时跳过 JSON/时间/DECIMAL/BIT/ENUM/SET/BLOB 值 |
 | 多行操作 | 批量新增、批量更新、批量删除逐行核对；零匹配 UPDATE/DELETE 不输出 |
 | 整数主键 | TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT 的 signed/unsigned 边界及 NULL 跳读，包含 i64::MIN 与 u64::MAX |
@@ -291,7 +302,7 @@ docker compose -f tests/infra/compose.yaml down -v
 
 这些场景必须串行执行：fixture 创建/删除数据库会产生 DDL，而 CDC 对任何来源的 DDL 都会停止。每个 fixture 有独立 schema、复制 ID 和临时 state，结束或断言失败时尝试清理数据库与状态目录。
 
-替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql-compatibility.yml` 在每个版本上运行以上全部 12 个场景，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
+替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql-compatibility.yml` 在每个版本上运行三包全部 16 个场景，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选 CDC 适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
 
 离线回放使用**和起点相匹配**的 state/schema；binlog 必须保留开头的 FORMAT_DESCRIPTION：
 

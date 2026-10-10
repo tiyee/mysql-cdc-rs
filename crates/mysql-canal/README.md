@@ -51,4 +51,4 @@ cargo bench -p mysql-canal --bench minimal_rows
 cargo bench -p mysql-canal --bench event_adapter
 ```
 
-Default tests cover synthetic protocol, conversion, transactions, checkpoints, multi-source isolation and adapters. The 12 ignored `mysql_live` scenarios include startup primary-key validation and require a dedicated disposable MySQL server and serial execution. They create and delete test databases. Use the repository's `tests/infra/compose.yaml` and cleanup instructions in the project guide; never point these tests at production.
+Default tests cover synthetic protocol, conversion, transactions, checkpoints, multi-source isolation and adapters. The 12 ignored `mysql_live` scenarios include primary-key rejection through check/init and fresh/resumed consumption. Raw protocol preflight/row decoding and online CLI behavior are tested independently in `mysql-replication` and `pikachu`. The shared MySQL matrix runs all three layers serially. Live tests require a dedicated disposable MySQL server and create/delete test databases. Use the repository's `tests/infra/compose.yaml` and cleanup instructions in the project guide; never point these tests at production.

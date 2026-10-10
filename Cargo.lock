@@ -688,6 +688,7 @@ name = "pikachu"
 version = "1.0.0"
 dependencies = [
  "crc32fast",
+ "mysql",
  "mysql-canal",
  "serde_json",
 ]

@@ -24,10 +24,6 @@ fn key(id: i32) -> Value {
 #[test]
 #[ignore = "requires dedicated MySQL; run with --ignored --test-threads=1"]
 fn mysql_primary_key_preflight_stops_fresh_and_resumed_consumption() {
-    use mysql_replication::{
-        primary_key::validate_primary_keys,
-        stream::{ReplicationConfig, ReplicationStream},
-    };
     for (alter, reason) in [
         (
             "DROP PRIMARY KEY",
@@ -52,71 +48,46 @@ fn mysql_primary_key_preflight_stops_fresh_and_resumed_consumption() {
         let mut fixture = Fixture::new(ITEMS);
         fixture.sql("CREATE TABLE no_key_outside_whitelist (id INT) ENGINE=InnoDB");
         let schema = fixture.schema.clone();
-        let lower_case: u32 = fixture
-            .connection()
-            .query_first("SELECT @@lower_case_table_names")
-            .unwrap()
-            .unwrap();
-        if lower_case == 0 {
-            fixture.sql("CREATE TABLE ITEMS (id BINARY(4) PRIMARY KEY) ENGINE=InnoDB");
-        }
-        validate_primary_keys(fixture.connection(), [(schema.as_str(), "items")]).unwrap();
-        assert!(matches!(
-            validate_primary_keys(fixture.connection(), []),
-            Err(mysql_replication::Error::Invalid(message))
-                if message == "primary-key check requires at least one table"
-        ));
-        for table in ["no_key_outside_whitelist", "missing_table"] {
-            assert!(matches!(
-                validate_primary_keys(fixture.connection(), [(schema.as_str(), table)]),
-                Err(mysql_replication::Error::Unsupported(message))
-                    if message == format!("{schema}.{table} requires exactly one primary-key column; found 0")
-            ));
-        }
         fixture.sql(&format!("ALTER TABLE items {alter}"));
         let before = std::fs::read(&fixture.config.state_file).unwrap();
-        let connection = mysql_canal::source::mysql::connect(&fixture.config).unwrap();
-        let config = ReplicationConfig::new(
-            fixture.config.source.server_id,
-            &fixture.initial.file,
-            fixture.initial.position,
-        );
-        let result = ReplicationStream::from_connection_with_tables(
-            connection,
-            config,
-            [(schema.as_str(), "items")],
-        );
-        assert!(
-            matches!(result, Err(mysql_replication::Error::Unsupported(ref message))
-            if message.contains(&schema) && message.contains(reason)),
-            "{alter}"
-        );
-
         for resume in [true, false] {
             if !resume {
                 std::fs::remove_file(&fixture.config.state_file).unwrap();
             }
-            let mut cdc = Cdc::new(AppConfig {
-                sources: vec![SourceEntry {
-                    id: live::SOURCE_ID.into(),
-                    config: Config {
-                        source: SourceConfig {
-                            url_env: fixture.config.source.url_env.clone(),
-                            server_id: fixture.config.source.server_id,
-                            tls_ca: fixture.config.source.tls_ca.clone(),
-                            plugin: fixture.config.source.plugin.clone(),
-                            adapter: fixture.config.source.adapter.clone(),
+            let new_cdc = || {
+                Cdc::new(AppConfig {
+                    sources: vec![SourceEntry {
+                        id: live::SOURCE_ID.into(),
+                        config: Config {
+                            source: SourceConfig {
+                                url_env: fixture.config.source.url_env.clone(),
+                                server_id: fixture.config.source.server_id,
+                                tls_ca: fixture.config.source.tls_ca.clone(),
+                                plugin: fixture.config.source.plugin.clone(),
+                                adapter: fixture.config.source.adapter.clone(),
+                            },
+                            state_file: fixture.config.state_file.clone(),
+                            max_transaction_bytes: fixture.config.max_transaction_bytes,
+                            tables: vec![WhitelistTable {
+                                schema: schema.clone(),
+                                table: "items".into(),
+                            }],
                         },
-                        state_file: fixture.config.state_file.clone(),
-                        max_transaction_bytes: fixture.config.max_transaction_bytes,
-                        tables: vec![WhitelistTable {
-                            schema: schema.clone(),
-                            table: "items".into(),
-                        }],
-                    },
-                }],
-            })
-            .unwrap();
+                    }],
+                })
+                .unwrap()
+            };
+            assert!(
+                matches!(new_cdc().check(), Err(Error::Sources(ref message))
+                if message.contains(&schema) && message.contains(reason)),
+                "check: {alter}"
+            );
+            assert!(
+                matches!(new_cdc().initialize(), Err(Error::Sources(ref message))
+                if message.contains(&schema) && message.contains(reason)),
+                "initialize: {alter}"
+            );
+            let mut cdc = new_cdc();
             cdc.add_handle(|_: CommittedTransaction<'_>| {
                 panic!("preflight failure must prevent all transaction callbacks");
             });

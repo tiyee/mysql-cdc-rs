@@ -269,20 +269,31 @@ GitHub Actions runs tests on Ubuntu with Rust 1.89.0 and stable, and macOS with 
 Run real-MySQL tests explicitly against a dedicated test server. The fixtures create and drop uniquely named databases:
 
 ```sh
+cargo test -p mysql-replication -p mysql-canal -p pikachu --test mysql_live --locked --no-run
 MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
 export CDC_TEST_MYSQL_SERIES='8.4'
+cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test-threads=1
 docker compose -f tests/infra/compose.yaml down -v
 ```
 
 Always run `down -v` after this dedicated test run, including when startup or tests fail. When switching the image, update `CDC_TEST_MYSQL_SERIES` to match and remove the old test volume first.
 
-`mysql_live` contains 12 independent scenarios covering startup validation and actual server-generated binlogs through the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. Synthetic events do not replace real mutations. Assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
+Each processing layer has its own registered `mysql_live` test target. The MySQL matrix compiles all three before starting its disposable container, then runs them serially:
+
+| Package | Scenarios | Contract |
+| --- | --- | --- |
+| `mysql-replication` | 2 | Selected-table primary-key preflight and actual sparse raw images; exact values, NULL, key changes, borrowed bytes and delivery of unselected tables |
+| `mysql-canal` | 12 | CDC conversion, committed transactions, source startup validation and checkpoint recovery |
+| `pikachu` | 2 | Online `check`/`init`/`run --once`, complete JSON Lines, filtering, rollback, resume without duplicates, DDL and preflight failure checkpoints |
+
+These 16 scenarios consume actual server-generated binlogs or query real metadata. Default workspace tests compile them but leave them ignored; synthetic events do not replace real mutations. Canal's 12 scenarios use the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. CDC assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
 
 | Scenario | Checks |
 | --- | --- |
-| Startup primary keys | Raw replication and fresh/resumed CDC reject missing, UNIQUE-only, composite and unsupported keys before consumption; checkpoints remain unchanged and excluded tables do not affect validation |
+| Startup primary keys | CDC check/init and fresh/resumed consumption reject missing, UNIQUE-only, composite and unsupported keys; checkpoints remain unchanged and excluded tables do not affect validation |
 | Single-row INSERT / UPDATE / DELETE | Complete output, specified update columns, NULL writes, empty DELETE `changed`, and skipping JSON/time/DECIMAL/BIT/ENUM/SET/BLOB values |
 | Multi-row mutations | Every inserted, updated, or deleted row; zero-match UPDATE/DELETE emits nothing |
 | Integer keys | Signed/unsigned boundaries for all integer widths, NULL skipping, i64::MIN, and u64::MAX |
@@ -297,7 +308,7 @@ Always run `down -v` after this dedicated test run, including when startup or te
 
 Run these scenarios serially: fixture creation and cleanup produce DDL, and the consumer stops on DDL in any database. Each fixture uses independent schemas, a replication ID, and temporary state, and attempts cleanup on completion or assertion failure.
 
-Set `MYSQL_IMAGE` to `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4`, or `mysql:9.7` to test each series. Remove the previous test volume before switching versions. `.github/workflows/mysql-compatibility.yml` runs all 12 scenarios for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. Explicit series tags follow patch updates; the moving `lts` tag is not used. CI checks the actual server series and logs its patch version and selected adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). Add both a matrix entry and a version adapter when supporting a new LTS series. Real-server tests require a Docker/MySQL environment.
+Set `MYSQL_IMAGE` to `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4`, or `mysql:9.7` to test each series. Remove the previous test volume before switching versions. `.github/workflows/mysql-compatibility.yml` runs all 16 scenarios across the three packages for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. Explicit series tags follow patch updates; the moving `lts` tag is not used. CI checks the actual server series and logs its patch version and selected CDC adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). Add both a matrix entry and a version adapter when supporting a new LTS series. Real-server tests require a Docker/MySQL environment.
 
 Offline replay requires a state/schema matching the starting position and a binlog retaining its initial FORMAT_DESCRIPTION:
 

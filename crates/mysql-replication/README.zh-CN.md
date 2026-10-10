@@ -121,4 +121,4 @@ cargo test -p mysql-replication --locked
 cargo test -p mysql-canal --locked
 ```
 
-独立合成协议测试覆盖公共头、原始字节保真、CRC32/NONE、可选/Tagged GTID、延迟 ROWS、解码后的 before/after 镜像、宽表稀疏/NULL 位图、整数符号边界、精确 DECIMAL、畸形字段和 owned 生命周期。实库 CDC 兼容测试与版本适配器位于 `mysql-canal`，见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
+独立合成协议测试覆盖公共头、原始字节保真、CRC32/NONE、可选/Tagged GTID、延迟 ROWS、解码后的 before/after 镜像、宽表稀疏/NULL 位图、整数符号边界、精确 DECIMAL、畸形字段和 owned 生命周期。两个默认忽略的 `mysql_live` 测试独立验证指定表主键预检和真实增改删稀疏镜像，包含精确值、NULL、字符串字节借用和非选中表。实库测试需要专用可销毁 MySQL 实例，串行执行，会创建/删除测试库；CDC 与 CLI 各自维护实库测试。共享矩阵与容器清理见[项目验证说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md#验证)。

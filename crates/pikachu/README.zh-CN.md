@@ -47,3 +47,5 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 1.0.0 在 crates.io 可用后，可使用 `cargo install pikachu --version 1.0.0 --locked` 安装，安装后的命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
 
 运行 CLI 回归测试：`cargo test --locked -p pikachu`。
+
+两个默认忽略的 `mysql_live` 测试通过构建后的可执行文件访问专用可销毁 MySQL，覆盖 check/init/run、完整 JSON Lines、过滤、回滚、位点恢复、DDL 停止，以及首次/已有 state 的主键预检失败。共享 MySQL 矩阵串行执行复制库、CDC 和 CLI 测试。夹具创建/删除数据库并清理临时 state，环境配置与容器清理见[项目验证说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md#验证)。
