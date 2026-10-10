@@ -2,7 +2,9 @@
 
 [English](README.md) | 简体中文
 
-同步 MySQL 复制传输与借用 binlog 事件库。CDC 转换、白名单、历史 SQL schema、事务交付及持久化检查点属于上层 `mysql-canal` 公共库（导入路径 `mysql_canal`）。
+底层库负责同步订阅 MySQL binlog、解析协议事件，并可按需解码借用的增、改、删行镜像。CDC 转换、白名单过滤、历史 SQL schema、事务交付及持久化检查点属于上层 `mysql-canal` 公共库（导入路径 `mysql_canal`）；`pikachu` CLI 再基于 canal 构建。
+
+原始解析返回 `BinlogEvent` / `EventData`，行解码通过 TABLE_MAP 与 `RowsDecoder` 返回稀疏的 `Row { before, after }` 镜像，不生成 canal 的 `Change` 或 `CommittedTransaction`。普通 SELECT 不产生 CDC 变更，协议 QUERY 事件保存 SQL 字节，不是查询结果。两条解码路径见[架构说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)。
 
 需要通过一个依赖同时使用原始复制与 CDC 时，可依赖 `mysql-cdc-rs`，通过 `mysql_cdc_rs::replication` 导入本库 API。
 
@@ -47,7 +49,9 @@ fn main() -> Result<()> {
     let mut config = ReplicationConfig::new(123, "binlog.000001", 4);
     config.required_row_image = Some(RowImage::Minimal);
     config.parser = ParserConfig::minimal();
-    let mut stream = ReplicationStream::connect(&connection, config)?;
+    let mut stream = ReplicationStream::connect_with_tables(
+        &connection, config, [("app", "users"), ("app", "orders")],
+    )?;
     while let Some(view) = stream.next_view()? {
         // Borrowed body: no second raw-frame copy or row-value decoding.
         println!("{} {}", view.header.event_type, view.body.len());
@@ -56,7 +60,9 @@ fn main() -> Result<()> {
 }
 ```
 
-连接配置支持凭据环境变量、TLS CA 和超时；复制配置支持 server ID、file/position、阻塞模式、上游行镜像要求及解析选项。行镜像要求只校验，不修改服务器全局设置。底层不查询业务表，也不要求主键。MySQL 发送已经存在的 binlog 字节，复制协议不支持按列裁剪网络传输。
+连接配置支持凭据环境变量、TLS CA 和超时；复制配置支持 server ID、file/position、阻塞模式、上游行镜像要求及解析选项。行镜像要求只校验，不修改服务器全局设置。MySQL 发送已经存在的 binlog 字节，复制协议不支持按列裁剪网络传输。
+
+`ReplicationStream::connect_with_tables` 和 `from_connection_with_tables` 在发送 binlog 请求前，通过 INFORMATION_SCHEMA 检查调用方指定的表。每张表必须有单列 PRIMARY KEY，类型为有符号/无符号 TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT、精确 DECIMAL，或使用 utf8、utf8mb3、utf8mb4、ascii、latin1 的 CHAR/VARCHAR。表或主键缺失、联合主键、只有 UNIQUE 索引、FLOAT/DOUBLE、二进制/日期主键和不支持的字符集均报错，包含库表及可获取的列名；空表列表也报错。该列表仅控制检测，不过滤事件。原有 `connect` 和 `from_connection` 保留不做此检测的原始复制能力。可通过 `primary_key::validate_primary_keys(&mut conn, tables)` 单独检测而不启动复制。`mysql-canal` 的 MySQL 来源自动调用该检测，包括从检查点恢复时。
 
 - `next_event()` 返回具体协议事件和完整原始字节。
 - `next_frame()` 校验长度/checksum，保留原始字节，事件体留给自定义适配器。
@@ -98,7 +104,7 @@ fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
 - WRITE 仅有 `after`，DELETE 仅有 `before`，UPDATE 有配对镜像。不存在的镜像为 `None`。镜像的 `fields()` 仅返回存在列，列索引为从零开始的表绝对序号。`RowValue::Null` 表示存在列的 SQL NULL；缺失列不填充、不推断。紧凑 NULL 位图支持稀疏镜像及超过 64 列的表。
 - 整数通过 `IntegerValue` 保留实际编码宽度。根据已知 SQL 元数据调用 `signed()` 或 `unsigned()`；TABLE_MAP 必需元数据不包含符号信息。`DecimalValue` 保留 precision/scale，校验压缩数字组并精确格式化，包括 65 位数值。FLOAT/DOUBLE、BIT、ENUM 索引、SET 掩码和 YEAR 使用明确的值枚举。
 - CHAR/VARCHAR 和 BLOB 返回借用的 `Bytes`，不含长度前缀，不猜测字符集。时间类型、JSON、geometry 和 vector 返回借用的 `Encoded` 字节；`decoder.columns()` 暴露其类型及编码元数据。该 API 不将它们转换成日期、JSON 对象或向量。旧 DECIMAL、typed array 和未知列类型明确报不支持。
-- 非法长度、不完整 UPDATE 配对、非法元数据及 NOT NULL 列的 NULL 返回原始协议错误。主键限制和 CDC 专用错误保留在 `mysql-canal`。CDC 路径继续跳读非主键值，不调用该解码器。
+- 非法长度、不完整 UPDATE 配对、非法元数据及 NOT NULL 列的 NULL 返回原始协议错误。原始行解码不要求主键；独立的指定表预检在调用方启用时应用主键限制。CDC 特有的解码错误属于 `mysql-canal`。CDC 路径继续跳读非主键值，不调用该解码器。
 
 使用包含 FDE 和 TABLE_MAP 的 binlog 文件运行完整离线示例：
 

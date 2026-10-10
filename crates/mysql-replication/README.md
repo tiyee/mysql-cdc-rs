@@ -2,7 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Synchronous MySQL replication transport and borrowed binlog events. CDC conversion, whitelists, historical SQL schema, transaction delivery and persistent checkpoints belong to the `mysql-canal` consumer library (`mysql_canal`).
+The bottom library layer: synchronous MySQL binlog subscription, protocol parsing and opt-in decoding of borrowed insert/update/delete row images. CDC conversion, whitelist filtering, historical SQL schema, transaction delivery and persistent checkpoints belong to the `mysql-canal` consumer library (`mysql_canal`), on which the `pikachu` CLI is built.
+
+Raw parsing returns `BinlogEvent` / `EventData`; row decoding uses TABLE_MAP and `RowsDecoder` to expose sparse `Row { before, after }` images. It does not produce canal's `Change` or `CommittedTransaction`. Ordinary SELECT reads do not produce CDC changes; the protocol QUERY event holds SQL bytes, not query results. See the [architecture guide](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md) for both decoding paths.
 
 For a single dependency covering raw replication and CDC, use `mysql-cdc-rs` and import this API through `mysql_cdc_rs::replication`.
 
@@ -47,7 +49,9 @@ fn main() -> Result<()> {
     let mut config = ReplicationConfig::new(123, "binlog.000001", 4);
     config.required_row_image = Some(RowImage::Minimal);
     config.parser = ParserConfig::minimal();
-    let mut stream = ReplicationStream::connect(&connection, config)?;
+    let mut stream = ReplicationStream::connect_with_tables(
+        &connection, config, [("app", "users"), ("app", "orders")],
+    )?;
     while let Some(view) = stream.next_view()? {
         // Borrowed body: no second raw-frame copy or row-value decoding.
         println!("{} {}", view.header.event_type, view.body.len());
@@ -56,7 +60,9 @@ fn main() -> Result<()> {
 }
 ```
 
-Connection configuration controls credentials via an environment variable, TLS CA and timeouts. Replication configuration controls server ID, file/position, blocking mode, required upstream row image and parser options. Row-image requirements are verified, never changed globally. The library does not query application tables or require primary keys. MySQL sends the available binlog bytes; there is no per-column network projection.
+Connection configuration controls credentials via an environment variable, TLS CA and timeouts. Replication configuration controls server ID, file/position, blocking mode, required upstream row image and parser options. Row-image requirements are verified, never changed globally. MySQL sends the available binlog bytes; there is no per-column network projection.
+
+`ReplicationStream::connect_with_tables` and `from_connection_with_tables` validate the caller's selected tables through INFORMATION_SCHEMA before sending a binlog request. Every selected table must have a single-column PRIMARY KEY: TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT (signed or unsigned), exact DECIMAL, or CHAR/VARCHAR using utf8, utf8mb3, utf8mb4, ascii or latin1. Missing tables/keys, composite keys, UNIQUE-only indexes, FLOAT/DOUBLE, binary/date keys and unsupported character sets return an error with the database/table and, when available, column name. Empty selections are rejected. This list controls validation only, not event filtering. The existing `connect` and `from_connection` methods remain available for raw replication without this check. Call `primary_key::validate_primary_keys(&mut conn, tables)` to run the same check independently without starting replication. The MySQL CDC source in `mysql-canal` uses this validation automatically, including on checkpoint recovery.
 
 - `next_event()` returns typed protocol events and the complete raw bytes.
 - `next_frame()` validates bounds and checksums, retaining raw bytes while leaving body interpretation to custom adapters.
@@ -98,7 +104,7 @@ Cache one decoder per active TABLE_MAP within each source. Replace it when the t
 - WRITE has only `after`, DELETE only `before`, and UPDATE has paired images. A missing image is `None`. Within an image, `fields()` yields only present columns with absolute zero-based indices. `RowValue::Null` means a present SQL NULL; an absent column is not filled in or inferred. Compact NULL bitmaps support sparse images and tables wider than 64 columns.
 - Integers retain their actual wire width in `IntegerValue`. Call `signed()` or `unsigned()` using known SQL metadata; required TABLE_MAP metadata does not identify signedness. `DecimalValue` preserves precision and scale, validates packed digit groups, and formats exactly, including 65-digit values. FLOAT/DOUBLE, BIT, ENUM indices, SET masks and YEAR have explicit value variants.
 - CHAR/VARCHAR and BLOB values are borrowed `Bytes`, excluding length prefixes. Character sets are not guessed. Temporal, JSON, geometry and vector values are borrowed `Encoded` bytes; `decoder.columns()` exposes their type and encoding metadata. This API does not convert them into dates, JSON objects or vectors. Legacy DECIMAL, typed arrays and unknown column types are explicitly unsupported.
-- Invalid lengths, incomplete UPDATE pairs, invalid metadata and NULL in NOT NULL columns return raw protocol errors. Primary-key restrictions and CDC-specific errors remain in `mysql-canal`. The CDC path continues skipping non-key values and does not call this decoder.
+- Invalid lengths, incomplete UPDATE pairs, invalid metadata and NULL in NOT NULL columns return raw protocol errors. Raw row decoding does not require a primary key; the separate selected-table preflight applies key restrictions when requested. CDC-specific decoding errors belong to `mysql-canal`. The CDC path continues skipping non-key values and does not call this decoder.
 
 Run the complete offline inspection example with a binlog file that includes its FDE and TABLE_MAP events:
 

@@ -4,6 +4,8 @@
 
 基于 `mysql-canal` 的 MySQL CDC 命令行工具。`pikachu` 包提供 `pikachu-cdc` 可执行文件及默认 JSON Lines 事务处理器。
 
+本包位于 `pikachu → mysql-canal → mysql-replication` 的最上层。复制库负责订阅、协议解析及可选原始行解码，canal 负责表匹配、选择性行转换、事务缓冲与检查点；CLI 将命令映射到 `Cdc` 或离线 `Processor` 回放，通过 `PrintHandle` 委托 canal 的 `JsonLinesSink` 输出。详见[架构说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)。
+
 从 workspace 根目录构建和运行：
 
 ```sh
@@ -27,6 +29,8 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 | `pikachu-cdc --help` | 打印命令用法 |
 
 首次 `init` 或 `run` 在短暂全局读锁内获取当前位点，不做全量数据快照；后续使用保存的历史 schema 与来源身份恢复。必须保留各来源检查点所需的 binlog。
+
+每次在线连接 MySQL 都检查选中表的当前主键，包括检查点恢复；无主键或不支持的主键会阻止启动。恢复仍用检查点保存的 schema 解码历史事件。本地回放使用该历史 schema，不连接 MySQL。
 
 [配置示例](examples/config/multi-source.toml) 使用具名来源，各自维护凭据、白名单和检查点。变更包含来源、库名、表名、操作、精确主键和变动字段名。仅在事务提交后输出，回滚丢弃缓冲。输出失败会停止消费；检查点持久化前发生崩溃可能导致重放。
 

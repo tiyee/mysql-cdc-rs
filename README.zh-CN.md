@@ -2,7 +2,9 @@
 
 [English](README.md) | 简体中文
 
-`mysql-cdc-rs`（导入路径 `mysql_cdc_rs`）作为统一库入口，重导出 `mysql-canal` 和 `mysql-replication`。`pikachu` 提供 CLI（命令名 `pikachu-cdc`），依赖独立的 CDC 公共库 `mysql-canal`（导入路径 `mysql_canal`）。底层包 `mysql-replication` 提供协议事件和复制传输，不依赖白名单、业务 schema、事务 sink 或检查点策略。CDC 只保留白名单表的**库名、表名、单列主键、变动字段名**，不构建整行值。内置 Oracle MySQL 5.7 / 8.0 / 8.1–8.4 / 9.0 / 9.7 的 `ROW + MINIMAL` 版本适配器，支持多个实例并行消费。实库兼容矩阵需单独运行。
+MySQL binlog 消费分为三层：`mysql-replication` 负责订阅、解析 binlog，可按需解码原始增、改、删行镜像；`mysql-canal` 将选中表的行事件转换为轻量 CDC 变更，管理事务与恢复；`pikachu` 基于 `mysql-canal` 提供 `pikachu-cdc` CLI。`mysql-cdc-rs`（导入路径 `mysql_cdc_rs`）是统一库入口，重导出上述两个库。
+
+CDC 只保留来源和白名单表的**库名、表名、单列主键、变动字段名**，不构建整行值。普通 SELECT 查询不会产生 CDC 变更。内置 Oracle MySQL 5.7 / 8.0 / 8.1–8.4 / 9.0 / 9.7 的 `ROW + MINIMAL` 版本适配器，支持多个实例并行消费。实库兼容矩阵需单独运行。
 
 四个 workspace 包统一使用 **1.0.0** 版本，可按所需 API 选择：
 
@@ -10,8 +12,22 @@
 | --- | --- | --- |
 | [`mysql-cdc-rs`](crates/mysql-cdc/README.zh-CN.md) | `mysql_cdc_rs` | 统一 CDC 与原始复制 API |
 | [`mysql-canal`](crates/mysql-canal/README.zh-CN.md) | `mysql_canal` | CDC 转换、提交事务回调及检查点 |
-| [`mysql-replication`](crates/mysql-replication/README.zh-CN.md) | `mysql_replication` | 借用协议事件、离线文件及复制传输 |
+| [`mysql-replication`](crates/mysql-replication/README.zh-CN.md) | `mysql_replication` | 复制传输、协议解析及可选原始行解码 |
 | [`pikachu`](crates/pikachu/README.zh-CN.md) | `pikachu-cdc` | 输出 JSON Lines 的 CLI |
+
+## 分层架构
+
+箭头表示 Cargo 依赖，从使用方指向提供方：
+
+```text
+pikachu (pikachu-cdc) ──> mysql-canal ──> mysql-replication
+mysql-cdc-rs ──────────> mysql-canal
+mysql-cdc-rs ─────────────────────────> mysql-replication
+```
+
+原始行检查路径为 `BinlogEvent → TableMapEvent + RowsEvent → RowsDecoder → Row { before, after }`。WRITE 表示插入，UPDATE 配对前后镜像，DELETE 只有前镜像；镜像仅保留 binlog 实际包含的列，不补齐 MINIMAL 中缺失的值。
+
+CDC 路径为 `借用事件视图 → EventConverter → Change + EventAction → Processor → CommittedTransaction → handlers → 检查点`。该路径通过自己的版本适配器和选择性解码器处理事件，不先调用 `RowsDecoder` 解出所有原始字段。`pikachu` 注册默认 JSON Lines 处理器，嵌入式应用自行注册处理器；聚合库不增加处理阶段。模块职责、启动恢复流程及两条解码路径见[架构与事件流](docs/architecture.zh-CN.md)。
 
 ## 目录结构
 
@@ -28,22 +44,24 @@ crates/mysql-canal/
 ├── src/config/          # Named sources and CDC policy
 ├── src/model/           # Exact primary keys and lightweight changes
 ├── src/protocol/mysql/  # CDC adapters and selective primary-key decoding
-├── src/source/          # Source plugins and historical schema discovery
+├── src/source/          # Source plugins, schema discovery and initial positions
 ├── src/engine/          # Event conversion, transactions and checkpoints
 ├── src/sink/            # Transaction sinks and JSON Lines output
 ├── examples/            # CDC listeners, adapters and configuration
 ├── benches/             # Selective decoding benchmarks
 └── tests/               # CDC, conversion and dedicated MySQL tests
 crates/mysql-replication/
-├── src/events/          # Event trait, common header and concrete binlog events
+├── src/events/          # Typed binlog events and opt-in sparse row decoding
 ├── src/frame.rs         # Raw bytes, bounds and checksums
 ├── src/parser.rs        # Per-file layouts and configurable lazy parsing
 ├── src/version.rs       # Shared numeric producer-version validation
 ├── src/file.rs          # Offline event/frame reader
 ├── src/stream.rs        # Replication transport and borrowed body views
+├── src/primary_key.rs   # Opt-in selected-table primary-key preflight
 └── tests/events.rs      # Protocol regression tests
-tests/infra/            # Dedicated MySQL test containers
+tests/infra/             # Dedicated MySQL test containers
 scripts/release/         # Release tag validation and tests
+docs/architecture.md     # Layer boundaries and event flow
 docs/releasing.md        # CI and publishing guide (Chinese)
 .github/workflows/       # CI, MySQL compatibility and workspace publishing
 ```
@@ -109,6 +127,8 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 任一 worker 失败，进程通知其他 worker 在事件之间停止并返回非零状态；当前阻塞的 MySQL 读取最长等待其 90 秒 read timeout。重启后每个来源从自己的已提交位点继续。各来源初始化逐个获取读锁，不提供跨实例一致性快照；若初始化中途失败，已有成功的 state 会保留，下一次使用 `run` 继续准备剩余来源。
 
 需要 Rust 1.89+。`check` 检查服务器配置、表引擎及主键；字段的实际 wire 类型/长度在 TABLE_MAP 到达时进一步校验。配置相对路径以 TOML 所在目录为基准。凭据从环境变量读取，特殊字符应按 MySQL URL 规则编码；`source.tls_ca` 可配置 CA 证书，启用证书与域名验证。
+
+每次启动 MySQL 来源（包括从检查点恢复）都会调用 `mysql-replication` 检查白名单表当前的主键。主键缺失或不受支持时，在创建初始检查点和消费 binlog 前报错停止；历史事件仍按检查点中保存的 schema 解码。直接使用原始复制库时，可通过 `ReplicationStream::connect_with_tables` 或 `from_connection_with_tables` 传入指定表，见[复制库 API](crates/mysql-replication/README.zh-CN.md#配置与按需解析)。
 
 初次 `run` 会短暂执行 `FLUSH TABLES WITH READ LOCK`，在锁内读取白名单 schema 和当前提交位点，解锁后开始消费。**它从当前位点开始，不做全量数据快照**。也可以先运行 `init cdc.toml` 生成起点，稍后 `run`；已经存在的 state 不会被 `init` 覆盖。`run cdc.toml --once` 消费当前可用事件后退出，适合补采与测试。
 
@@ -252,10 +272,11 @@ docker compose -f tests/infra/compose.yaml down -v
 
 无论专用容器启动或测试成功与否，本次测试结束都要执行 `down -v`。切换镜像时同步修改 `CDC_TEST_MYSQL_SERIES`，并先删除旧测试卷。
 
-`mysql_live` 包含 11 个独立实库场景，均通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径读取服务器实际生成的 binlog；不使用合成事件替代实库变更。输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk 与 changed，缺失、额外或重复的事件都会失败。
+`mysql_live` 包含 12 个独立实库场景，覆盖启动校验及通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径读取服务器实际生成的 binlog；不使用合成事件替代实库变更。输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk 与 changed，缺失、额外或重复的事件都会失败。
 
 | 场景 | 校验内容 |
 | --- | --- |
+| 启动主键检测 | 原始复制及首次/恢复 CDC 在消费前拒绝无主键、只有 UNIQUE 索引、联合主键及不支持的类型/字符集；检查点不变，非白名单表不影响校验 |
 | 单行 INSERT / UPDATE / DELETE | 完整输出、只更新指定字段、写入 NULL、DELETE 的 changed 为空；同时跳过 JSON/时间/DECIMAL/BIT/ENUM/SET/BLOB 值 |
 | 多行操作 | 批量新增、批量更新、批量删除逐行核对；零匹配 UPDATE/DELETE 不输出 |
 | 整数主键 | TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT 的 signed/unsigned 边界及 NULL 跳读，包含 i64::MIN 与 u64::MAX |
@@ -270,7 +291,7 @@ docker compose -f tests/infra/compose.yaml down -v
 
 这些场景必须串行执行：fixture 创建/删除数据库会产生 DDL，而 CDC 对任何来源的 DDL 都会停止。每个 fixture 有独立 schema、复制 ID 和临时 state，结束或断言失败时尝试清理数据库与状态目录。
 
-替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql-compatibility.yml` 在每个版本上运行以上全部 11 个场景，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
+替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql-compatibility.yml` 在每个版本上运行以上全部 12 个场景，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
 
 离线回放使用**和起点相匹配**的 state/schema；binlog 必须保留开头的 FORMAT_DESCRIPTION：
 

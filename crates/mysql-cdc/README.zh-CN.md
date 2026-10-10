@@ -4,6 +4,8 @@
 
 只需一个依赖即可使用 MySQL CDC 与复制功能。本聚合包重导出 `mysql-canal` 和 `mysql-replication`，保留原有类型、生命周期和行为。
 
+处理分层为 `pikachu → mysql-canal → mysql-replication`，本聚合包提供两个库的入口，不增加处理阶段。通过 `replication` 订阅 binlog、解析协议事件，也可用 `events::RowsDecoder` 按需检查原始稀疏行镜像；通过 `Cdc` 使用白名单转换、已提交事务回调和检查点恢复。事件流与边界见[架构说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)。
+
 ```toml
 [dependencies]
 mysql-cdc-rs = "1.0.0"

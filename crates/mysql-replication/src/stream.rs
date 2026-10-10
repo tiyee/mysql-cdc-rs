@@ -88,6 +88,25 @@ pub struct ReplicationStream {
     parser: BinlogParser,
 }
 impl ReplicationStream {
+    /// Validates primary keys for selected tables before starting replication.
+    /// The table list controls validation only; it does not filter binlog events.
+    pub fn connect_with_tables<'a>(
+        connection: &ConnectionConfig,
+        replication: ReplicationConfig,
+        tables: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self> {
+        Self::from_connection_with_tables(connect(connection)?, replication, tables)
+    }
+    /// Validates primary keys on this connection before sending the binlog request.
+    /// The table list controls validation only; it does not filter binlog events.
+    pub fn from_connection_with_tables<'a>(
+        mut conn: Conn,
+        config: ReplicationConfig,
+        tables: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self> {
+        crate::primary_key::validate_primary_keys(&mut conn, tables)?;
+        Self::from_connection(conn, config)
+    }
     pub fn connect(connection: &ConnectionConfig, replication: ReplicationConfig) -> Result<Self> {
         Self::from_connection(connect(connection)?, replication)
     }

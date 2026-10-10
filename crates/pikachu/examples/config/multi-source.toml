@@ -1,5 +1,6 @@
 # Each entry is one upstream instance. Paths are relative to this file.
 # Export MYSQL_EAST_URL and MYSQL_WEST_URL before check/init/run.
+# Startup checks every selected table for a supported single-column PRIMARY KEY.
 [[sources]]
 id = "east"
 state_file = "east-state.json"

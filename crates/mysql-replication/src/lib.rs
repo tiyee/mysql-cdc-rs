@@ -10,6 +10,7 @@ pub mod events;
 pub mod file;
 mod frame;
 pub mod parser;
+pub mod primary_key;
 pub mod stream;
 pub mod version;
 mod wire;

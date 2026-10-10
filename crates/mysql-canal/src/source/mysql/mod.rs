@@ -31,6 +31,13 @@ impl SourcePlugin for MysqlSource {
             versions,
             config.source.adapter.as_deref(),
         )?;
+        mysql_replication::primary_key::validate_primary_keys(
+            &mut conn,
+            config
+                .tables
+                .iter()
+                .map(|t| (t.schema.as_str(), t.table.as_str())),
+        )?;
         let info = ServerInfo {
             uuid,
             version,
@@ -76,7 +83,14 @@ impl SourceSession for MysqlSession {
         replication.required_row_image = Some(RowImage::Minimal);
         replication.parser = mysql_replication::parser::ParserConfig::minimal();
         Ok(Box::new(MysqlEvents {
-            stream: ReplicationStream::from_connection(self.conn, replication)?,
+            stream: ReplicationStream::from_connection_with_tables(
+                self.conn,
+                replication,
+                config
+                    .tables
+                    .iter()
+                    .map(|t| (t.schema.as_str(), t.table.as_str())),
+            )?,
         }))
     }
 }
@@ -120,6 +134,13 @@ pub fn inspect_server(
     Ok((uuid, version, adapter))
 }
 pub fn load_tables(conn: &mut Conn, config: &Config) -> Result<Vec<TableMeta>> {
+    mysql_replication::primary_key::validate_primary_keys(
+        conn,
+        config
+            .tables
+            .iter()
+            .map(|t| (t.schema.as_str(), t.table.as_str())),
+    )?;
     let mut tables = Vec::with_capacity(config.tables.len());
     for table in &config.tables {
         let params = params! { "schema" => &table.schema, "table" => &table.table };

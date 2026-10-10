@@ -4,6 +4,8 @@ English | [简体中文](README.zh-CN.md)
 
 One dependency for MySQL CDC and replication. This facade re-exports `mysql-canal` and `mysql-replication`, preserving their types, lifetimes and behavior.
 
+The processing layers are `pikachu → mysql-canal → mysql-replication`; this facade provides access to the two libraries without adding a processing stage. Use `replication` to subscribe to binlogs, parse protocol events and optionally inspect sparse raw row images with `events::RowsDecoder`. Use `Cdc` for whitelist-based conversion, committed transaction handlers and checkpoint recovery. See the [architecture guide](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md) for the event flow and boundaries.
+
 ```toml
 [dependencies]
 mysql-cdc-rs = "1.0.0"

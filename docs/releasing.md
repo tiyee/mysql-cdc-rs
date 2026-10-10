@@ -1,5 +1,7 @@
 # CI 与 crates.io 发布
 
+分层职责与两条解码路径见[架构与事件流](architecture.zh-CN.md)（[English](architecture.md)）。复制库同时提供协议事件与可选原始增、改、删行镜像解码；canal 使用独立的选择性解码器完成 CDC 转换，不先解码所有原始字段；CLI 通过 canal 消费与输出，聚合库仅重导出。
+
 仓库包含四个包：`mysql-replication`（导入路径 `mysql_replication`）负责复制传输与原始 binlog 事件；`mysql-canal`（导入路径 `mysql_canal`）提供 CDC 转换、事务和检查点公共库；`mysql-cdc-rs`（导入路径 `mysql_cdc_rs`，目录 `crates/mysql-cdc`）聚合两个库，根路径及 `canal` 导出 CDC API，`replication` 导出原始事件与传输；`pikachu` 仅提供 `pikachu-cdc` CLI，依赖 canal 并注册默认 JSON Lines 打印处理器。原始事件的 `dump` 按字段逐行打印，仅用于调试。`Cdc` 接收配置，应用通过 `add_handle` 注册 `TransactionHandler` 或闭包，接收 `CommittedTransaction`。binlog 先经 `EventConverter` 转为轻量行变更，再由事务引擎提交；两种事件类型独立。配置示例为 `crates/pikachu/examples/config/multi-source.toml`。四个包保持同版，依赖链为 CLI → canal → replication，聚合包同时依赖 canal 与 replication，精确依赖工作区版本。四个包统一通过 GitHub OIDC Trusted Publishing 认证，按依赖顺序上传复制库、canal 库、聚合包和 CLI，不读取长期 API token secret。
 
 ## CI 矩阵
@@ -17,7 +19,7 @@
 
 所有矩阵独立执行，单项失败不会取消其他项。`CI success` 汇总所有任务，可设为分支保护的必需检查。MySQL 矩阵由 `mysql-compatibility.yml` 统一维护，也可单独手动运行。当前运行时的位点持久化依赖 Unix 文件/目录同步语义，因此测试系统先覆盖 Linux 与 macOS。
 
-每个 MySQL 版本都会串行执行 `mysql_live` 的全部 11 个实库场景，校验单行/多行 INSERT、UPDATE、DELETE、NULL 稀疏字段、整数边界、字符串/DECIMAL/数值主键变更、80 列位图、跨库表白名单、实时提交可见性、回滚、位点恢复、sink 失败重放，以及 DDL 停止边界。测试实际执行 SQL 并逐条比较 CDC 输出，不仅检查是否能连接服务器。普通协议回归另行覆盖 NOT NULL 列的非法 NULL、未知 ROTATE post-header 长度、畸形生产者版本及 MariaDB 标识拒绝，并检查错误类别与磁盘检查点；原始行解码另有独立字节 fixture，覆盖 v1/v2、多行及 before/after 配对、稀疏位图、NULL、借用生命周期、整数边界、精确 DECIMAL 与畸形字段；`decode_rows` 示例随复制库打包。这些合成场景不计为实库验证。测试失败、少/多/重复输出或位点错误均阻止发布；完整覆盖表见 [README: Testing](../README.md#testing) 或[中文版“验证”](../README.zh-CN.md#验证)。
+每个 MySQL 版本都会串行执行 `mysql_live` 的全部 12 个实库场景，校验原始复制及首次/恢复 CDC 的启动主键检测（包括无主键、只有 UNIQUE 索引、联合主键和不支持的类型/字符集，失败不写检查点）、单行/多行 INSERT、UPDATE、DELETE、NULL 稀疏字段、整数边界、字符串/DECIMAL/数值主键变更、80 列位图、跨库表白名单、实时提交可见性、回滚、位点恢复、sink 失败重放，以及 DDL 停止边界。测试实际执行 SQL 并逐条比较 CDC 输出，不仅检查是否能连接服务器。普通协议回归另行覆盖 NOT NULL 列的非法 NULL、未知 ROTATE post-header 长度、畸形生产者版本及 MariaDB 标识拒绝，并检查错误类别与磁盘检查点；原始行解码另有独立字节 fixture，覆盖 v1/v2、多行及 before/after 配对、稀疏位图、NULL、借用生命周期、整数边界、精确 DECIMAL 与畸形字段；`decode_rows` 示例随复制库打包。这些合成场景不计为实库验证。测试失败、少/多/重复输出或位点错误均阻止发布；完整覆盖表见 [README: Testing](../README.md#testing) 或[中文版“验证”](../README.zh-CN.md#验证)。
 
 截至 2026-10，MySQL 矩阵保留 5.7 与 8.0 历史基线，并覆盖其后全部已发布 LTS 系列 8.4、9.7，依据 [MySQL 官方版本说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)。5.7 固定最终版 `mysql:5.7.44`，其余分别使用 `mysql:8.0`、`mysql:8.4`、`mysql:9.7` 系列标签跟踪可用补丁；不用 `latest` 或 `lts` 替代显式系列。实际补丁版本会写入测试日志，并用 `CDC_TEST_MYSQL_SERIES` 校验镜像确实属于对应系列。新 LTS 系列发布时，在矩阵和 `VersionRegistry` 中同时增加对应项。9.0 是 Innovation 系列，适配器保留，但不列入 LTS CI 矩阵。
 

@@ -2,7 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-`mysql-cdc-rs` (`mysql_cdc_rs`) is the unified library entry point, re-exporting `mysql-canal` and `mysql-replication`. `pikachu` provides the CLI (`pikachu-cdc`), which depends on the CDC library `mysql-canal` (`mysql_canal`). The separate `mysql-replication` package provides protocol events and replication transport, with no whitelist, application schema, transaction sink or checkpoint policy. CDC keeps only **database names, table names, single-column primary keys, and changed column names**, without materializing full rows. Built-in `ROW + MINIMAL` adapters cover Oracle MySQL 5.7, 8.0, 8.1–8.4, 9.0 and 9.7, with concurrent consumption from multiple instances. Real-server compatibility tests must be run separately.
+MySQL binlog consumption is organized into three layers: `mysql-replication` subscribes to and parses binlog events, with opt-in decoding of raw insert/update/delete row images; `mysql-canal` interprets selected row events as lightweight CDC changes and manages transactions and recovery; `pikachu` provides the `pikachu-cdc` CLI on top of `mysql-canal`. `mysql-cdc-rs` (`mysql_cdc_rs`) is a unified library entry point that re-exports both libraries.
+
+CDC keeps only the source and **database names, table names, single-column primary keys, and changed column names**, without materializing full rows. Ordinary SELECT reads do not produce CDC changes. Built-in `ROW + MINIMAL` adapters cover Oracle MySQL 5.7, 8.0, 8.1–8.4, 9.0 and 9.7, with concurrent consumption from multiple instances. Real-server compatibility tests must be run separately.
 
 All four workspace packages use version **1.0.0**. Choose the package by the API you need:
 
@@ -10,8 +12,22 @@ All four workspace packages use version **1.0.0**. Choose the package by the API
 | --- | --- | --- |
 | [`mysql-cdc-rs`](crates/mysql-cdc/README.md) | `mysql_cdc_rs` | Unified CDC and raw replication API |
 | [`mysql-canal`](crates/mysql-canal/README.md) | `mysql_canal` | CDC conversion, committed transaction handlers and checkpoints |
-| [`mysql-replication`](crates/mysql-replication/README.md) | `mysql_replication` | Borrowed protocol events, offline files and replication transport |
+| [`mysql-replication`](crates/mysql-replication/README.md) | `mysql_replication` | Replication transport, protocol parsing and opt-in raw row decoding |
 | [`pikachu`](crates/pikachu/README.md) | `pikachu-cdc` | CLI with JSON Lines output |
+
+## Architecture
+
+Arrows show Cargo dependencies, from consumer to provider:
+
+```text
+pikachu (pikachu-cdc) ──> mysql-canal ──> mysql-replication
+mysql-cdc-rs ──────────> mysql-canal
+mysql-cdc-rs ─────────────────────────> mysql-replication
+```
+
+The raw inspection path is `BinlogEvent → TableMapEvent + RowsEvent → RowsDecoder → Row { before, after }`. WRITE represents an insert, UPDATE pairs before/after images, and DELETE has a before image. Images retain only columns actually present in the binlog; they do not reconstruct missing MINIMAL values.
+
+The CDC path is `borrowed event view → EventConverter → Change + EventAction → Processor → CommittedTransaction → handlers → checkpoint`. It uses its own version adapters and selective decoder, rather than decoding every raw field through `RowsDecoder`. `pikachu` registers the default JSON Lines handler; embedded applications register their own handlers. The facade adds no processing stage. See the [architecture and event flow](docs/architecture.md) for module responsibilities, startup/recovery and the two decoding paths.
 
 ## Project layout
 
@@ -28,22 +44,24 @@ crates/mysql-canal/
 ├── src/config/          # Named sources and CDC policy
 ├── src/model/           # Exact primary keys and lightweight changes
 ├── src/protocol/mysql/  # CDC adapters and selective primary-key decoding
-├── src/source/          # Source plugins and historical schema discovery
+├── src/source/          # Source plugins, schema discovery and initial positions
 ├── src/engine/          # Event conversion, transactions and checkpoints
 ├── src/sink/            # Transaction sinks and JSON Lines output
 ├── examples/            # CDC listeners, adapters and configuration
 ├── benches/             # Selective decoding benchmarks
 └── tests/               # CDC, conversion and dedicated MySQL tests
 crates/mysql-replication/
-├── src/events/          # Event trait, common header and concrete binlog events
+├── src/events/          # Typed binlog events and opt-in sparse row decoding
 ├── src/frame.rs         # Raw bytes, bounds and checksums
 ├── src/parser.rs        # Per-file layouts and configurable lazy parsing
 ├── src/version.rs       # Shared numeric producer-version validation
 ├── src/file.rs          # Offline event/frame reader
 ├── src/stream.rs        # Replication transport and borrowed body views
+├── src/primary_key.rs   # Opt-in selected-table primary-key preflight
 └── tests/events.rs      # Protocol regression tests
-tests/infra/            # Dedicated MySQL test containers
+tests/infra/             # Dedicated MySQL test containers
 scripts/release/         # Release tag validation and tests
+docs/architecture.md     # Layer boundaries and event flow
 docs/releasing.md        # CI and publishing guide (Chinese)
 .github/workflows/       # CI, MySQL compatibility and workspace publishing
 ```
@@ -111,6 +129,8 @@ Each source owns its thread, connection, schema, `table_id` mappings, transactio
 When a worker fails, the process asks other workers to stop between events and exits with a nonzero status. A blocked MySQL read may wait for its 90-second read timeout. After restart, each source resumes from its own committed checkpoint. Sources acquire initialization read locks individually, so initialization does not provide a consistent snapshot across instances. If initialization fails partway through, successfully created state files remain; a later `run` prepares the remaining sources.
 
 Requires Rust 1.89 or later. `check` validates server settings, table engines, and primary keys; actual wire types and lengths are checked further when TABLE_MAP arrives. Relative configuration paths are resolved against the TOML file's directory. Credentials come from environment variables; encode special characters according to MySQL URL rules. Set `source.tls_ca` to a CA certificate to enable certificate and hostname verification.
+
+Every MySQL source checks the current primary keys of its whitelist through `mysql-replication` before starting, including checkpoint recovery. Missing or unsupported keys stop startup before initial checkpoints are written or binlog consumption begins. Recovery still uses the saved historical schema to decode events. Raw replication callers can pass selected tables to `ReplicationStream::connect_with_tables` or `from_connection_with_tables`; see the [replication API](crates/mysql-replication/README.md#configuration-and-selective-work).
 
 The first `run` briefly executes `FLUSH TABLES WITH READ LOCK`, reads the whitelisted schemas and current committed position under the lock, then unlocks and starts consumption. **Consumption starts at the current position; there is no initial full-data snapshot.** You can also run `init cdc.toml` to capture the starting point and run the consumer later. `init` never overwrites an existing state file. `run cdc.toml --once` consumes currently available events and exits, which is useful for catch-up runs and testing.
 
@@ -258,10 +278,11 @@ docker compose -f tests/infra/compose.yaml down -v
 
 Always run `down -v` after this dedicated test run, including when startup or tests fail. When switching the image, update `CDC_TEST_MYSQL_SERIES` to match and remove the old test volume first.
 
-`mysql_live` contains 11 independent scenarios reading actual server-generated binlogs through the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. Synthetic events do not replace real mutations. Assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
+`mysql_live` contains 12 independent scenarios covering startup validation and actual server-generated binlogs through the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. Synthetic events do not replace real mutations. Assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
 
 | Scenario | Checks |
 | --- | --- |
+| Startup primary keys | Raw replication and fresh/resumed CDC reject missing, UNIQUE-only, composite and unsupported keys before consumption; checkpoints remain unchanged and excluded tables do not affect validation |
 | Single-row INSERT / UPDATE / DELETE | Complete output, specified update columns, NULL writes, empty DELETE `changed`, and skipping JSON/time/DECIMAL/BIT/ENUM/SET/BLOB values |
 | Multi-row mutations | Every inserted, updated, or deleted row; zero-match UPDATE/DELETE emits nothing |
 | Integer keys | Signed/unsigned boundaries for all integer widths, NULL skipping, i64::MIN, and u64::MAX |
@@ -276,7 +297,7 @@ Always run `down -v` after this dedicated test run, including when startup or te
 
 Run these scenarios serially: fixture creation and cleanup produce DDL, and the consumer stops on DDL in any database. Each fixture uses independent schemas, a replication ID, and temporary state, and attempts cleanup on completion or assertion failure.
 
-Set `MYSQL_IMAGE` to `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4`, or `mysql:9.7` to test each series. Remove the previous test volume before switching versions. `.github/workflows/mysql-compatibility.yml` runs all 11 scenarios for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. Explicit series tags follow patch updates; the moving `lts` tag is not used. CI checks the actual server series and logs its patch version and selected adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). Add both a matrix entry and a version adapter when supporting a new LTS series. Real-server tests require a Docker/MySQL environment.
+Set `MYSQL_IMAGE` to `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4`, or `mysql:9.7` to test each series. Remove the previous test volume before switching versions. `.github/workflows/mysql-compatibility.yml` runs all 12 scenarios for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. Explicit series tags follow patch updates; the moving `lts` tag is not used. CI checks the actual server series and logs its patch version and selected adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). Add both a matrix entry and a version adapter when supporting a new LTS series. Real-server tests require a Docker/MySQL environment.
 
 Offline replay requires a state/schema matching the starting position and a binlog retaining its initial FORMAT_DESCRIPTION:
 
