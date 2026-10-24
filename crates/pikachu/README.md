@@ -46,7 +46,7 @@ The filename must match `state.file`, and the file must retain its initial FORMA
 
 Consumption errors are written to stderr and produce a nonzero exit status; change records use stdout. The default handler flushes stdout before saving a checkpoint, but this is not downstream durable acknowledgement. Consumers must tolerate replay. Any QUERY other than BEGIN/COMMIT/ROLLBACK stops CDC with `Error::Statement`; DDL does not automatically refresh the schema and continue.
 
-The project is not yet released. Build from source; the executable is `pikachu-cdc`. For embedded CDC and raw replication through one dependency, use `mysql-cdc-rs` (`mysql_cdc_rs`); `mysql-canal` and `mysql-replication` remain available separately. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for setup, the output contract, compatibility and limitations.
+Build from source using the commands above; the executable is `pikachu-cdc`. For embedded CDC and raw replication through one dependency, use `mysql-cdc-rs` (`mysql_cdc_rs`); `mysql-canal` and `mysql-replication` remain available separately. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for setup, the output contract, compatibility and limitations.
 
 ## Row image mode
 

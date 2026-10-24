@@ -46,7 +46,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 消费错误写入 stderr，并返回非零退出码；变更记录使用 stdout。默认处理器在保存检查点前 flush stdout，但这不代表下游持久化确认，消费方须容忍重放。任何非 BEGIN/COMMIT/ROLLBACK 的 QUERY 都以 `Error::Statement` 停止 CDC，DDL 不会自动刷新 schema 并继续。
 
-项目尚未发布，目前从源码构建，命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
+按上文从源码构建，命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
 
 ## 行镜像模式
 

@@ -6,7 +6,7 @@ mysql-cdc 的中间层，基于 `mysql-replication` 将 binlog 转为通用 CDC 
 
 ## 监听已提交事务
 
-项目尚未发布。以下依赖使用本地源码，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
+通过本地源码集成时，使用以下依赖，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
 
 ```toml
 [dependencies]

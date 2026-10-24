@@ -6,7 +6,7 @@ The middle layer in mysql-cdc. Built on `mysql-replication`, it converts binlogs
 
 ## Listen for committed transactions
 
-The project is not yet released. The dependency below uses local source; replace `/path/to/mysql-cdc-rs` with your checkout path.
+To integrate from local source, use the dependency below; replace `/path/to/mysql-cdc-rs` with your checkout path.
 
 ```toml
 [dependencies]

@@ -4,7 +4,7 @@ English | [简体中文](configuration.zh-CN.md)
 
 [Documentation index](README.md)
 
-Follow this guide to prepare MySQL, connect one source, check and run consumption, then recover or replay. The project is unreleased; commands use a build from source.
+Follow this guide to prepare MySQL, connect one source, check and run consumption, then recover or replay. Commands use a build from source.
 
 ## 1. Prepare MySQL
 

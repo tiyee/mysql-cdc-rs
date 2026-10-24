@@ -96,7 +96,7 @@ In MINIMAL mode, the notification identifies the record and fields recorded in t
 
 ## Library example
 
-The project is not yet released. The dependency below uses local source; replace `/path/to/mysql-cdc-rs` with your checkout path.
+To integrate from local source, use the dependency below; replace `/path/to/mysql-cdc-rs` with your checkout path.
 
 ```toml
 [dependencies]

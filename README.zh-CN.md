@@ -96,7 +96,7 @@ MINIMAL 模式下，这条变更通知表示“哪条记录被修改、日志记
 
 ## 库使用示例
 
-项目尚未发布。以下依赖使用本地源码，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
+通过本地源码集成时，使用以下依赖，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
 
 ```toml
 [dependencies]

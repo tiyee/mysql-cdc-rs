@@ -6,7 +6,7 @@ mysql-cdc 的底层 Rust 库，负责同步监听 MySQL binlog、解析协议并
 
 ## 读取本地 binlog
 
-项目尚未发布。以下依赖使用本地源码，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
+通过本地源码集成时，使用以下依赖，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
 
 ```toml
 [dependencies]
