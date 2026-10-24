@@ -26,25 +26,31 @@ Canal TABLE_MAP 回归同时覆盖两种镜像策略下的整数符号、主键�
 
 Canal 字段回归比较完整借用/owned JSON、历史列元数据、稀疏缺列与 SQL NULL、无符号整数及精确 DECIMAL、文本/字节和编码值、输入缓冲区复用、混合来源模式、镜像内存预算，以及序列化失败不推进检查点。实库预期同时比较 before/after 字段、主键和变动字段名；二进制 JSON 仅在专门的语义断言中解码。
 
+离线 Replay 回归在 MINIMAL/FULL 两种模式下校验提交与回滚、历史 schema 边界、位点合法性、未完成事务、DDL、截断、checksum、sink 失败与事务预算。FULL 专项回归逐项比较 v1/v2 多行增删改的完整字段、NULL、主键变更及未变化列，检查续读不重复，并拒绝 INSERT/DELETE 或 UPDATE 任一侧的稀疏镜像；成功及失败均不修改磁盘检查点。
+
 ## 专用 MySQL 测试
 
-真实 MySQL 集成测试（显式执行，在独立测试服务上创建并删除唯一命名的测试库）：
+真实 MySQL 集成测试显式执行，在独立测试服务上创建并删除唯一命名的测试库。以下命令依次验证 MINIMAL 和 FULL，每种模式使用新的测试卷：
 
 ```sh
 (
 set -eu
 cargo test -p mysql-replication -p mysql-canal -p pikachu --test mysql_live --locked --no-run
-export CDC_TEST_ROW_IMAGE='minimal' # Use full to test FULL images.
 cleanup_mysql_cdc_test() {
     docker compose -f tests/infra/compose.yaml down -v
 }
 trap cleanup_mysql_cdc_test EXIT
-MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
+export MYSQL_IMAGE='mysql:8.4'
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
 export CDC_TEST_MYSQL_SERIES='8.4'
-cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
-cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
-cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+for CDC_TEST_ROW_IMAGE in minimal full; do
+    export CDC_TEST_ROW_IMAGE
+    docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
+    cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+    cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+    cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+    cleanup_mysql_cdc_test
+done
 )
 ```
 

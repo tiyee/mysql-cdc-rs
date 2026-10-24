@@ -28,25 +28,31 @@ Canal TABLE_MAP regressions also reject integer signedness and primary-key metad
 
 Canal field regressions compare complete borrowed/owned JSON, historical column metadata, sparse absence versus SQL NULL, unsigned integers and exact DECIMAL, text/bytes and opaque values, input-buffer reuse, mixed-source modes, image memory budgets and serialization failure without checkpoint advancement. Live expectations compare before/after fields as well as keys and changed names; binary JSON is decoded only in its dedicated semantic assertion.
 
+Offline Replay regressions exercise both MINIMAL and FULL for commits and rollbacks, historical schema boundaries, position validation, incomplete transactions, DDL, truncation, checksums, sink failures and transaction budgets. Dedicated FULL cases compare every field in v1/v2 multirow inserts, updates and deletes, including NULL, key changes and unchanged columns; verify resume without duplicates; and reject sparse INSERT/DELETE or either UPDATE image. Success and failure both leave the disk checkpoint unchanged.
+
 ## Dedicated MySQL tests
 
-Run real-MySQL tests explicitly against a dedicated test server. The fixtures create and drop uniquely named databases:
+Run real-MySQL tests explicitly against a dedicated test server. The fixtures create and drop uniquely named databases. These commands run MINIMAL and FULL in sequence, using a fresh test volume for each mode:
 
 ```sh
 (
 set -eu
 cargo test -p mysql-replication -p mysql-canal -p pikachu --test mysql_live --locked --no-run
-export CDC_TEST_ROW_IMAGE='minimal' # Use full to test FULL images.
 cleanup_mysql_cdc_test() {
     docker compose -f tests/infra/compose.yaml down -v
 }
 trap cleanup_mysql_cdc_test EXIT
-MYSQL_IMAGE=mysql:8.4 docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
+export MYSQL_IMAGE='mysql:8.4'
 export CDC_TEST_MYSQL_URL='mysql://root:cdc-test-only@127.0.0.1:13306'
 export CDC_TEST_MYSQL_SERIES='8.4'
-cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
-cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
-cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+for CDC_TEST_ROW_IMAGE in minimal full; do
+    export CDC_TEST_ROW_IMAGE
+    docker compose -f tests/infra/compose.yaml up -d --wait --wait-timeout 180
+    cargo test -p mysql-replication --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+    cargo test -p mysql-canal --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+    cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test-threads=1
+    cleanup_mysql_cdc_test
+done
 )
 ```
 
