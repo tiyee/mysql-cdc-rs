@@ -190,7 +190,11 @@ This section expands the generic row events provided by replication. `BinlogEven
 | Historical table definition | `rows.table()?`, `rows.columns()?` | Database, table and all column definitions, bound automatically by the parser |
 | Decoded operations | `rows.rows()?` | Iterates `Result<Row<'a, M>>`; each `Row.operation` holds its applicable images |
 
-The examples use the same `UPDATE app.users SET name = 'Bob', age = NULL WHERE id = 42`. Column indices are `0:id`, `1:name`, `2:age`, `3:status`; name and status are VARCHAR and age is nullable INT. Assume TABLE_MAP includes column-name metadata so names can be shown. Values in the trees are displayed for readability; these trees are neither `dump()` output nor another JSON format.
+The examples use the same `UPDATE app.users SET name = 'Bob', age = NULL WHERE id = 42`. Column indices are `0:id`, `1:name`, `2:age`, `3:status`; name and status are VARCHAR and age is nullable INT. Assume TABLE_MAP includes column-name metadata so names can be shown. Values in the trees are displayed for readability; these trees are not `dump()` output.
+
+The JSON below expands `EventData::Rows`, `table()` and `rows()` into a readable view, omitting `raw_data`, `header` and `encoded_images`. Replication has no built-in raw-event JSON serializer; actual CLI output is shown separately under [Canal / CLI JSON](#canal--cli-json). The JSON examples assume the log provides names, numeric signedness and key metadata.
+
+`table.columns` shows shared definitions; each row's `Field.column` identifies the same column by index and name. Integers use known signedness, text bytes are displayed as UTF-8 strings, and SQL NULL appears as `value: null`. An unlogged column has no entry in `fields`. Actual Rust values remain `RowValue::Integer`, `Bytes` and `Null`.
 
 ### MINIMAL
 
@@ -210,6 +214,47 @@ BinlogEvent<Minimal>
                 ├── column_indices(): [1, 2]
                 └── fields(): name=Bob, age=NULL
 ```
+
+#### MINIMAL JSON
+
+```json
+{
+  "event": {
+    "type": "Rows",
+    "table_id": 7,
+    "flags": 0,
+    "kind": "Update",
+    "table": {
+      "schema": "app",
+      "table": "users",
+      "columns": [
+        {"index": 0, "name": "id", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": false}, "unsigned": true, "primary_key": true},
+        {"index": 1, "name": "name", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false},
+        {"index": 2, "name": "age", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": true}, "unsigned": false, "primary_key": false},
+        {"index": 3, "name": "status", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false}
+      ]
+    },
+    "rows": [
+      {
+        "operation": "Update",
+        "before": {
+          "fields": [
+            {"column": {"index": 0, "name": "id"}, "value": 42}
+          ]
+        },
+        "after": {
+          "fields": [
+            {"column": {"index": 1, "name": "name"}, "value": "Bob"},
+            {"column": {"index": 2, "name": "age"}, "value": null}
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+The before fields contain only id; the after fields contain only name and age. No after entry for id or status means those fields were not logged. The age entry exists with `value: null`, meaning SQL NULL. Both images still share the four-column `table.columns` definition.
 
 `SparseImage` preserves the logged fields. `columns()` still describes all four columns and `column_count()` remains 4, even when only two fields are present. `column_indices()` contains absolute table ordinals, not compacted field positions.
 
@@ -241,6 +286,52 @@ BinlogEvent<Full>
             └── after: CompleteImage
                 └── fields(): id=42, name=Bob, age=NULL, status=active
 ```
+
+#### FULL JSON
+
+```json
+{
+  "event": {
+    "type": "Rows",
+    "table_id": 7,
+    "flags": 0,
+    "kind": "Update",
+    "table": {
+      "schema": "app",
+      "table": "users",
+      "columns": [
+        {"index": 0, "name": "id", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": false}, "unsigned": true, "primary_key": true},
+        {"index": 1, "name": "name", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false},
+        {"index": 2, "name": "age", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": true}, "unsigned": false, "primary_key": false},
+        {"index": 3, "name": "status", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false}
+      ]
+    },
+    "rows": [
+      {
+        "operation": "Update",
+        "before": {
+          "fields": [
+            {"column": {"index": 0, "name": "id"}, "value": 42},
+            {"column": {"index": 1, "name": "name"}, "value": "Alice"},
+            {"column": {"index": 2, "name": "age"}, "value": 20},
+            {"column": {"index": 3, "name": "status"}, "value": "active"}
+          ]
+        },
+        "after": {
+          "fields": [
+            {"column": {"index": 0, "name": "id"}, "value": 42},
+            {"column": {"index": 1, "name": "name"}, "value": "Bob"},
+            {"column": {"index": 2, "name": "age"}, "value": null},
+            {"column": {"index": 3, "name": "status"}, "value": "active"}
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+Both images contain all four fields. The after age is a present SQL NULL, and unchanged status still appears as `"active"`. The two JSON reading views use the same property names; their actual Rust image types are `SparseImage` and `CompleteImage`.
 
 Every existing `CompleteImage` must contain all four columns. `field(index)` returns `Result<Field>`; an in-range field cannot return `None` because it was not logged:
 
@@ -288,6 +379,52 @@ For example, the after-image name field provides ordinal 1, its available name a
 ### What canal delivers after conversion
 
 Replication exposes the raw values above, such as `name=Bob` and `age=NULL`. Canal's `Change` / `OwnedChange` still deliver only the table, operation, exact key, optional old key and `changed` column indices. They do not carry `SparseImage`, `CompleteImage` or full row values. For this update, MINIMAL `changed` is `[1, 2]` and FULL is `[0, 1, 2, 3]`; the CLI maps these indices to column names.
+
+#### Canal / CLI JSON
+
+After canal converts and commits the raw fields above, the CLI actually emits the following notifications. JSON is expanded for comparison; the CLI still writes one record per line.
+
+MINIMAL:
+
+```json
+{
+  "source": "east",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "name",
+    "age"
+  ]
+}
+```
+
+FULL:
+
+```json
+{
+  "source": "east",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "id",
+    "name",
+    "age",
+    "status"
+  ]
+}
+```
+
+FULL `changed` contains every after-image column, but neither notification includes the name, age or status values.
 
 See the [Rust event API](event-api.md#read-concrete-operations-for-each-mode) for code matching `EventData::Rows`, reading fields and handling borrowing lifetimes.
 

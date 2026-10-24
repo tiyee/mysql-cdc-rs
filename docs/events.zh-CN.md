@@ -190,7 +190,11 @@ MINIMAL/FULL 的内容差异发生在行修改的前后数据中；公共头和�
 | 历史表定义 | `rows.table()?`、`rows.columns()?` | 库名、表名和全部列定义；由 parser 自动绑定 TABLE_MAP |
 | 解码后的行操作 | `rows.rows()?` | 迭代 `Result<Row<'a, M>>`；每个 `Row.operation` 持有适用的前后镜像 |
 
-以下仍使用 `UPDATE app.users SET name = 'Bob', age = NULL WHERE id = 42`。表列索引依次为 `0:id`、`1:name`、`2:age`、`3:status`，其中 name 和 status 为 VARCHAR，age 为可空 INT。为展示列名，假设 TABLE_MAP 已携带列名元数据；树中的值按可读形式展示，不是 `dump()` 输出或额外的 JSON 格式。
+以下仍使用 `UPDATE app.users SET name = 'Bob', age = NULL WHERE id = 42`。表列索引依次为 `0:id`、`1:name`、`2:age`、`3:status`，其中 name 和 status 为 VARCHAR，age 为可空 INT。为展示列名，假设 TABLE_MAP 已携带列名元数据；树中的值按可读形式展示，不是 `dump()` 输出。
+
+下面的 JSON 将 `EventData::Rows`、`table()` 和 `rows()` 的内容展开为阅读视图，省略 `raw_data`、`header` 和 `encoded_images`。复制库没有内置的原始事件 JSON 序列化接口；实际 CLI 输出另见[Canal / CLI JSON](#canal--cli-json)。JSON 示例假设日志提供列名、数字符号及主键元数据。
+
+`table.columns` 展示共享的列定义，行内的 `Field.column` 用索引和名称定位同一列。整数按已知符号展示，文本字节用 UTF-8 字符串展示，SQL NULL 用 `value: null` 表示；未记录字段在 `fields` 中没有对应条目。实际 Rust 值仍分别是 `RowValue::Integer`、`Bytes` 和 `Null`。
 
 ### MINIMAL
 
@@ -210,6 +214,47 @@ BinlogEvent<Minimal>
                 ├── column_indices(): [1, 2]
                 └── fields(): name=Bob, age=NULL
 ```
+
+#### MINIMAL JSON
+
+```json
+{
+  "event": {
+    "type": "Rows",
+    "table_id": 7,
+    "flags": 0,
+    "kind": "Update",
+    "table": {
+      "schema": "app",
+      "table": "users",
+      "columns": [
+        {"index": 0, "name": "id", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": false}, "unsigned": true, "primary_key": true},
+        {"index": 1, "name": "name", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false},
+        {"index": 2, "name": "age", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": true}, "unsigned": false, "primary_key": false},
+        {"index": 3, "name": "status", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false}
+      ]
+    },
+    "rows": [
+      {
+        "operation": "Update",
+        "before": {
+          "fields": [
+            {"column": {"index": 0, "name": "id"}, "value": 42}
+          ]
+        },
+        "after": {
+          "fields": [
+            {"column": {"index": 1, "name": "name"}, "value": "Bob"},
+            {"column": {"index": 2, "name": "age"}, "value": null}
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+这里 before 的 `fields` 只有 id，after 只有 name 和 age。after 中没有 id 或 status 条目，表示未记录；age 条目存在且 `value` 为 `null`，表示 SQL NULL。两份镜像仍共享包含四列的 `table.columns`。
 
 `SparseImage` 保存日志实际记录的字段；`columns()` 仍包含四列定义，`column_count()` 仍为 4，不会因为只记录了两列而变成 2。`column_indices()` 是表列的绝对索引，不是压缩后的字段序号。
 
@@ -241,6 +286,52 @@ BinlogEvent<Full>
             └── after: CompleteImage
                 └── fields(): id=42, name=Bob, age=NULL, status=active
 ```
+
+#### FULL JSON
+
+```json
+{
+  "event": {
+    "type": "Rows",
+    "table_id": 7,
+    "flags": 0,
+    "kind": "Update",
+    "table": {
+      "schema": "app",
+      "table": "users",
+      "columns": [
+        {"index": 0, "name": "id", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": false}, "unsigned": true, "primary_key": true},
+        {"index": 1, "name": "name", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false},
+        {"index": 2, "name": "age", "definition": {"column_type": "MYSQL_TYPE_LONG", "nullable": true}, "unsigned": false, "primary_key": false},
+        {"index": 3, "name": "status", "definition": {"column_type": "MYSQL_TYPE_VARCHAR", "nullable": false}, "primary_key": false}
+      ]
+    },
+    "rows": [
+      {
+        "operation": "Update",
+        "before": {
+          "fields": [
+            {"column": {"index": 0, "name": "id"}, "value": 42},
+            {"column": {"index": 1, "name": "name"}, "value": "Alice"},
+            {"column": {"index": 2, "name": "age"}, "value": 20},
+            {"column": {"index": 3, "name": "status"}, "value": "active"}
+          ]
+        },
+        "after": {
+          "fields": [
+            {"column": {"index": 0, "name": "id"}, "value": 42},
+            {"column": {"index": 1, "name": "name"}, "value": "Bob"},
+            {"column": {"index": 2, "name": "age"}, "value": null},
+            {"column": {"index": 3, "name": "status"}, "value": "active"}
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+这里 before 和 after 的 `fields` 都有四列。after 的 age 是已记录的 SQL NULL，status 虽然没有改变，也以 `"active"` 出现。两种 JSON 阅读视图的属性名相同，实际 Rust 镜像类型分别为 `SparseImage` 和 `CompleteImage`。
 
 每份实际存在的 `CompleteImage` 必须包含全部四列。`field(index)` 返回 `Result<Field>`，范围内字段不会因为未记录而返回 `None`：
 
@@ -288,6 +379,52 @@ FULL 遇到缺列的镜像会返回 `Error::Unsupported`，不会把稀疏数据
 ### 转换到 Canal 后交付什么
 
 上述原始事件中的 `name=Bob`、`age=NULL` 等字段值可以由复制库读取。Canal 的 `Change` / `OwnedChange` 仍只交付表、操作、精确主键、可选旧主键及 `changed` 列索引，不附带 `SparseImage`、`CompleteImage` 或完整行值。上例 MINIMAL 的 `changed` 是 `[1, 2]`，FULL 为 `[0, 1, 2, 3]`；CLI 再将其映射为字段名。
+
+#### Canal / CLI JSON
+
+上面的原始行字段经 Canal 转换并提交后，CLI 实际输出以下变更通知。为便于对照，此处展开 JSON；CLI 仍每条记录输出一行。
+
+MINIMAL：
+
+```json
+{
+  "source": "east",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "name",
+    "age"
+  ]
+}
+```
+
+FULL：
+
+```json
+{
+  "source": "east",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "id",
+    "name",
+    "age",
+    "status"
+  ]
+}
+```
+
+FULL 的 `changed` 包含全部 after-image 字段，但两条通知都不包含 name、age、status 的字段值。
 
 按类型匹配 `EventData::Rows`、读取字段以及处理借用生命周期的代码见 [Rust 事件 API 参考](event-api.zh-CN.md#按模式读取具体行操作)。
 

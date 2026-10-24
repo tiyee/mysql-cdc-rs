@@ -136,7 +136,7 @@ Raw replication supports statically selected images through `BinlogFile<_, Full>
 | MINIMAL | `BinlogEvent<Minimal>` / `RowOperation<SparseImage>` | Logged columns, definitions and values | `Result<Option<Field>>`; a valid unlogged column is `None` |
 | FULL | `BinlogEvent<Full>` / `RowOperation<CompleteImage>` | All columns, definitions and values in each existing image | `Result<Field>`; incomplete images are rejected |
 
-Compare the [MINIMAL event](docs/events.md#minimal) and [FULL event](docs/events.md#full) for one UPDATE, including the full structure, before/after fields and access results. The [Rust example](docs/event-api.md#read-concrete-operations-for-each-mode) reads both static types. Raw events expose field values; canal's committed changes retain only keys and changed column indices.
+Compare the [MINIMAL JSON example](docs/events.md#minimal-json) and [FULL JSON example](docs/events.md#full-json) for one UPDATE, including JSON data, structure, before/after fields and access results. The [Rust example](docs/event-api.md#read-concrete-operations-for-each-mode) reads both static types. Raw events expose field values; canal's committed changes retain only keys and changed column indices.
 
 ## Usage boundaries
 

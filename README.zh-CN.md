@@ -136,7 +136,7 @@ fn main() -> Result<()> {
 | MINIMAL | `BinlogEvent<Minimal>` / `RowOperation<SparseImage>` | 实际记录的列及其定义和值 | `Result<Option<Field>>`，合法列未记录为 `None` |
 | FULL | `BinlogEvent<Full>` / `RowOperation<CompleteImage>` | 每份存在的镜像包含全部列及其定义和值 | `Result<Field>`，拒绝不完整镜像 |
 
-查看 [MINIMAL 事件展开](docs/events.zh-CN.md#minimal)、[FULL 事件展开](docs/events.zh-CN.md#full)，可对照同一条 UPDATE 的完整事件结构、before/after 字段和实际访问结果；[Rust 示例](docs/event-api.zh-CN.md#按模式读取具体行操作)展示两种静态类型的读取方式。原始事件包含字段值；Canal 的提交变更仍只携带主键和变动字段索引。
+查看 [MINIMAL JSON 示例](docs/events.zh-CN.md#minimal-json)、[FULL JSON 示例](docs/events.zh-CN.md#full-json)，可对照同一条 UPDATE 的JSON 数据、事件结构、before/after 字段和实际访问结果；[Rust 示例](docs/event-api.zh-CN.md#按模式读取具体行操作)展示两种静态类型的读取方式。原始事件包含字段值；Canal 的提交变更仍只携带主键和变动字段索引。
 
 ## 使用边界
 
