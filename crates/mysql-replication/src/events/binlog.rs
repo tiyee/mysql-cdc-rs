@@ -1,16 +1,27 @@
-use super::{Event, EventData, EventHeader};
+use super::{BinlogMode, Event, EventData, EventHeader, Unspecified};
 use crate::{BinlogFrame, Result};
 use std::{ops::Range, sync::Arc};
 
 /// One wire event, borrowing the reader's complete, unmodified event buffer.
+/// The public fields are identical for every mode; only the ROWS payload and
+/// decoded image types carry the selected policy. This is an envelope, whereas
+/// [`Event`] is the shared decoding/dump trait and [`EventData`] is its body enum.
+///
+/// ```compile_fail
+/// use mysql_replication::{BinlogEvent, Full, Minimal};
+/// fn change_policy(event: BinlogEvent<'_, Full>) -> BinlogEvent<'_, Minimal> { event }
+/// ```
 #[derive(Debug, Clone)]
-pub struct BinlogEvent<'a> {
+pub struct BinlogEvent<'a, M: BinlogMode = Unspecified> {
+    /// Original header, body and trailer/checksum, excluding file/network framing.
     pub raw_data: &'a [u8],
+    /// The same 19-byte common header in every row-image mode.
     pub header: EventHeader,
-    pub event: EventData<'a>,
+    /// Protocol body; the ROWS variant retains this envelope's mode parameter.
+    pub event: EventData<'a, M>,
     pub(crate) body: &'a [u8],
 }
-impl BinlogEvent<'_> {
+impl<M: BinlogMode> BinlogEvent<'_, M> {
     pub fn frame(&self) -> BinlogFrame<'_> {
         BinlogFrame {
             raw_data: self.raw_data,
@@ -19,7 +30,7 @@ impl BinlogEvent<'_> {
         }
     }
     /// Retains one raw buffer and its layout; typed fields are borrowed on view().
-    pub fn into_owned(self) -> Result<OwnedBinlogEvent> {
+    pub fn into_owned(self) -> Result<OwnedBinlogEvent<M>> {
         let start = EventHeader::LEN;
         let end = start + self.body.len();
         if self.raw_data.get(start..end) != Some(self.body)
@@ -42,17 +53,17 @@ impl BinlogEvent<'_> {
 
 /// No self references: a view borrows this owned raw buffer when requested.
 #[derive(Debug, Clone)]
-pub struct OwnedBinlogEvent {
+pub struct OwnedBinlogEvent<M: BinlogMode = Unspecified> {
     raw_data: Arc<[u8]>,
     header: EventHeader,
     body: Range<usize>,
-    template: EventData<'static>,
+    template: EventData<'static, M>,
 }
-impl OwnedBinlogEvent {
+impl<M: BinlogMode> OwnedBinlogEvent<M> {
     pub fn raw_data(&self) -> &[u8] {
         &self.raw_data
     }
-    pub fn view(&self) -> Result<BinlogEvent<'_>> {
+    pub fn view(&self) -> Result<BinlogEvent<'_, M>> {
         let body = &self.raw_data[self.body.clone()];
         let mut event = self.template.clone();
         event.decode(body)?;

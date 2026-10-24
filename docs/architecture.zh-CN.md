@@ -2,7 +2,7 @@
 
 [English](architecture.md) | 简体中文
 
-本文按当前代码梳理职责与数据流。配置、输出语义及兼容性见[项目说明](../README.zh-CN.md)，CI 与发布见[发布指南](releasing.md)。
+整套系统名称为 **mysql-cdc**；`mysql-cdc-rs` 是聚合包名称，不是第四个实现层。本文按当前代码梳理职责与数据流。配置、输出语义及兼容性见[项目说明](../README.zh-CN.md)，CI 与发布见[发布指南](releasing.md)。
 
 ## 包的分层
 
@@ -22,6 +22,38 @@ mysql-cdc-rs ──────────────────────�
 | `mysql-cdc-rs` / `mysql_cdc_rs` | 对两个库 API 的调用 | 根路径及 `canal` 重导出 canal，`replication` 重导出复制库，保留原类型和生命周期 |
 
 `mysql-cdc-rs` 不增加处理阶段；`pikachu` 直接依赖 `mysql-canal`。仓库根目录是 Cargo workspace，不是另一个库包。
+
+## 配置组合
+
+复制库定义 `config::Config` 和 `RowImageMode`，包含连接/TLS 参数、复制 server ID、超时以及 MINIMAL/FULL 选择。Canal 的 `Config::replication` 必须包含该类型，并重导出为 `config::ReplicationConfig`；`SourceConfig` 不重复定义这些字段。来源插件/适配器选择、表白名单、事务预算和检查点路径由 Canal 配置负责。
+
+Pikachu 配置直接包含必填的 `mysql-canal: AppConfig` 子配置；Canal 的每个来源再包含必填的 `mysql-replication` 子配置。Pikachu 根层只定义产品增量项，目前没有额外必填项；各层不重定义下层参数。产品配置示例：
+
+```toml
+[mysql-canal]
+
+[[mysql-canal.sources]]
+id = "east"
+state_file = "east-state.json"
+
+[mysql-canal.sources.source]
+plugin = "mysql"
+
+[mysql-canal.sources.mysql-replication]
+url_env = "MYSQL_EAST_URL"
+server_id = 901001
+row_image = "full"
+connect_timeout_secs = 10
+read_timeout_secs = 90
+
+[[mysql-canal.sources.tables]]
+schema = "app"
+table = "users"
+```
+
+直接使用 Canal 时，独立文件从 `[[sources]]` 开始，每个来源使用 `[sources.mysql-replication]`；Pikachu 文件则在外层嵌入 `mysql-canal`，如上例所示。产品和 Canal 的配置示例分别位于 `crates/pikachu/examples/config/` 与 `crates/mysql-canal/examples/config/`。缺失任何子配置、未知字段或将连接字段放在错误层级均报错。`AppConfig::resolve_paths` 支持嵌入配置，相对路径按最外层 TOML 文件解析；`AppConfig::read` 读取独立 Canal 文件。复制模式同时传入 Canal 的适配器与选择性解码器，使传输和 CDC 使用同一个设置。文件/位点从检查点提供。原始泛型 `Minimal`/`Full` 解码器继续独立校验稀疏/完整镜像，不引入 CDC 主键策略。
+
+[事件字段参考](../crates/mysql-replication/README.zh-CN.md#事件公共字段与模式差异) 区分 `BinlogEvent` 包络、不含字段的 `Event` trait 和 `EventData` body，列出共用头/body 字段、MINIMAL/FULL 镜像类型及访问返回类型，并说明缺少镜像、列未记录和 SQL NULL 的区别。
 
 ## Replication：字节到协议事件及原始行
 
@@ -49,7 +81,7 @@ TABLE_MAP 提供 wire 布局，原始解码器不猜测 SQL 符号、列名或�
 
 调用方按来源独立维护 TABLE_MAP 计划，替换重映射的 ID，并在文件/语句边界清理计划。原始行迭代可能先返回部分行，再遇到错误，不保证提交可见性。
 
-独立的 [`primary_key`](../crates/mysql-replication/src/primary_key.rs) 辅助模块通过 INFORMATION_SCHEMA 预检指定表。`connect_with_tables` / `from_connection_with_tables` 启用该检查，表列表不用于过滤复制流；普通 `connect` / `from_connection` 不做此预检。Canal 的 MySQL 来源为白名单调用该辅助模块。共享启动检查不改变历史 schema、白名单过滤及检查点策略的归属，也不使原始行解码器依赖这些策略。
+独立的 [`primary_key`](../crates/mysql-replication/src/primary_key.rs) 辅助模块通过 INFORMATION_SCHEMA 预检指定表。`connect_with_tables` / `from_connection_with_tables` 启用该检查，表列表不用于过滤复制流；普通 `connect` / `from_connection` 不做此预检。这些已有的可选公共 API 继续供原始复制调用方使用。Canal 在来源层独立预检，复用自身 CDC 键解码器的类型规则；校验后通过 `from_connection` 启动复制流。原始行解码器仍不依赖主键策略。
 
 ## Canal：协议视图到已提交 CDC 变更
 
@@ -86,7 +118,7 @@ Offline: replication BinlogFile::next_frame ──> canal EventView
 
 [`Runtime`](../crates/mysql-canal/src/engine/runtime.rs) 调度具名 `[[sources]]`。各来源独立持有连接/会话、历史 schema、TABLE_MAP 计划、事务预算、检查点及 state 文件锁。
 
-1. 校验配置并连接所有来源。内置 [`MysqlSource`](../crates/mysql-canal/src/source/mysql/mod.rs) 检查服务器能力及选中表的当前主键，包括检查点恢复；这次预检发生在 runtime 初始化写入初始检查点之前，复制流在请求 binlog 字节前再次检查指定主键。
+1. 校验配置并连接所有来源。内置 [`MysqlSource`](../crates/mysql-canal/src/source/mysql/mod.rs) 检查服务器能力及选中表的当前主键，包括检查点恢复；这次预检发生在 runtime 初始化写入初始检查点之前，Canal 来源在请求 binlog 字节前再次检查指定主键。
 2. 获取 state 文件锁。已有检查点须匹配来源 UUID、ID、插件及白名单；从检查点加载历史 schema，不用当前 INFORMATION_SCHEMA 覆盖它。
 3. 缺少检查点时，短暂获取全局读锁，捕获选中表 schema 和当前提交位点，保存初始 state。不做全量数据快照，也不提供跨来源的一致初始化快照。
 4. 每个来源启动独立 worker，从保存的位点消费，并在各文件 FDE 处重新选择生产者适配器。通过共享 sink 交付完整事务，不同来源的事务处理器不交错；多个实例之间没有全局事件顺序。
@@ -98,10 +130,12 @@ Offline: replication BinlogFile::next_frame ──> canal EventView
 
 [`pikachu-cdc`](../crates/pikachu/src/bin/pikachu-cdc.rs) 将 `check`、`init`、`run` 和 `run --once` 映射到 `Cdc`，消费时注册 [`PrintHandle`](../crates/pikachu/src/bin/print_handle/mod.rs)。处理器委托 canal 的 `JsonLinesSink` 将变更写入 stdout，在持久化检查点前 flush；flush 不代表下游持久化确认。诊断写入 stderr。
 
-`replay` 通过 canal 的帧读取器和 `Processor` 读取一个本地文件，使用传入检查点的位点及历史 schema，输出已提交变更，不更新 state 文件，也不查询当前服务器 schema。
+`replay` 委托 Canal 的 [`engine::Replay`](../crates/mysql-canal/src/engine/replay.rs)。Replay 负责文件名与事件边界校验、FDE 引导、历史事件跳过及通过 `Processor` 交付事务。它使用传入检查点的历史 schema 和显式 `TransactionSink`，不更新 state 文件，也不查询当前服务器。每条事件（包括提交事件）均先校验位点再处理；后续错误之前可能已有成功交付的提交。CLI 不再包含事件循环或协议分派。
 
 协议检查使用 `mysql-replication`，嵌入式已提交 CDC 使用 `mysql-canal`，需要一个依赖覆盖二者时使用 [`mysql-cdc-rs`](../crates/mysql-cdc/src/lib.rs)。聚合库根路径的 `Error`/`Result` 属于 canal，原始操作使用 `replication::Error`/`replication::Result`。
 
+泛型入口通过共用 `Minimal` / `Full` 类型在实例化时绑定模式。复制库将 `M` 贯穿解析器、读取器、`BinlogEvent`、`EventData`、`RowsEvent` 及 owned 视图；`Event` 保留为共用且对象安全的解码接口。Canal 提供 `Cdc<M>` 和 `Decoder<M>`，固定模式实例在启动前拒绝冲突配置。内置适配器按各 FDE 装配泛型解码器，通用变更与事务交付继续共用类型。默认 `Configured` CDC 入口允许来源混用模式，动态适配器接口继续保持对象安全。
+
 ## 镜像策略
 
-`config::RowImageMode` 按来源独立设置，默认 MINIMAL。Runtime 将模式传给在线服务器检查，以及 Processor → EventConverter → VersionAdapter → Decoder；每次 FDE 重建解码器都保留该策略。离线回放显式传入模式。原始 `RowsEvent`、`RowsDecoder` 继续按位图工作，不依赖 CDC 策略。FULL 要求完整镜像，仍仅解码主键，保留 UTF-8 主键借用和共享 after-image 字段索引。检查点保持 v1 格式与历史 schema；模式属于运行参数，不能从当前服务器设置或 FDE 推断历史文件的模式。
+`mysql_replication::config::RowImageMode` 由 Canal 重导出，在 `[sources.mysql-replication]` 中按来源独立设置，默认 MINIMAL。Runtime 将模式传给在线服务器检查，以及 Processor → EventConverter → VersionAdapter → Decoder；每次 FDE 重建解码器都保留该策略。离线回放显式传入模式。原始 `RowsEvent`、`RowsDecoder` 继续按位图工作，不依赖 CDC 策略。FULL 要求完整镜像，仍仅解码主键，保留 UTF-8 主键借用和共享 after-image 字段索引。检查点保持 v1 格式与历史 schema；模式属于运行参数，不能从当前服务器设置或 FDE 推断历史文件的模式。

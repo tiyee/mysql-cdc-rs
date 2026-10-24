@@ -63,7 +63,7 @@ impl Fixture {
         fixture.sql("CREATE TABLE items (id INT PRIMARY KEY, note VARCHAR(80)) ENGINE=InnoDB");
         fixture.sql("CREATE TABLE excluded (id INT) ENGINE=InnoDB");
         fs::write(&fixture.config, format!(
-            "[[sources]]\nid = 'cli-live'\nstate_file = 'state.json'\n[sources.source]\nurl_env = 'CDC_TEST_MYSQL_URL'\nserver_id = 903001\nrow_image = '{}'\n[[sources.tables]]\nschema = '{}'\ntable = 'items'\n", row_image_mode(), fixture.schema
+            "[[mysql-canal.sources]]\nid = 'cli-live'\nstate_file = 'state.json'\n[mysql-canal.sources.source]\nplugin='mysql'\n[mysql-canal.sources.mysql-replication]\nurl_env = 'CDC_TEST_MYSQL_URL'\nserver_id = 903001\nrow_image = '{}'\n[[mysql-canal.sources.tables]]\nschema = '{}'\ntable = 'items'\n", row_image_mode(), fixture.schema
         )).unwrap();
         fixture
     }

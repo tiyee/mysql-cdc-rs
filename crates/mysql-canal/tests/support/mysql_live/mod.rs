@@ -73,12 +73,12 @@ impl Fixture {
         fs::create_dir(&directory).unwrap();
         let config = Config {
             source: SourceConfig {
-                url_env: "CDC_TEST_MYSQL_URL".into(),
-                server_id: id,
-                tls_ca: None,
                 plugin: "mysql".into(),
                 adapter: None,
+            },
+            replication: mysql_canal::config::ReplicationConfig {
                 row_image: row_image_mode(),
+                ..mysql_canal::config::ReplicationConfig::new("CDC_TEST_MYSQL_URL", id)
             },
             state_file: directory.join("state.json"),
             max_transaction_bytes: 1024 * 1024,
@@ -109,7 +109,7 @@ impl Fixture {
         connection
             .query_drop(format!(
                 "SET SESSION binlog_format='ROW', binlog_row_image='{}'",
-                config.source.row_image.server_value()
+                config.replication.row_image.server_value()
             ))
             .unwrap();
         for (table, definition) in tables {
@@ -166,7 +166,7 @@ impl Fixture {
             self.config.max_transaction_bytes,
             VersionRegistry::default(),
             self.config.source.adapter.clone(),
-            self.config.source.row_image,
+            self.config.replication.row_image,
         )
         .unwrap()
     }
@@ -238,21 +238,21 @@ pub fn expected(
     pk: Value,
     changed: &[&str],
 ) -> Value {
-    let changed = if fixture.config.source.row_image == RowImageMode::Full && operation != "delete"
-    {
-        fixture
-            .initial
-            .tables
-            .iter()
-            .find(|meta| meta.table == table)
-            .unwrap()
-            .columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .collect::<Vec<_>>()
-    } else {
-        changed.to_vec()
-    };
+    let changed =
+        if fixture.config.replication.row_image == RowImageMode::Full && operation != "delete" {
+            fixture
+                .initial
+                .tables
+                .iter()
+                .find(|meta| meta.table == table)
+                .unwrap()
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>()
+        } else {
+            changed.to_vec()
+        };
     json!({"source": SOURCE_ID, "schema": fixture.schema, "table": table, "operation": operation, "pk": pk, "changed": changed})
 }
 

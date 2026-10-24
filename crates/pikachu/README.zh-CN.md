@@ -4,7 +4,9 @@
 
 基于 `mysql-canal` 的 MySQL CDC 命令行工具。`pikachu` 包提供 `pikachu-cdc` 可执行文件及默认 JSON Lines 事务处理器。
 
-本包位于 `pikachu → mysql-canal → mysql-replication` 的最上层。复制库负责订阅、协议解析及可选原始行解码，canal 负责表匹配、选择性行转换、事务缓冲与检查点；CLI 将命令映射到 `Cdc` 或离线 `Processor` 回放，通过 `PrintHandle` 委托 canal 的 `JsonLinesSink` 输出。详见[架构说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)。
+本包位于 `pikachu → mysql-canal → mysql-replication` 的最上层。复制库负责订阅、协议解析及可选原始行解码，canal 负责表匹配、选择性行转换、事务缓冲与检查点；CLI 将命令映射到 `Cdc` 或离线 `engine::Replay`，通过 `PrintHandle` 委托 canal 的 `JsonLinesSink` 输出。详见[架构说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)。
+
+产品配置必须包含 `mysql-canal` 子配置，直接使用 Canal 的 `AppConfig`；每个具名来源再包含 `mysql-replication` 子配置，直接使用复制库配置。根层仅填写产品增量配置，目前没有额外必填项。CLI 使用 `[[mysql-canal.sources]]`，不能直接读取独立 Canal 文件。缺失层级、摊平的下层字段和未知字段均报错；state 与 TLS 路径相对产品 TOML 文件解析。
 
 从 workspace 根目录构建和运行：
 
@@ -17,7 +19,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 ./target/release/pikachu-cdc run cdc.toml > changes.jsonl
 ```
 
-运行前将 `[[sources.tables]]` 改为需要监控的精确库名、表名。单个来源也使用 `[[sources]]`；来源 ID 和 state 路径必须不同，state 的父目录须已存在。配置中的相对路径以 TOML 文件所在目录为基准。
+运行前将 `[[mysql-canal.sources.tables]]` 改为需要监控的精确库名、表名。单个来源也使用 `[[mysql-canal.sources]]`；来源 ID 和 state 路径必须不同，state 的父目录须已存在。配置中的相对路径以 TOML 文件所在目录为基准。
 
 | 命令 | 行为 |
 | --- | --- |
@@ -52,7 +54,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 ## 行镜像模式
 
-每个 `[sources.source]` 支持 `row_image = "minimal"`（默认）或 `"full"`。check/init/run 可重复传入 `--row-image SOURCE_ID=minimal|full` 覆盖指定来源；`--once` 仅用于 run。例如：
+每个 `[mysql-canal.sources.mysql-replication]` 支持 `row_image = "minimal"`（默认）或 `"full"`。check/init/run 可重复传入 `--row-image SOURCE_ID=minimal|full` 覆盖指定来源；`--once` 仅用于 run。例如：
 
 ```sh
 pikachu-cdc run cdc.toml --once --row-image east=full --row-image west=minimal

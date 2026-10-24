@@ -19,6 +19,7 @@ mysql = { version = "28", default-features = false, features = ["minimal-rust", 
 mysql_common = { version = "0.37", default-features = false, features = ["binlog"] }
 thiserror = "2"
 crc32fast = "1"
+serde = { version = "1", features = ["derive"] }
 
 [[test]]
 name = "events"

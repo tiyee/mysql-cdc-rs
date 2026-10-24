@@ -1468,3 +1468,135 @@ fn typed_modes_return_valid_rows_before_one_late_error_and_then_stop() {
     typed_late_error::<Minimal>();
     typed_late_error::<Full>();
 }
+
+#[test]
+fn generic_event_envelopes_preserve_modes_owned_views_and_borrowed_values() {
+    fn check<M: ImageMode>(crc: bool, v2: bool) {
+        let body = rows_body(2, &[3], &[0, 7, 3, b'a', b'b', b'c'], v2);
+        let row_frame = frame(
+            if v2 {
+                WRITE_ROWS_EVENT
+            } else {
+                WRITE_ROWS_EVENT_V1
+            },
+            &body,
+            crc,
+            0,
+        );
+        let bytes = file_bytes(&[
+            frame(FORMAT_DESCRIPTION_EVENT, &format("8.4.6"), crc, 0),
+            frame(
+                TABLE_MAP_EVENT,
+                &table_body(1, &[1, 15], &[10, 0], &[0]),
+                crc,
+                0,
+            ),
+            row_frame.clone(),
+        ]);
+        let mut reader = BinlogFile::new(&bytes[..]).unwrap().with_mode::<M>();
+        assert!(matches!(
+            reader.next_event().unwrap().unwrap().event,
+            EventData::FormatDescription(_)
+        ));
+        let mapping = reader.next_event().unwrap().unwrap();
+        let EventData::TableMap(table) = mapping.event else {
+            panic!("TABLE_MAP expected")
+        };
+        let decoder = RowsDecoder::new(&table).unwrap();
+        let owned: mysql_replication::OwnedBinlogEvent<M> =
+            reader.next_event().unwrap().unwrap().into_owned().unwrap();
+        drop(reader);
+        assert_eq!(owned.raw_data(), row_frame);
+        let view: mysql_replication::BinlogEvent<'_, M> = owned.view().unwrap();
+        assert_eq!(view.header.server_id, 456);
+        let EventData::Rows(rows) = view.event else {
+            panic!("ROWS expected")
+        };
+        let mut rows = rows.rows(&decoder).unwrap();
+        let row: TypedRow<'_, M> = rows.next().unwrap().unwrap();
+        assert!(row.before.is_none());
+        let image = row.after.unwrap();
+        let fields = image
+            .as_ref()
+            .fields()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 2);
+        let RowValue::Integer(value) = fields[0].value else {
+            panic!("integer expected")
+        };
+        assert_eq!(value.signed(), 7);
+        let RowValue::Bytes(value) = fields[1].value else {
+            panic!("bytes expected")
+        };
+        assert_eq!(value, b"abc");
+        let start = owned.raw_data().as_ptr() as usize;
+        assert!((start..start + owned.raw_data().len()).contains(&(value.as_ptr() as usize)));
+        assert!(rows.next().is_none());
+    }
+    for crc in [false, true] {
+        for v2 in [false, true] {
+            check::<Minimal>(crc, v2);
+            check::<Full>(crc, v2);
+        }
+    }
+}
+
+#[test]
+fn full_parser_rejects_sparse_envelopes_before_returning_them() {
+    for (kind, v2, bitmaps) in [
+        (WRITE_ROWS_EVENT_V1, false, &[3][..]),
+        (DELETE_ROWS_EVENT_V1, false, &[3][..]),
+        (UPDATE_ROWS_EVENT_V1, false, &[3, 7][..]),
+        (WRITE_ROWS_EVENT, true, &[3][..]),
+        (DELETE_ROWS_EVENT, true, &[3][..]),
+        (UPDATE_ROWS_EVENT, true, &[7, 3][..]),
+    ] {
+        let bytes = file_bytes(&[
+            frame(FORMAT_DESCRIPTION_EVENT, &format("8.4.6"), true, 0),
+            frame(kind, &rows_body(3, bitmaps, &[0], v2), true, 0),
+        ]);
+        let mut full =
+            BinlogFile::<_, Full>::for_mode(&bytes[..], ParserConfig::default()).unwrap();
+        full.next_event().unwrap().unwrap();
+        assert!(matches!(full.next_event(), Err(Error::Unsupported(message))
+            if message == "FULL row images must contain every table column"));
+        let mut minimal = BinlogFile::new(&bytes[..]).unwrap().with_mode::<Minimal>();
+        minimal.next_event().unwrap().unwrap();
+        assert!(matches!(
+            minimal.next_event().unwrap().unwrap().event,
+            EventData::Rows(_)
+        ));
+    }
+}
+
+#[test]
+fn full_envelope_keeps_statement_end_markers_without_row_images() {
+    let mut marker = 0x00ff_ffffu64.to_le_bytes()[..6].to_vec();
+    marker.extend(1u16.to_le_bytes());
+    let bytes = file_bytes(&[
+        frame(FORMAT_DESCRIPTION_EVENT, &format("8.4.6"), false, 0),
+        frame(WRITE_ROWS_EVENT, &marker, false, 0),
+    ]);
+    let mut reader = BinlogFile::new(&bytes[..]).unwrap().with_mode::<Full>();
+    reader.next_event().unwrap().unwrap();
+    let EventData::Rows(marker) = reader.next_event().unwrap().unwrap().event else {
+        panic!("marker expected")
+    };
+    assert_eq!(marker.table_id, 0x00ff_ffff);
+    assert_eq!(marker.flags, 1);
+}
+
+#[test]
+fn typed_stream_checks_mode_conflicts_before_connecting() {
+    use mysql_replication::stream::{
+        ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage,
+    };
+    let connection = ConnectionConfig::new("UNSET_GENERIC_IMAGE_MODE_TEST_URL");
+    let mut config = ReplicationConfig::new(123, "binlog.000001", 4);
+    config.required_row_image = Some(RowImage::Minimal);
+    assert!(
+        matches!(ReplicationStream::<Full>::for_mode(&connection, config),
+        Err(Error::Invalid(message)) if message == "replication configuration conflicts with the generic image mode")
+    );
+}

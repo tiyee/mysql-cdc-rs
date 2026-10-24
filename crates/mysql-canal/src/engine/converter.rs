@@ -56,9 +56,9 @@ impl EventConverter {
         }
     }
     /// Converts typed binlog input while preserving custom CDC layout adapters.
-    pub fn convert_binlog<'a>(
+    pub fn convert_binlog<'a, M: mysql_replication::events::BinlogMode>(
         &mut self,
-        event: &'a mysql_replication::BinlogEvent<'_>,
+        event: &'a mysql_replication::BinlogEvent<'_, M>,
         emit: &mut dyn FnMut(Change<'_>) -> Result<()>,
     ) -> Result<EventAction<'a>> {
         self.convert(event.frame().into(), emit)

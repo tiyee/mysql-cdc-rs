@@ -188,7 +188,7 @@ fn online_cli_rejects_invalid_source_overrides_before_connecting() {
         std::env::temp_dir().join(format!("pikachu-cli-options-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let path = directory.join("cdc.toml");
-    fs::write(&path, "[[sources]]\nid='east'\nstate_file='state.json'\n[sources.source]\nurl_env='UNSET_CDC_ROW_IMAGE_TEST_URL'\nserver_id=100\n[[sources.tables]]\nschema='app'\ntable='users'\n").unwrap();
+    fs::write(&path, "[[mysql-canal.sources]]\nid='east'\nstate_file='state.json'\n[mysql-canal.sources.source]\nplugin='mysql'\n[mysql-canal.sources.mysql-replication]\nurl_env='UNSET_CDC_ROW_IMAGE_TEST_URL'\nserver_id=100\n[[mysql-canal.sources.tables]]\nschema='app'\ntable='users'\n").unwrap();
     for (command, options, expected) in [
         (
             "check",
@@ -223,6 +223,57 @@ fn online_cli_rejects_invalid_source_overrides_before_connecting() {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
+        assert!(!directory.join("state.json").exists());
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn online_cli_requires_explicit_replication_config_before_connecting() {
+    let directory =
+        std::env::temp_dir().join(format!("pikachu-cli-replication-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("cdc.toml");
+    fs::write(
+        &path,
+        "[[mysql-canal.sources]]\nid='east'\nstate_file='state.json'\n[mysql-canal.sources.source]\nplugin='mysql'\n[[mysql-canal.sources.tables]]\nschema='app'\ntable='users'\n",
+    )
+    .unwrap();
+    for command in ["check", "init", "run"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_pikachu-cdc"))
+            .arg(command)
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("missing field `mysql-replication`")
+        );
+        assert!(!directory.join("state.json").exists());
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn online_cli_requires_canal_configuration_in_the_product_file() {
+    let directory = std::env::temp_dir().join(format!("pikachu-cli-canal-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("pikachu.toml");
+    fs::write(
+        &path,
+        "[[sources]]\nid='east'\nstate_file='state.json'\n[sources.source]\nplugin='mysql'\n[sources.mysql-replication]\nurl_env='UNSET_COMPOSED_CONFIG_TEST_URL'\nserver_id=100\n[[sources.tables]]\nschema='app'\ntable='users'\n",
+    )
+    .unwrap();
+    for command in ["check", "init", "run"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_pikachu-cdc"))
+            .arg(command)
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("unknown field `sources`"));
         assert!(!directory.join("state.json").exists());
     }
     fs::remove_dir_all(directory).unwrap();

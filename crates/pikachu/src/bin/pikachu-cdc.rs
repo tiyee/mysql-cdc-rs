@@ -1,14 +1,14 @@
 #![forbid(unsafe_code)]
+mod config;
 mod print_handle;
 
-use mysql_canal::protocol::mysql::event_type as event;
 use mysql_canal::{
     Cdc, Error, Result,
     config::{AppConfig, RowImageMode},
-    engine::{Processor, checkpoint::State},
-    protocol::mysql::{file::BinlogFile, version::VersionRegistry},
+    engine::{Replay, checkpoint::State},
+    protocol::mysql::version::VersionRegistry,
 };
-use std::{collections::HashSet, io::BufReader, path::Path};
+use std::{collections::HashSet, path::Path};
 
 fn main() {
     if let Err(error) = run() {
@@ -32,60 +32,29 @@ fn run() -> Result<()> {
             };
             let state = State::read(Path::new(&args[2]))?;
             let path = Path::new(&args[3]);
-            if path.file_name().and_then(|n| n.to_str()) != Some(state.file.as_str()) {
-                return Err(Error::Schema(
-                    "replay filename must match the state's binlog file".into(),
-                ));
-            }
             let sink = print_handle::PrintHandle::new();
-            let start = state.position;
-            let mut processor = Processor::with_row_image(
+            Replay::with_row_image(
                 state,
-                None,
                 64 * 1024 * 1024,
                 VersionRegistry::default(),
                 None,
                 row_image,
-            )?;
-            let mut file = BinlogFile::new(BufReader::new(std::fs::File::open(path)?))?;
-            let mut offset = 4u64;
-            while let Some(event) = file.next_event()? {
-                // Read FDE from the beginning; the saved schema is valid at the
-                // saved position, so do not apply earlier DDL/table maps.
-                let next = u64::from(event.log_pos);
-                if event.event_type == event::FORMAT_DESCRIPTION_EVENT || offset >= start {
-                    processor.process_to(event, &sink)?;
-                }
-                if next <= offset {
-                    return Err(Error::Invalid(
-                        "non-increasing offline event position".into(),
-                    ));
-                }
-                if offset < start && next > start {
-                    return Err(Error::Invalid(
-                        "state position is not an event boundary".into(),
-                    ));
-                }
-                offset = next;
-            }
-            if offset < start {
-                return Err(Error::Invalid("state position beyond EOF".into()));
-            }
-            processor.finish()?;
+            )?
+            .run(path, &sink)?;
         }
         command @ ("check" | "init" | "run") if args.len() >= 3 => {
-            let mut config = AppConfig::read(Path::new(&args[2]))?;
-            let once = online_options(&mut config, &args[3..], command == "run")?;
-            let mut replication = Cdc::new(config)?;
+            let mut config = config::Config::read(Path::new(&args[2]))?;
+            let once = online_options(&mut config.canal, &args[3..], command == "run")?;
+            let mut canal = Cdc::new(config.canal)?;
             match command {
-                "check" => replication.check()?,
-                "init" => replication.initialize()?,
+                "check" => canal.check()?,
+                "init" => canal.initialize()?,
                 _ => {
-                    replication.add_handle(print_handle::PrintHandle::new());
+                    canal.add_handle(print_handle::PrintHandle::new());
                     if once {
-                        replication.run_once()?;
+                        canal.run_once()?;
                     } else {
-                        replication.run()?;
+                        canal.run()?;
                     }
                 }
             }
@@ -120,7 +89,7 @@ fn online_options(config: &mut AppConfig, args: &[String], allow_once: bool) -> 
                     .iter_mut()
                     .find(|entry| entry.id == id)
                     .ok_or_else(|| Error::Invalid(format!("unknown source {id} in --row-image")))?;
-                source.config.source.row_image = mode;
+                source.config.replication.row_image = mode;
             }
             _ => return Err(Error::Invalid(format!("unexpected option {flag}"))),
         }

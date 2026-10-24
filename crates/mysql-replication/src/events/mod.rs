@@ -3,6 +3,7 @@ mod binlog;
 mod control;
 mod gtid;
 mod header;
+mod mode;
 mod rows;
 mod table_map;
 
@@ -14,6 +15,7 @@ pub use control::{
 };
 pub use gtid::{GtidEvent, TaggedGtidEvent};
 pub use header::EventHeader;
+pub use mode::{BinlogMode, Unspecified};
 pub use rows::{
     ColumnDefinition, ColumnType, CompleteImage, DecimalValue, Full, ImageMode, IntegerValue,
     Minimal, Row, RowField, RowFields, RowImage, RowImages, RowValue, Rows, RowsDecoder, RowsEvent,
@@ -25,6 +27,9 @@ pub use table_map::{TableColumns, TableMapEvent};
 /// A decoder is bound to its file layout before receiving an event body.
 /// Borrowed fields remain valid for the input lifetime. Header decoding receives
 /// exactly 19 bytes; body decoding excludes the common header and checksum.
+/// This trait has no fields. Common header fields belong to [`EventHeader`] in
+/// [`BinlogEvent`]; concrete protocol-body fields belong to [`EventData`] variants.
+/// MINIMAL/FULL policies do not change this interface.
 pub trait Event<'a>: Debug {
     fn decode(&mut self, data: &'a [u8]) -> Result<()>;
     /// Writes diagnostics only. This does not serialize a binary event or CDC row.
@@ -47,14 +52,17 @@ impl<'a> Event<'a> for RawEvent<'a> {
 }
 
 /// An explicit variant retains typed access without downcasting.
+/// Each variant contains a protocol body, without duplicating the common header.
+/// Control-body fields are shared across modes; only [`RowsEvent`] carries `M`
+/// and exposes mode-specific decoded row-image types.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum EventData<'a> {
+pub enum EventData<'a, M: BinlogMode = Unspecified> {
     FormatDescription(FormatDescriptionEvent<'a>),
     Rotate(RotateEvent<'a>),
     Query(QueryEvent<'a>),
     TableMap(TableMapEvent<'a>),
-    Rows(RowsEvent<'a>),
+    Rows(RowsEvent<'a, M>),
     Xid(XidEvent),
     Gtid(GtidEvent),
     AnonymousGtid(GtidEvent),
@@ -64,7 +72,7 @@ pub enum EventData<'a> {
     /// Unknown or deliberately unimplemented body; never silently discarded.
     Raw(RawEvent<'a>),
 }
-impl<'a> Event<'a> for EventData<'a> {
+impl<'a, M: BinlogMode> Event<'a> for EventData<'a, M> {
     fn dump(&self, writer: &mut dyn Write) -> Result<()> {
         match self {
             Self::FormatDescription(event) => event.dump(writer),
@@ -98,8 +106,8 @@ impl<'a> Event<'a> for EventData<'a> {
     }
 }
 
-impl EventData<'_> {
-    pub(super) fn layout(&self) -> EventData<'static> {
+impl<M: BinlogMode> EventData<'_, M> {
+    pub(super) fn layout(&self) -> EventData<'static, M> {
         match self {
             Self::FormatDescription(v) => EventData::FormatDescription(FormatDescriptionEvent {
                 checksum_algorithm: v.checksum_algorithm,
@@ -110,7 +118,7 @@ impl EventData<'_> {
             Self::TableMap(v) => {
                 EventData::TableMap(TableMapEvent::with_post_header(v.post_header))
             }
-            Self::Rows(v) => EventData::Rows(RowsEvent::with_layout(v.kind, v.post_header, v.v2)),
+            Self::Rows(v) => EventData::Rows(RowsEvent::for_mode(v.kind, v.post_header, v.v2)),
             Self::Xid(_) => EventData::Xid(Default::default()),
             Self::Gtid(_) => EventData::Gtid(Default::default()),
             Self::AnonymousGtid(_) => EventData::AnonymousGtid(Default::default()),

@@ -1,6 +1,8 @@
-# mysql-cdc-rs
+# mysql-cdc
 
 English | [简体中文](README.zh-CN.md)
+
+The system is named **mysql-cdc**. Its three implementation layers are `mysql-replication`, `mysql-canal` and `pikachu`; the `mysql-cdc-rs` package is the unified library entry point.
 
 MySQL binlog consumption is organized into three layers: `mysql-replication` subscribes to and parses binlog events, with opt-in decoding of raw insert/update/delete row images; `mysql-canal` interprets selected row events as lightweight CDC changes and manages transactions and recovery; `pikachu` provides the `pikachu-cdc` CLI on top of `mysql-canal`. `mysql-cdc-rs` (`mysql_cdc_rs`) is a unified library entry point that re-exports both libraries.
 
@@ -27,7 +29,15 @@ mysql-cdc-rs ──────────────────────�
 
 The raw inspection path is `BinlogEvent → TableMapEvent + RowsEvent → RowsDecoder → Row { before, after }`. WRITE represents an insert, UPDATE pairs before/after images, and DELETE has a before image. Images retain only columns actually present in the binlog; they do not reconstruct missing MINIMAL values.
 
+`pikachu` owns command arguments and output-handler assembly. Canal owns current-key eligibility checks and `engine::Replay`, including historical event boundaries and transaction delivery; replication owns transport and protocol parsing.
+
 The CDC path is `borrowed event view → EventConverter → Change + EventAction → Processor → CommittedTransaction → handlers → checkpoint`. It uses its own version adapters and selective decoder, rather than decoding every raw field through `RowsDecoder`. `pikachu` registers the default JSON Lines handler; embedded applications register their own handlers. The facade adds no processing stage. See the [architecture and event flow](docs/architecture.md) for module responsibilities, startup/recovery and the two decoding paths.
+
+The required replication section also accepts `connect_timeout_secs` (default 10) and `read_timeout_secs` (default 90); both must be nonzero. TLS paths resolve relative to the canal TOML file. Binlog file/position are supplied from the checkpoint at runtime, rather than duplicated in static configuration.
+
+Construction can fix the policy through shared `Minimal` / `Full` marker types: `ReplicationStream::<Full>::for_mode(...)` and `Cdc::<Full>::for_mode(config)`. Replication propagates it through its event envelope and row types; canal selects a generic decoder and retains normalized CDC output. Fixed modes reject conflicting configuration. Existing default constructors support runtime selection and mixed sources. See [typed replication](crates/mysql-replication/README.md#fix-the-policy-at-construction) and [typed canal](crates/mysql-canal/README.md#fix-the-policy-at-construction).
+
+Public `BinlogEvent` / `EventHeader` fields, the field-free `Event` trait, protocol-body variants and mode-specific `before` / `after` types are listed in [event fields and image modes](crates/mysql-replication/README.md#public-event-fields-and-image-modes).
 
 ## Project layout
 
@@ -45,7 +55,7 @@ crates/mysql-canal/
 ├── src/model/           # Exact primary keys and lightweight changes
 ├── src/protocol/mysql/  # CDC adapters and selective primary-key decoding
 ├── src/source/          # Source plugins, schema discovery and initial positions
-├── src/engine/          # Event conversion, transactions and checkpoints
+├── src/engine/          # Event conversion, transactions, offline replay and checkpoints
 ├── src/sink/            # Transaction sinks and JSON Lines output
 ├── examples/            # CDC listeners, adapters and configuration
 ├── benches/             # Selective decoding benchmarks
@@ -86,7 +96,7 @@ use mysql_cdc_rs::{CommittedTransaction, Cdc, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let config = AppConfig::read(Path::new("cdc.toml"))?;
+    let config = AppConfig::read(Path::new("canal.toml"))?;
     let mut replication = Cdc::new(config)?;
     replication.add_handle(|event: CommittedTransaction<'_>| {
         for change in event.changes {
@@ -102,12 +112,14 @@ CDC types and modules are re-exported at the root (`mysql_cdc_rs::Cdc`, `mysql_c
 
 `Cdc::new` also accepts a programmatically constructed `AppConfig`. `add_handle` accepts closures or implementations of `TransactionHandler`; multiple handles run in registration order. `CommittedTransaction` contains a source ID, commit checkpoint, and an ordered slice of converted `OwnedChange` values. Callbacks run only after COMMIT/XID, never for rolled-back or incomplete transactions. Fully filtered commits deliver an empty slice. All handlers must succeed before the checkpoint is saved; failure stops consumption and may replay earlier handler side effects on restart. Callbacks borrow the transaction data; clone only data retained after returning. Callbacks across sources do not interleave, and slow handlers apply backpressure. Register at least one handle before `run()` or `run_once()`; the library has no default output. `run_once()` consumes currently available events. See [the listener example](crates/mysql-canal/examples/listen.rs).
 
-The CLI registers its default `PrintHandle`, which writes JSON Lines to stdout. Its command name remains `pikachu-cdc`. Start with `crates/pikachu/examples/config/multi-source.toml`. Each `[[sources]]` entry has its own `id`, `state_file`, `source`, and `tables`:
+For direct canal integration, copy `crates/mysql-canal/examples/config/multi-source.toml` to `canal.toml`. That file starts at `[[sources]]` and requires `[sources.mysql-replication]`; the product wrapper below is used only by Pikachu.
+
+The CLI registers its default `PrintHandle`, which writes JSON Lines to stdout. Its command name remains `pikachu-cdc`. The product file must contain `mysql-canal`, with `mysql-replication` nested under each canal source. Start with `crates/pikachu/examples/config/multi-source.toml`. Pikachu adds only product-specific settings at the root; currently none are required. Each `[[mysql-canal.sources]]` entry has its own `id`, `state_file`, `source`, and `tables`:
 
 ```sh
 cargo build --release --locked -p pikachu
 cp crates/pikachu/examples/config/multi-source.toml cdc.toml
-# Set each source's [[sources.tables]] to exact database and table names, respecting server case rules.
+# Set each source's [[mysql-canal.sources.tables]] to exact database and table names, respecting server case rules.
 export MYSQL_EAST_URL='mysql://cdc:password@east.example:3306'
 export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 ./target/release/pikachu-cdc check cdc.toml
@@ -122,7 +134,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 | `pikachu-cdc run CONFIG.toml --once` | Consume currently available events and exit |
 | `pikachu-cdc replay STATE.json BINLOG_FILE` | Replay one local file using the saved historical schema without modifying state |
 
-Set `row_image = "minimal"` or `row_image = "full"` under each `[sources.source]`; omitted values default to `minimal`. Sources may use different modes. Online commands accept repeatable `--row-image SOURCE_ID=minimal|full` overrides, including with `run --once`. Replay accepts `--row-image minimal|full` and defaults to `minimal`:
+Set `row_image = "minimal"` or `row_image = "full"` under each `[mysql-canal.sources.mysql-replication]`; omitted values default to `minimal`. Sources may use different modes. Online commands accept repeatable `--row-image SOURCE_ID=minimal|full` overrides, including with `run --once`. Replay accepts `--row-image minimal|full` and defaults to `minimal`:
 
 ```sh
 ./target/release/pikachu-cdc check cdc.toml --row-image east=full
@@ -134,17 +146,17 @@ These options validate the input; they never change MySQL settings or request di
 
 The v1 checkpoint format remains unchanged and does not store the image mode. Replay must select the mode appropriate for the historical file. A current GLOBAL setting does not describe historical logs. To switch modes, pause writers, consume through a commit boundary with the old mode, stop the consumer, update the server and writer sessions, then restart with the new mode. Do not reinitialize checkpoints to skip unconsumed data. Mixed historical modes can fail validation.
 
-Version 2 adds `SourceConfig::row_image`; Rust struct literals must supply `RowImageMode::Minimal` or `RowImageMode::Full` from `config`. Existing TOML files and `Decoder::new`, `EventConverter::new`, `Processor::new` / `with_registry` retain MINIMAL defaults. Explicit constructors use `with_row_image`. Custom version adapters must opt into FULL through `validate_server_with_row_image` and `create_decoder_with_row_image`; their defaults preserve MINIMAL and reject FULL.
+Version 2 requires a `[mysql-canal.sources.mysql-replication]` section for every source. Move `url_env`, `server_id`, `tls_ca` and `row_image` out of `[mysql-canal.sources.source]`; that section now contains only `plugin` and `adapter`. Rust `Config` literals must include `replication: config::ReplicationConfig::new(url_env, server_id)`, then set its `row_image` to `RowImageMode::Full` when needed. `ReplicationConfig` and `RowImageMode` are re-exports of `mysql_replication::config` types. Old TOML layouts are rejected; `Decoder::new`, `EventConverter::new`, `Processor::new` / `with_registry` retain MINIMAL defaults. Explicit constructors use `with_row_image`. Custom version adapters must opt into FULL through `validate_server_with_row_image` and `create_decoder_with_row_image`; their defaults preserve MINIMAL and reject FULL.
 
-All configurations use the `[[sources]]` list, including deployments with just one named source. Each entry must explicitly specify an `id` and the credentials environment variable in `sources.source.url_env`. Source IDs and state paths must be distinct, and state parent directories must already exist. Subscriptions to the same upstream instance UUID must also use distinct replication `server_id` values. Different instances may reuse replication IDs, although assigning them centrally is easier to operate.
+Pikachu configurations use the `[[mysql-canal.sources]]` list, including deployments with just one named source. Each entry must explicitly specify an `id` and the credentials environment variable in `mysql-canal.sources.mysql-replication.url_env`. Source IDs and state paths must be distinct, and state parent directories must already exist. Subscriptions to the same upstream instance UUID must also use distinct replication `server_id` values. Different instances may reuse replication IDs, although assigning them centrally is easier to operate.
 
 Each source owns its thread, connection, schema, `table_id` mappings, transaction budget, and committed position. TABLE_MAP entries never cross source boundaries. There is no global transaction or global ordering across sources.
 
-When a worker fails, the process asks other workers to stop between events and exits with a nonzero status. A blocked MySQL read may wait for its 90-second read timeout. After restart, each source resumes from its own committed checkpoint. Sources acquire initialization read locks individually, so initialization does not provide a consistent snapshot across instances. If initialization fails partway through, successfully created state files remain; a later `run` prepares the remaining sources.
+When a worker fails, the process asks other workers to stop between events and exits with a nonzero status. A blocked MySQL read may wait for its configured read timeout (90 seconds by default). After restart, each source resumes from its own committed checkpoint. Sources acquire initialization read locks individually, so initialization does not provide a consistent snapshot across instances. If initialization fails partway through, successfully created state files remain; a later `run` prepares the remaining sources.
 
-Requires Rust 1.89 or later. `check` validates server settings, table engines, and primary keys; actual wire types and lengths are checked further when TABLE_MAP arrives. Relative configuration paths are resolved against the TOML file's directory. Credentials come from environment variables; encode special characters according to MySQL URL rules. Set `source.tls_ca` to a CA certificate to enable certificate and hostname verification.
+Requires Rust 1.89 or later. `check` validates server settings, table engines, and primary keys; actual wire types and lengths are checked further when TABLE_MAP arrives. Relative configuration paths are resolved against the TOML file's directory. Credentials come from environment variables; encode special characters according to MySQL URL rules. Set `mysql-canal.sources.mysql-replication.tls_ca` to a CA certificate to enable certificate and hostname verification.
 
-Every MySQL source checks the current primary keys of its whitelist through `mysql-replication` before starting, including checkpoint recovery. Missing or unsupported keys stop startup before initial checkpoints are written or binlog consumption begins. Recovery still uses the saved historical schema to decode events. Raw replication callers can pass selected tables to `ReplicationStream::connect_with_tables` or `from_connection_with_tables`; see the [replication API](crates/mysql-replication/README.md#configuration-and-selective-work).
+Every MySQL source checks the current primary keys of its whitelist within `mysql-canal`, using the same key-type rules as CDC conversion before starting, including checkpoint recovery. Missing or unsupported keys stop startup before initial checkpoints are written or binlog consumption begins. Recovery still uses the saved historical schema to decode events. Raw replication callers can pass selected tables to `ReplicationStream::connect_with_tables` or `from_connection_with_tables`; see the [replication API](crates/mysql-replication/README.md#configuration-and-selective-work).
 
 The first `run` briefly executes `FLUSH TABLES WITH READ LOCK`, reads the whitelisted schemas and current committed position under the lock, then unlocks and starts consumption. **Consumption starts at the current position; there is no initial full-data snapshot.** You can also run `init cdc.toml` to capture the starting point and run the consumer later. `init` never overwrites an existing state file. `run cdc.toml --once` consumes currently available events and exits, which is useful for catch-up runs and testing.
 

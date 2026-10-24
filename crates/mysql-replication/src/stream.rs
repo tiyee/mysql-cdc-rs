@@ -1,7 +1,10 @@
 //! Synchronous replication configuration without CDC schema or checkpoints.
 use crate::{
     BinlogEvent, BinlogFrame, BinlogParser, Error, FrameDecoder, MAX_EVENT_BYTES, Result,
-    error::invalid, event_type as code, parser::ParserConfig,
+    error::invalid,
+    event_type as code,
+    events::{BinlogMode, ImageMode, Unspecified},
+    parser::ParserConfig,
 };
 use mysql::{
     BinlogDumpFlags, BinlogRequest, BinlogStream, Conn, Opts, OptsBuilder, SslOpts,
@@ -80,12 +83,12 @@ impl ReplicationConfig {
     }
 }
 
-pub struct ReplicationStream {
+pub struct ReplicationStream<M: BinlogMode = Unspecified> {
     stream: BinlogStream,
     current: Option<DriverEvent>,
     buffer: Vec<u8>,
     framing: FrameDecoder,
-    parser: BinlogParser,
+    parser: BinlogParser<M>,
 }
 impl ReplicationStream {
     /// Validates primary keys for selected tables before starting replication.
@@ -145,6 +148,35 @@ impl ReplicationStream {
             parser: BinlogParser::new(config.parser),
         })
     }
+    /// Selects an image policy before connecting and requesting binlog bytes.
+    pub fn connect_with_mode<M: ImageMode>(
+        connection: &ConnectionConfig,
+        replication: ReplicationConfig,
+    ) -> Result<ReplicationStream<M>> {
+        let replication = bind_image_mode::<M>(replication)?;
+        Self::from_connection_with_mode(connect(connection)?, replication)
+    }
+    pub fn from_connection_with_mode<M: ImageMode>(
+        conn: Conn,
+        mut config: ReplicationConfig,
+    ) -> Result<ReplicationStream<M>> {
+        config = bind_image_mode::<M>(config)?;
+        let stream = Self::from_connection(conn, config)?;
+        Ok(ReplicationStream {
+            stream: stream.stream,
+            current: stream.current,
+            buffer: stream.buffer,
+            framing: stream.framing,
+            parser: stream.parser.with_mode(),
+        })
+    }
+}
+impl<M: ImageMode> ReplicationStream<M> {
+    pub fn for_mode(connection: &ConnectionConfig, config: ReplicationConfig) -> Result<Self> {
+        ReplicationStream::connect_with_mode::<M>(connection, config)
+    }
+}
+impl<M: BinlogMode> ReplicationStream<M> {
     /// CDC's fast path: checksum verification and a borrowed body, with no raw
     /// frame assembly, GTID metadata decoding or row-value materialization.
     pub fn next_view(&mut self) -> Result<Option<crate::EventView<'_>>> {
@@ -169,13 +201,27 @@ impl ReplicationStream {
     pub fn next_frame(&mut self) -> Result<Option<BinlogFrame<'_>>> {
         read_frame(&mut self.stream, &mut self.buffer, &mut self.framing)
     }
-    pub fn next_event(&mut self) -> Result<Option<BinlogEvent<'_>>> {
+    pub fn next_event(&mut self) -> Result<Option<BinlogEvent<'_, M>>> {
         let Some(frame) = read_frame(&mut self.stream, &mut self.buffer, &mut self.framing)? else {
             return Ok(None);
         };
         self.parser.parse(frame).map(Some)
     }
 }
+fn bind_image_mode<M: ImageMode>(mut config: ReplicationConfig) -> Result<ReplicationConfig> {
+    let expected = M::ROW_IMAGE.into();
+    if config
+        .required_row_image
+        .is_some_and(|mode| mode != expected)
+    {
+        return Err(invalid(
+            "replication configuration conflicts with the generic image mode",
+        ));
+    }
+    config.required_row_image = Some(expected);
+    Ok(config)
+}
+
 fn read_frame<'a>(
     stream: &mut BinlogStream,
     buffer: &'a mut Vec<u8>,

@@ -909,3 +909,61 @@ fn full_wide_images_keep_late_primary_keys_and_null_bitmap_ordinals() {
         )
         .unwrap();
 }
+
+#[test]
+fn statically_selected_decoders_validate_mode_before_emitting() {
+    use mysql_canal::{Full, Minimal};
+    let mapping = table_map(7, &basic(), &[3, 15, 3], &[100, 0]);
+    let mut full = Decoder::<Full>::for_mode(vec![basic()]).unwrap();
+    let mut minimal = Decoder::<Minimal>::for_mode(vec![basic()]).unwrap();
+    full.table_map(&mapping).unwrap();
+    minimal.table_map(&mapping).unwrap();
+    let sparse = rows(
+        7,
+        UPDATE_ROWS_EVENT,
+        3,
+        &[1],
+        &[4],
+        &[0, 42, 0, 0, 0, 0, 30, 0, 0, 0],
+    );
+    let mut emitted = Vec::new();
+    assert!(
+        matches!(full.rows(UPDATE_ROWS_EVENT, &sparse, |_| panic!("invalid FULL cannot emit")),
+        Err(Error::Unsupported(message)) if message == "expected FULL row images containing every column")
+    );
+    minimal
+        .rows(UPDATE_ROWS_EVENT, &sparse, |change| {
+            emitted.push(change.into_owned());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].pk, PrimaryKey::Signed(42));
+    assert_eq!(emitted[0].changed_names().collect::<Vec<_>>(), ["age"]);
+    let mut values = vec![0];
+    values.extend(42i32.to_le_bytes());
+    values.extend([1, b'x']);
+    values.extend(20i32.to_le_bytes());
+    values.push(0);
+    values.extend(43i32.to_le_bytes());
+    values.extend([1, b'y']);
+    values.extend(30i32.to_le_bytes());
+    let complete = rows(7, UPDATE_ROWS_EVENT, 3, &[7], &[7], &values);
+    assert!(
+        matches!(minimal.rows(UPDATE_ROWS_EVENT, &complete, |_| panic!("invalid MINIMAL cannot emit")),
+        Err(Error::Unsupported(message)) if message == "expected MINIMAL before image containing only the primary key")
+    );
+    emitted.clear();
+    full.rows(UPDATE_ROWS_EVENT, &complete, |change| {
+        emitted.push(change.into_owned());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].pk, PrimaryKey::Signed(43));
+    assert_eq!(emitted[0].previous_pk, Some(PrimaryKey::Signed(42)));
+    assert_eq!(
+        emitted[0].changed_names().collect::<Vec<_>>(),
+        ["id", "name", "age"]
+    );
+}

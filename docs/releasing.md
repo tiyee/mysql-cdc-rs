@@ -1,6 +1,6 @@
 # CI 与 crates.io 发布
 
-分层职责与两条解码路径见[架构与事件流](architecture.zh-CN.md)（[English](architecture.md)）。复制库同时提供协议事件与可选原始增、改、删行镜像解码；canal 使用独立的选择性解码器完成 CDC 转换，不先解码所有原始字段；CLI 通过 canal 消费与输出，聚合库仅重导出。
+分层职责与两条解码路径见[架构与事件流](architecture.zh-CN.md)（[English](architecture.md)）。复制库同时提供协议事件与可选原始增、改、删行镜像解码；canal 使用独立的选择性解码器完成 CDC 转换，不先解码所有原始字段；CLI 通过 canal 消费与输出，聚合库仅重导出。Canal 自行负责启动主键校验并复用自身键类型规则；离线流程由 `engine::Replay` 统一处理，CLI 只装配参数与 sink。默认测试包含库级回放的历史起点、非法位点、失败传播及 state 不变校验。已有复制库预检公共 API 保留供独立调用，不作为 Canal 的策略实现。
 
 仓库包含四个包：`mysql-replication`（导入路径 `mysql_replication`）负责复制传输与原始 binlog 事件；`mysql-canal`（导入路径 `mysql_canal`）提供 CDC 转换、事务和检查点公共库；`mysql-cdc-rs`（导入路径 `mysql_cdc_rs`，目录 `crates/mysql-cdc`）聚合两个库，根路径及 `canal` 导出 CDC API，`replication` 导出原始事件与传输；`pikachu` 仅提供 `pikachu-cdc` CLI，依赖 canal 并注册默认 JSON Lines 打印处理器。原始事件的 `dump` 按字段逐行打印，仅用于调试。`Cdc` 接收配置，应用通过 `add_handle` 注册 `TransactionHandler` 或闭包，接收 `CommittedTransaction`。binlog 先经 `EventConverter` 转为轻量行变更，再由事务引擎提交；两种事件类型独立。配置示例为 `crates/pikachu/examples/config/multi-source.toml`。四个包保持同版，依赖链为 CLI → canal → replication，聚合包同时依赖 canal 与 replication，精确依赖工作区版本。四个包统一通过 GitHub OIDC Trusted Publishing 认证，按依赖顺序上传复制库、canal 库、聚合包和 CLI，不读取长期 API token secret。
 
@@ -62,9 +62,11 @@ cargo publish --locked --registry crates-io --package pikachu
 
 发布工作流不再读取 `secrets.CARGO_REGISTRY_TOKEN`。确认四个包的 OIDC 发布均成功后，可删除 GitHub 仓库中旧的 `CARGO_REGISTRY_TOKEN` secret，并在 crates.io 撤销已不再使用的长期 API token；不要仅删除 secret 而保留无用途的有效凭据。
 
+泛型入口通过 `ReplicationStream::<Full>::for_mode` / `Cdc::<Full>::for_mode` 在实例化时固定模式，`Minimal` 同理；默认入口保留原始视图及按来源配置能力。协议测试覆盖模式化包络、owned 视图、FULL 稀疏拒绝和编译期隔离；Canal 回归覆盖固定模式配置冲突、选择性解码及回调/检查点顺序。发布包包含 `listen_typed` 与更新的 `decode_typed_rows` 示例。
+
 ## 发布版本
 
-当前四个包的清单版本为 `2.0.0`，尚未因本次修改创建标签或发布。2.0 增加公开配置字段 `SourceConfig::row_image`，Rust 结构体字面量须补充该字段，因此采用主版本升级；旧 TOML 默认 MINIMAL，旧构造函数及 v1 检查点保持原行为。FULL 的 `changed` 仍按 after-image 位图输出，不比较新旧字段值。自定义适配器须显式支持 FULL。
+当前四个包的清单版本为 `2.0.0`，尚未因本次修改创建标签或发布。2.0 将连接及行镜像设置归属到 `mysql_replication::config::Config`，Canal 的 `Config` 必须包含 `replication` 字段；`SourceConfig` 仅保留插件及适配器。独立 Canal TOML 必须将 `url_env`、`server_id`、`tls_ca`、`row_image` 移入必填的 `[sources.mysql-replication]`。Pikachu 文件还必须将同一个 Canal 配置放入 `mysql-canal` 子配置，使用 `[[mysql-canal.sources]]` 和 `[mysql-canal.sources.mysql-replication]`；各层只定义自身增量配置，不接受旧 `replication` 别名、缺失子层或摊平字段。相对路径按最外层 TOML 文件解析，旧层级会报错。Rust 配置字面量须同步迁移；Canal 重导出的 `RowImageMode` 字符串解析错误类型也归复制库，因此属于 2.0 的不兼容配置变更。复制库的 `RowImage`、连接/订阅 API 及泛型 MINIMAL/FULL 解码接口继续保留；旧解码构造函数及 v1 检查点保持原行为。FULL 的 `changed` 仍按 after-image 位图输出，不比较新旧字段值。自定义适配器须显式支持 FULL。
 
 历史标签 [`v1.0.0`](https://github.com/tiyee/mysql-cdc-rs/tree/v1.0.0) 已推送，指向版本提交 `edb1c72714e69c92cbf0ef412e77de3bdaacd85c`。不要重新创建、移动或强推该标签。标签存在不代表完整 CI 或 crates.io 上传成功；需分别查看 [Actions](https://github.com/tiyee/mysql-cdc-rs/actions) 和各 crate 的实际版本。
 

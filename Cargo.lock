@@ -593,6 +593,7 @@ dependencies = [
  "crc32fast",
  "mysql",
  "mysql_common",
+ "serde",
  "thiserror",
 ]
 
@@ -690,7 +691,9 @@ dependencies = [
  "crc32fast",
  "mysql",
  "mysql-canal",
+ "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

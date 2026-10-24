@@ -4,6 +4,7 @@
 //!
 //! Events describe the wire protocol. Filtering, row-to-change conversion,
 //! transaction delivery and checkpoint persistence belong to the consumer.
+pub mod config;
 mod error;
 pub mod event_type;
 pub mod events;
@@ -16,6 +17,9 @@ pub mod version;
 mod wire;
 
 pub use error::{Error, Result};
-pub use events::{BinlogEvent, Event, EventData, EventHeader, OwnedBinlogEvent};
+pub use events::{
+    BinlogEvent, BinlogMode, Event, EventData, EventHeader, Full, ImageMode, Minimal,
+    OwnedBinlogEvent, Unspecified,
+};
 pub use frame::{BinlogFrame, EventView, FrameDecoder, MAX_EVENT_BYTES};
 pub use parser::BinlogParser;

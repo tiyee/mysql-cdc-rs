@@ -2,7 +2,7 @@
 
 English | [简体中文](architecture.zh-CN.md)
 
-This guide describes the current implementation. See the [project README](../README.md) for configuration, output semantics and compatibility, and the [release guide](releasing.md) for CI and publishing.
+The system is named **mysql-cdc**; `mysql-cdc-rs` is its facade package, not a fourth implementation layer. This guide describes the current implementation. See the [project README](../README.md) for configuration, output semantics and compatibility, and the [release guide](releasing.md) for CI and publishing.
 
 ## Package layers
 
@@ -22,6 +22,38 @@ mysql-cdc-rs ──────────────────────�
 | `mysql-cdc-rs` / `mysql_cdc_rs` | Calls to the two library APIs | Re-export canal at the root and under `canal`, and replication under `replication`, preserving their types and lifetimes |
 
 `mysql-cdc-rs` adds no processing stage. `pikachu` depends directly on `mysql-canal`. The root repository is a Cargo workspace, not another library package.
+
+## Configuration composition
+
+Replication owns `config::Config` and `RowImageMode`, including connection/TLS settings, consumer server ID, timeouts and MINIMAL/FULL selection. Canal includes that type as its mandatory `Config::replication` field, re-exported as `config::ReplicationConfig`. It does not duplicate those fields in `SourceConfig`; source plugin/adapter selection, table filters, transaction budget and checkpoint paths remain canal settings.
+
+Pikachu composes a required `mysql-canal: AppConfig` child, whose named sources each compose a required `mysql-replication` child. Product settings contain only product additions (currently none are required); no layer redefines its child settings. Product file example:
+
+```toml
+[mysql-canal]
+
+[[mysql-canal.sources]]
+id = "east"
+state_file = "east-state.json"
+
+[mysql-canal.sources.source]
+plugin = "mysql"
+
+[mysql-canal.sources.mysql-replication]
+url_env = "MYSQL_EAST_URL"
+server_id = 901001
+row_image = "full"
+connect_timeout_secs = 10
+read_timeout_secs = 90
+
+[[mysql-canal.sources.tables]]
+schema = "app"
+table = "users"
+```
+
+A standalone canal file starts at `[[sources]]`, with `[sources.mysql-replication]` under each source; Pikachu embeds this tree under `mysql-canal` as above. Product and standalone examples live in `crates/pikachu/examples/config/` and `crates/mysql-canal/examples/config/`. Missing child configurations, unknown fields and fields in the wrong layer are rejected. `AppConfig::resolve_paths` supports embedding relative to the outer TOML file; `AppConfig::read` reads the standalone format. The selected replication mode also reaches canal's adapter and selective decoder, giving the transport and CDC path one source of truth. File/position come from the checkpoint. Raw typed `Minimal`/`Full` decoders remain separate, checking sparse versus complete images without CDC key policy.
+
+The [public event-field reference](../crates/mysql-replication/README.md#public-event-fields-and-image-modes) distinguishes the `BinlogEvent` envelope, field-free `Event` trait and `EventData` bodies. It includes shared header/body fields, MINIMAL/FULL image types, accessor return types and absent-image/absent-column/SQL-NULL semantics.
 
 ## Replication: bytes to protocol events and raw rows
 
@@ -49,7 +81,7 @@ TABLE_MAP provides wire layouts, but the raw decoder does not infer SQL signedne
 
 Callers maintain TABLE_MAP plans independently per source, replace remapped IDs, and clear plans at file/statement boundaries. Raw row iteration can yield rows before a later error and provides no commit visibility guarantee.
 
-The separate [`primary_key`](../crates/mysql-replication/src/primary_key.rs) helper validates selected tables through INFORMATION_SCHEMA. `connect_with_tables` / `from_connection_with_tables` opt into this preflight; their table list does not filter the replication stream. Plain `connect` / `from_connection` remain available without preflight. Canal's MySQL source invokes the helper for its whitelist. This shared startup check does not move historical schema, whitelist filtering or checkpoint policy into the raw decoder.
+The separate [`primary_key`](../crates/mysql-replication/src/primary_key.rs) helper validates selected tables through INFORMATION_SCHEMA. `connect_with_tables` / `from_connection_with_tables` opt into this preflight; their table list does not filter the replication stream. Plain `connect` / `from_connection` remain available without preflight. These existing optional APIs remain available for raw-library callers. Canal owns a separate source-level preflight that reuses its CDC key decoder's type rules; its normal stream uses `from_connection` after that check. The raw decoder remains independent of primary-key policy.
 
 ## Canal: protocol views to committed CDC changes
 
@@ -86,7 +118,7 @@ Conversion alone is not committed delivery. `EventConverter::convert_binlog` acc
 
 [`Runtime`](../crates/mysql-canal/src/engine/runtime.rs) coordinates named `[[sources]]`. Each source owns a connection/session, historical schema, TABLE_MAP plans, transaction budget, checkpoint and state-file lock.
 
-1. Validate configuration and connect all sources. The built-in [`MysqlSource`](../crates/mysql-canal/src/source/mysql/mod.rs) checks server capabilities and selected tables' current primary keys, including on recovery. This preflight runs before runtime initialization writes initial checkpoints; the stream checks selected keys again before requesting binlog bytes.
+1. Validate configuration and connect all sources. The built-in [`MysqlSource`](../crates/mysql-canal/src/source/mysql/mod.rs) checks server capabilities and selected tables' current primary keys, including on recovery. This preflight runs before runtime initialization writes initial checkpoints; the canal source checks selected keys again before requesting binlog bytes.
 2. Acquire state-file locks. For saved checkpoints, verify source UUID, ID, plugin and whitelist. Load the historical schema from that checkpoint, without replacing it with current INFORMATION_SCHEMA metadata.
 3. For a missing checkpoint, briefly acquire a global read lock and capture selected table schemas and the current committed position. Save the initial state. There is no full-data snapshot, and initialization across sources is not one consistent snapshot.
 4. Start a worker per source and consume from its saved position. Re-select the producer adapter at each file's FDE. Deliver whole transactions through the shared sink, without interleaving their handlers across sources. There is no global event order across instances.
@@ -98,10 +130,12 @@ Current-primary-key preflight is a startup eligibility check; saved historical s
 
 [`pikachu-cdc`](../crates/pikachu/src/bin/pikachu-cdc.rs) maps `check`, `init`, `run` and `run --once` to `Cdc`. It registers [`PrintHandle`](../crates/pikachu/src/bin/print_handle/mod.rs) for consumption. That handler delegates to canal's `JsonLinesSink`, writes change records to stdout and flushes before checkpoint persistence; flushing is not downstream durable acknowledgement. Diagnostics go to stderr.
 
-`replay` reads one local file using canal's frame reader and `Processor`, starting from the supplied checkpoint's position and historical schema. It emits committed changes without updating the state file or querying the current server schema.
+`replay` delegates to canal's [`engine::Replay`](../crates/mysql-canal/src/engine/replay.rs). Replay owns file-name and event-boundary checks, FDE bootstrapping, historical-event skipping and transaction delivery through `Processor`. It uses the supplied checkpoint's historical schema and an explicit `TransactionSink`, without updating the state file or querying the current server. Positions are checked before processing each event, including commits; later errors can still follow earlier successful commits. The CLI contains no event loop or protocol dispatch.
 
 Use `mysql-replication` for protocol inspection, `mysql-canal` for embedded committed CDC, or [`mysql-cdc-rs`](../crates/mysql-cdc/src/lib.rs) for both through one dependency. The facade's root `Error`/`Result` are canal's; raw operations use `replication::Error`/`replication::Result`.
 
+Generic entry points bind shared `Minimal` / `Full` types at construction. Replication carries `M` through parser, reader, `BinlogEvent`, `EventData`, `RowsEvent` and owned views. `Event` remains the shared object-safe decoding interface for common control bodies. Canal exposes `Cdc<M>` and `Decoder<M>`; fixed CDC instances reject source configuration conflicts before startup. Built-in adapters assemble generic decoders per FDE, while normalized changes and transaction delivery retain shared types. The default `Configured` CDC entry point permits mixed sources; dynamic adapter interfaces remain object safe.
+
 ## Image policies
 
-`config::RowImageMode` is source-local and defaults to MINIMAL. Runtime passes it to online server checks and to Processor → EventConverter → VersionAdapter → Decoder; each FDE rebinds the decoder with the same policy. Offline replay supplies the mode explicitly. Raw `RowsEvent` and `RowsDecoder` remain bitmap-driven and independent of this CDC policy. FULL requires complete images but retains selective key decoding, borrowed UTF-8 keys and shared after-image column indices. Checkpoints retain their v1 format and historical schemas; the mode is a runtime option, not a property inferred from the current server or FDE.
+`mysql_replication::config::RowImageMode`, re-exported by canal, is source-local under `[sources.mysql-replication]` and defaults to MINIMAL. Runtime passes it to online server checks and to Processor → EventConverter → VersionAdapter → Decoder; each FDE rebinds the decoder with the same policy. Offline replay supplies the mode explicitly. Raw `RowsEvent` and `RowsDecoder` remain bitmap-driven and independent of this CDC policy. FULL requires complete images but retains selective key decoding, borrowed UTF-8 keys and shared after-image column indices. Checkpoints retain their v1 format and historical schemas; the mode is a runtime option, not a property inferred from the current server or FDE.

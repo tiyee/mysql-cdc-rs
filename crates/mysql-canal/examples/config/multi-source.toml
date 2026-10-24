@@ -7,12 +7,16 @@ state_file = "east-state.json"
 max_transaction_bytes = 67108864
 [sources.source]
 plugin = "mysql"
+# adapter = "mysql57" # optional; auto-select from server/FDE version by default
+# Required: settings owned by mysql-replication.
+[sources.mysql-replication]
 url_env = "MYSQL_EAST_URL"
 server_id = 901001
 # Use "full" when this source and its writer sessions log FULL images.
 row_image = "minimal"
-# adapter = "mysql57" # optional; auto-select from server/FDE version by default
 # tls_ca = "/path/to/ca.pem"
+# connect_timeout_secs = 10
+# read_timeout_secs = 90
 [[sources.tables]]
 schema = "app"
 table = "users"
@@ -26,6 +30,8 @@ state_file = "west-state.json"
 max_transaction_bytes = 67108864
 [sources.source]
 plugin = "mysql"
+# adapter = "mysql57" # optional; auto-select from server/FDE version by default
+[sources.mysql-replication]
 url_env = "MYSQL_WEST_URL"
 server_id = 901002
 row_image = "minimal"

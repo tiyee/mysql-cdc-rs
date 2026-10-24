@@ -2,51 +2,20 @@ use crate::{Error, Result};
 use serde::Deserialize;
 use std::{
     collections::HashSet,
-    fmt,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 
-/// Required upstream row image and CDC image validation policy.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RowImageMode {
-    #[default]
-    Minimal,
-    Full,
-}
-impl RowImageMode {
-    pub fn server_value(self) -> &'static str {
-        match self {
-            Self::Minimal => "MINIMAL",
-            Self::Full => "FULL",
-        }
-    }
-}
-impl fmt::Display for RowImageMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Minimal => "minimal",
-            Self::Full => "full",
-        })
-    }
-}
-impl FromStr for RowImageMode {
-    type Err = Error;
-    fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "minimal" => Ok(Self::Minimal),
-            "full" => Ok(Self::Full),
-            _ => Err(Error::Invalid("row_image must be minimal or full".into())),
-        }
-    }
-}
+/// Replication-owned connection settings and row-image policy.
+pub use mysql_replication::config::{Config as ReplicationConfig, RowImageMode};
 
 /// Settings owned by one entry in the application's source list.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub source: SourceConfig,
+    /// Required lower-layer settings; no implicit replication configuration.
+    #[serde(rename = "mysql-replication")]
+    pub replication: ReplicationConfig,
     pub state_file: PathBuf,
     #[serde(default = "transaction_budget")]
     pub max_transaction_bytes: usize,
@@ -55,15 +24,9 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
-    pub url_env: String,
-    pub server_id: u32,
-    pub tls_ca: Option<PathBuf>,
     #[serde(default = "mysql_plugin")]
     pub plugin: String,
     pub adapter: Option<String>,
-    /// Defaults to MINIMAL; this never changes a server setting.
-    #[serde(default)]
-    pub row_image: RowImageMode,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,12 +44,10 @@ fn transaction_budget() -> usize {
 impl Config {
     pub fn validate(&self) -> Result<()> {
         let value = self;
-        if value.source.server_id == 0
-            || value.max_transaction_bytes == 0
-            || value.tables.is_empty()
-        {
+        value.replication.validate()?;
+        if value.max_transaction_bytes == 0 || value.tables.is_empty() {
             return Err(Error::Schema(
-                "server_id, transaction budget and whitelist must be nonempty/nonzero".into(),
+                "transaction budget and whitelist must be nonempty/nonzero".into(),
             ));
         }
         let mut tables = HashSet::new();
@@ -99,10 +60,9 @@ impl Config {
             }
         }
         if value.source.plugin.is_empty()
-            || value.source.url_env.is_empty()
             || value.source.adapter.as_ref().is_some_and(String::is_empty)
         {
-            return Err(Error::Schema("empty plugin, url_env or adapter".into()));
+            return Err(Error::Schema("empty plugin or adapter".into()));
         }
         Ok(())
     }
@@ -113,7 +73,7 @@ impl Config {
         if value.state_file.is_relative() {
             value.state_file = base.join(&value.state_file);
         }
-        if let Some(ca) = &mut value.source.tls_ca
+        if let Some(ca) = &mut value.replication.tls_ca
             && ca.is_relative()
         {
             *ca = base.join(&*ca);
@@ -139,11 +99,17 @@ impl AppConfig {
     pub fn read(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let mut app: Self = toml::from_str(&text)?;
-        for entry in &mut app.sources {
+        app.resolve_paths(path)?;
+        Ok(app)
+    }
+
+    /// Resolves embedded configuration against the owning TOML file and validates
+    /// source identities, replication settings and distinct checkpoint paths.
+    pub fn resolve_paths(&mut self, path: &Path) -> Result<()> {
+        for entry in &mut self.sources {
             entry.config.resolve(path)?;
         }
-        app.validate()?;
-        Ok(app)
+        self.validate()
     }
     pub fn validate(&self) -> Result<()> {
         if self.sources.is_empty() {

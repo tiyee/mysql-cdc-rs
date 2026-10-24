@@ -39,7 +39,7 @@ impl Runtime {
                 .map_err(|e| Error::Sources(format!("{}: {e}", entry.id)))?;
             let info = session.info();
             if info.uuid.is_empty()
-                || !identities.insert((info.uuid.clone(), entry.config.source.server_id))
+                || !identities.insert((info.uuid.clone(), entry.config.replication.server_id))
             {
                 return Err(Error::Schema(
                     "same upstream UUID requires distinct replication server_id values".into(),
@@ -161,7 +161,7 @@ impl Runtime {
                             entry.config.max_transaction_bytes,
                             registry,
                             entry.config.source.adapter.clone(),
-                            entry.config.source.row_image,
+                            entry.config.replication.row_image,
                         )?;
                         let mut stream = session.start(&entry.config, processor.state(), once)?;
                         while !cancelled.load(Ordering::Acquire) {

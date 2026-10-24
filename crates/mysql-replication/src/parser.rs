@@ -34,7 +34,8 @@ impl ParserConfig {
 }
 
 /// FDE selects a file's layouts once; row loops never inspect server versions.
-pub struct BinlogParser {
+pub struct BinlogParser<M: BinlogMode = Unspecified> {
+    mode: std::marker::PhantomData<M>,
     config: ParserConfig,
     headers: Option<[u8; 256]>,
 }
@@ -45,12 +46,25 @@ impl Default for BinlogParser {
 }
 impl BinlogParser {
     pub fn new(config: ParserConfig) -> Self {
+        Self::for_mode(config)
+    }
+}
+impl<M: BinlogMode> BinlogParser<M> {
+    pub fn for_mode(config: ParserConfig) -> Self {
         Self {
             config,
             headers: None,
+            mode: std::marker::PhantomData,
         }
     }
-    pub fn parse<'a>(&mut self, frame: BinlogFrame<'a>) -> Result<BinlogEvent<'a>> {
+    pub fn with_mode<N: BinlogMode>(self) -> BinlogParser<N> {
+        BinlogParser {
+            config: self.config,
+            headers: self.headers,
+            mode: std::marker::PhantomData,
+        }
+    }
+    pub fn parse<'a>(&mut self, frame: BinlogFrame<'a>) -> Result<BinlogEvent<'a, M>> {
         let kind = frame.header.event_type;
         let mut event = if kind == code::FORMAT_DESCRIPTION_EVENT {
             let mut format = FormatDescriptionEvent::default();
@@ -143,7 +157,7 @@ impl BinlogParser {
                         kind,
                         code::WRITE_ROWS_EVENT | code::UPDATE_ROWS_EVENT | code::DELETE_ROWS_EVENT
                     );
-                    EventData::Rows(RowsEvent::with_layout(operation, post_header, v2))
+                    EventData::Rows(RowsEvent::<M>::for_mode(operation, post_header, v2))
                 }
                 code::XID_EVENT => EventData::Xid(Default::default()),
                 code::GTID_EVENT if self.config.decode_gtids => EventData::Gtid(Default::default()),

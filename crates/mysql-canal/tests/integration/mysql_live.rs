@@ -60,13 +60,10 @@ fn mysql_primary_key_preflight_stops_fresh_and_resumed_consumption() {
                         id: live::SOURCE_ID.into(),
                         config: Config {
                             source: SourceConfig {
-                                url_env: fixture.config.source.url_env.clone(),
-                                server_id: fixture.config.source.server_id,
-                                tls_ca: fixture.config.source.tls_ca.clone(),
                                 plugin: fixture.config.source.plugin.clone(),
                                 adapter: fixture.config.source.adapter.clone(),
-                                row_image: fixture.config.source.row_image,
                             },
+                            replication: fixture.config.replication.clone(),
                             state_file: fixture.config.state_file.clone(),
                             max_transaction_bytes: fixture.config.max_transaction_bytes,
                             tables: vec![WhitelistTable {

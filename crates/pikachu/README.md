@@ -4,7 +4,9 @@ English | [简体中文](README.zh-CN.md)
 
 MySQL CDC command line powered by `mysql-canal`. The `pikachu` package provides the `pikachu-cdc` executable and its default JSON Lines transaction handler.
 
-This is the top layer in `pikachu → mysql-canal → mysql-replication`. Replication handles subscription, protocol parsing and optional raw row decoding; canal handles table selection, selective row conversion, transaction buffering and checkpoints. The CLI maps commands to `Cdc` or offline `Processor` replay and delegates output to canal's `JsonLinesSink` through `PrintHandle`. See the [architecture guide](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md).
+This is the top layer in `pikachu → mysql-canal → mysql-replication`. Replication handles subscription, protocol parsing and optional raw row decoding; canal handles table selection, selective row conversion, transaction buffering and checkpoints. The CLI maps commands to `Cdc` or offline `engine::Replay` and delegates output to canal's `JsonLinesSink` through `PrintHandle`. See the [architecture guide](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md).
+
+The product configuration requires a `mysql-canal` child using canal's `AppConfig` directly. Each named canal source requires a `mysql-replication` child using replication's configuration directly. Only product-specific additions belong at the root; none are currently required. The CLI reads `[[mysql-canal.sources]]`, not a standalone canal file. Missing layers, flattened lower-layer fields and unknown fields are rejected. State and TLS paths resolve relative to the product TOML file.
 
 Build and run from the workspace root:
 
@@ -17,7 +19,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 ./target/release/pikachu-cdc run cdc.toml > changes.jsonl
 ```
 
-Edit `[[sources.tables]]` to use the exact database/table names you want to monitor before running these commands. A single source still uses `[[sources]]`. Source IDs and state paths must be distinct, and state parent directories must exist. Paths in the configuration are relative to the TOML file.
+Edit `[[mysql-canal.sources.tables]]` to use the exact database/table names you want to monitor before running these commands. A single source still uses `[[mysql-canal.sources]]`. Source IDs and state paths must be distinct, and state parent directories must exist. Paths in the configuration are relative to the TOML file.
 
 | Command | Behavior |
 | --- | --- |
@@ -52,7 +54,7 @@ Three ignored `mysql_live` tests exercise the built executable against a dedicat
 
 ## Row image mode
 
-Each `[sources.source]` accepts `row_image = "minimal"` (default) or `"full"`. Override selected sources for check/init/run with repeatable `--row-image SOURCE_ID=minimal|full`; `--once` remains specific to run. For example:
+Each `[mysql-canal.sources.mysql-replication]` accepts `row_image = "minimal"` (default) or `"full"`. Override selected sources for check/init/run with repeatable `--row-image SOURCE_ID=minimal|full`; `--once` remains specific to run. For example:
 
 ```sh
 pikachu-cdc run cdc.toml --once --row-image east=full --row-image west=minimal

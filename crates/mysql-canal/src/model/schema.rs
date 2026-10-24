@@ -102,9 +102,9 @@ pub(crate) fn key_decoder(col: &ColumnMeta) -> Result<KeyDecoder> {
             Some("latin1") => latin1,
             other => return Err(Error::Unsupported(format!("primary-key charset {other:?}"))),
         },
-        other => {
+        (data_type, _) => {
             return Err(Error::Unsupported(format!(
-                "primary-key type {other:?}; use integer, DECIMAL, CHAR or VARCHAR"
+                "primary-key type {data_type}; use integer, DECIMAL, CHAR or VARCHAR"
             )));
         }
     })

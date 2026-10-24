@@ -1,4 +1,6 @@
 //! MySQL transport, capability discovery, schema loading and initial position capture.
+mod primary_key;
+
 use super::{EventStream, ServerInfo, SourcePlugin, SourceSession};
 use crate::{
     ColumnMeta, Error, Result, TableMeta,
@@ -11,7 +13,7 @@ use crate::{
     },
 };
 use ::mysql::{Conn, params, prelude::Queryable};
-use mysql_replication::stream::{ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage};
+use mysql_replication::stream::ReplicationStream;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub struct MysqlSource;
@@ -27,12 +29,12 @@ impl SourcePlugin for MysqlSource {
         let mut conn = connect(config)?;
         let (uuid, version, adapter) = inspect_server_with_row_image(
             &mut conn,
-            config.source.server_id,
+            config.replication.server_id,
             versions,
             config.source.adapter.as_deref(),
-            config.source.row_image,
+            config.replication.row_image,
         )?;
-        mysql_replication::primary_key::validate_primary_keys(
+        primary_key::validate_primary_keys(
             &mut conn,
             config
                 .tables
@@ -78,23 +80,21 @@ impl SourceSession for MysqlSession {
         state: &State,
         once: bool,
     ) -> Result<Box<dyn EventStream>> {
-        let mut replication =
-            ReplicationConfig::new(config.source.server_id, &state.file, state.position);
+        let mut replication = config
+            .replication
+            .replication_config(&state.file, state.position)?;
         replication.non_blocking = once;
-        replication.required_row_image = Some(match config.source.row_image {
-            RowImageMode::Minimal => RowImage::Minimal,
-            RowImageMode::Full => RowImage::Full,
-        });
         replication.parser = mysql_replication::parser::ParserConfig::minimal();
+        let mut conn = self.conn;
+        primary_key::validate_primary_keys(
+            &mut conn,
+            config
+                .tables
+                .iter()
+                .map(|t| (t.schema.as_str(), t.table.as_str())),
+        )?;
         Ok(Box::new(MysqlEvents {
-            stream: ReplicationStream::from_connection_with_tables(
-                self.conn,
-                replication,
-                config
-                    .tables
-                    .iter()
-                    .map(|t| (t.schema.as_str(), t.table.as_str())),
-            )?,
+            stream: ReplicationStream::from_connection(conn, replication)?,
         }))
     }
 }
@@ -107,9 +107,9 @@ impl EventStream for MysqlEvents {
     }
 }
 pub fn connect(config: &Config) -> Result<Conn> {
-    let mut connection = ConnectionConfig::new(&config.source.url_env);
-    connection.tls_ca = config.source.tls_ca.clone();
-    Ok(mysql_replication::stream::connect(&connection)?)
+    Ok(mysql_replication::stream::connect(
+        &config.replication.connection_config()?,
+    )?)
 }
 
 pub fn inspect_server(
@@ -153,7 +153,7 @@ pub fn inspect_server_with_row_image(
     Ok((uuid, version, adapter))
 }
 pub fn load_tables(conn: &mut Conn, config: &Config) -> Result<Vec<TableMeta>> {
-    mysql_replication::primary_key::validate_primary_keys(
+    primary_key::validate_primary_keys(
         conn,
         config
             .tables

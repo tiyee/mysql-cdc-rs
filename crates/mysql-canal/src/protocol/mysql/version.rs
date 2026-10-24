@@ -78,7 +78,7 @@ pub trait RowDecoder: Send {
         emit: &mut dyn FnMut(Change<'_>) -> Result<()>,
     ) -> Result<()>;
 }
-impl RowDecoder for Decoder {
+impl<M: crate::CdcMode> RowDecoder for Decoder<M> {
     fn table_map_event(&mut self, event: TableMapEvent<'_>) -> Result<()> {
         Decoder::table_map_event(self, event)
     }
@@ -263,7 +263,10 @@ impl VersionAdapter for MysqlVersion {
         _format: &FormatDescription<'_>,
         row_image: RowImageMode,
     ) -> Result<Box<dyn RowDecoder>> {
-        Ok(Box::new(Decoder::with_row_image(tables, row_image)?))
+        match row_image {
+            RowImageMode::Minimal => Ok(Box::new(Decoder::<crate::Minimal>::for_mode(tables)?)),
+            RowImageMode::Full => Ok(Box::new(Decoder::<crate::Full>::for_mode(tables)?)),
+        }
     }
     fn name(&self) -> &str {
         self.name

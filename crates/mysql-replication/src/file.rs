@@ -1,15 +1,17 @@
 //! Bounded binlog files share framing and event parsing with network replication.
 use crate::{
-    BinlogEvent, BinlogFrame, BinlogParser, FrameDecoder, MAX_EVENT_BYTES, Result, error::invalid,
-    events::EventHeader, parser::ParserConfig,
+    BinlogEvent, BinlogFrame, BinlogParser, FrameDecoder, MAX_EVENT_BYTES, Result,
+    error::invalid,
+    events::{BinlogMode, EventHeader, Unspecified},
+    parser::ParserConfig,
 };
 use std::io::Read;
 
-pub struct BinlogFile<R> {
+pub struct BinlogFile<R, M: BinlogMode = Unspecified> {
     reader: R,
     buffer: Vec<u8>,
     framing: FrameDecoder,
-    parser: BinlogParser,
+    parser: BinlogParser<M>,
 }
 impl<R: Read> BinlogFile<R> {
     pub fn new(reader: R) -> Result<Self> {
@@ -28,11 +30,24 @@ impl<R: Read> BinlogFile<R> {
             parser: BinlogParser::new(config),
         })
     }
+}
+impl<R: Read, M: BinlogMode> BinlogFile<R, M> {
+    pub fn for_mode(reader: R, config: ParserConfig) -> Result<Self> {
+        BinlogFile::with_config(reader, config).map(|file| file.with_mode())
+    }
+    pub fn with_mode<N: BinlogMode>(self) -> BinlogFile<R, N> {
+        BinlogFile {
+            reader: self.reader,
+            buffer: self.buffer,
+            framing: self.framing,
+            parser: self.parser.with_mode(),
+        }
+    }
     /// Reads only a frame, so custom adapters can select their own body layout.
     pub fn next_frame(&mut self) -> Result<Option<BinlogFrame<'_>>> {
         read_frame(&mut self.reader, &mut self.buffer, &mut self.framing)
     }
-    pub fn next_event(&mut self) -> Result<Option<BinlogEvent<'_>>> {
+    pub fn next_event(&mut self) -> Result<Option<BinlogEvent<'_, M>>> {
         let Some(frame) = read_frame(&mut self.reader, &mut self.buffer, &mut self.framing)? else {
             return Ok(None);
         };

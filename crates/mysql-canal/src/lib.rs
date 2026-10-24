@@ -6,7 +6,7 @@
 //! use std::path::Path;
 //!
 //! fn main() -> Result<()> {
-//!     let config = AppConfig::read(Path::new("cdc.toml"))?;
+//!     let config = AppConfig::read(Path::new("canal.toml"))?;
 //!     let mut replication = Cdc::new(config)?;
 //!     replication.add_handle(|event: CommittedTransaction<'_>| {
 //!         for change in event.changes {
@@ -29,5 +29,8 @@ pub mod source;
 
 pub use cdc::{Cdc, CommittedTransaction, TransactionHandler};
 pub use error::{Error, Result};
-pub use model::{Change, ColumnMeta, Operation, OwnedChange, PrimaryKey, TableMeta};
+pub use model::{
+    CdcMode, Change, ColumnMeta, Configured, Full, Minimal, Operation, OwnedChange, PrimaryKey,
+    TableMeta,
+};
 pub use protocol::mysql::Decoder;

@@ -2,7 +2,7 @@ use super::events::{
     GENERATED_INVISIBLE_PK_F, MysqlEventParser, RowsEvent, STMT_END_F, TableMapEvent,
 };
 use crate::{
-    Change, ColumnMeta, Error, Operation, PrimaryKey, Result, TableMeta,
+    CdcMode, Change, ColumnMeta, Configured, Error, Operation, PrimaryKey, Result, TableMeta,
     config::RowImageMode,
     error::invalid,
     model::schema::{KeyDecoder, key_decoder},
@@ -91,8 +91,8 @@ impl ImagePlan {
 
 /// TABLE_MAP preprocessing + sparse ROWS decoding. The callback borrows event bytes.
 /// Only white-listed tables are compiled; other tables' ROWS payloads are skipped.
-pub struct Decoder {
-    row_image: RowImageMode,
+pub struct Decoder<M: CdcMode = Configured> {
+    policy: M::Policy,
     tables: BTreeMap<String, BTreeMap<String, Arc<TableMeta>>>,
     compiled: BTreeMap<String, BTreeMap<String, Arc<TablePlan>>>,
     index: Vec<(u64, Option<Arc<TablePlan>>)>,
@@ -105,8 +105,21 @@ impl Decoder {
 
     /// Compiles layouts for the selected image policy without materializing rows.
     pub fn with_row_image(tables: Vec<TableMeta>, row_image: RowImageMode) -> Result<Self> {
+        Self::build(tables, row_image)
+    }
+}
+impl<M: mysql_replication::events::ImageMode + CdcMode> Decoder<M> {
+    pub fn for_mode(tables: Vec<TableMeta>) -> Result<Self> {
+        Self::build(
+            tables,
+            <M as mysql_replication::events::ImageMode>::ROW_IMAGE,
+        )
+    }
+}
+impl<M: CdcMode> Decoder<M> {
+    fn build(tables: Vec<TableMeta>, row_image: RowImageMode) -> Result<Self> {
         let mut out = Self {
-            row_image,
+            policy: M::policy(row_image)?,
             tables: BTreeMap::new(),
             compiled: BTreeMap::new(),
             index: Vec::new(),
@@ -238,26 +251,14 @@ impl Decoder {
             return Err(invalid("empty after row image"));
         }
         // Validate once per event, before the row loop and any callback.
-        match self.row_image {
-            RowImageMode::Minimal => {
-                if operation != Operation::Insert
-                    && (before.columns.len() != 1 || !bit(first, table.pk_index))
-                {
-                    return Err(Error::Unsupported(
-                        "expected MINIMAL before image containing only the primary key".into(),
-                    ));
-                }
-            }
-            RowImageMode::Full => {
-                if before.columns.len() != count
-                    || operation == Operation::Update && after.columns.len() != count
-                {
-                    return Err(Error::Unsupported(
-                        "expected FULL row images containing every column".into(),
-                    ));
-                }
-            }
-        }
+        M::validate_image(
+            &self.policy,
+            operation,
+            count,
+            bit(first, table.pk_index),
+            before.columns.len(),
+            after.columns.len(),
+        )?;
         let changed: Arc<[u16]> = if operation == Operation::Delete {
             Arc::from([])
         } else {

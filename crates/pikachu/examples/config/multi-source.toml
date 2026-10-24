@@ -1,34 +1,43 @@
+# Pikachu composes mysql-canal; product-specific settings belong at the root.
+[mysql-canal]
+
 # Each entry is one upstream instance. Paths are relative to this file.
 # Export MYSQL_EAST_URL and MYSQL_WEST_URL before check/init/run.
 # Startup checks every selected table for a supported single-column PRIMARY KEY.
-[[sources]]
+[[mysql-canal.sources]]
 id = "east"
 state_file = "east-state.json"
 max_transaction_bytes = 67108864
-[sources.source]
+[mysql-canal.sources.source]
 plugin = "mysql"
+# adapter = "mysql57" # optional; auto-select from server/FDE version by default
+# Required: settings owned by mysql-replication.
+[mysql-canal.sources.mysql-replication]
 url_env = "MYSQL_EAST_URL"
 server_id = 901001
 # Use "full" when this source and its writer sessions log FULL images.
 row_image = "minimal"
-# adapter = "mysql57" # optional; auto-select from server/FDE version by default
 # tls_ca = "/path/to/ca.pem"
-[[sources.tables]]
+# connect_timeout_secs = 10
+# read_timeout_secs = 90
+[[mysql-canal.sources.tables]]
 schema = "app"
 table = "users"
-[[sources.tables]]
+[[mysql-canal.sources.tables]]
 schema = "app"
 table = "orders"
 
-[[sources]]
+[[mysql-canal.sources]]
 id = "west"
 state_file = "west-state.json"
 max_transaction_bytes = 67108864
-[sources.source]
+[mysql-canal.sources.source]
 plugin = "mysql"
+# adapter = "mysql57" # optional; auto-select from server/FDE version by default
+[mysql-canal.sources.mysql-replication]
 url_env = "MYSQL_WEST_URL"
 server_id = 901002
 row_image = "minimal"
-[[sources.tables]]
+[[mysql-canal.sources.tables]]
 schema = "app"
 table = "users"

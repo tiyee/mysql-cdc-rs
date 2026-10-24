@@ -1,7 +1,7 @@
 //! Select a typed image policy once, then stream borrowed row operations.
 use mysql_replication::{
     Error, EventData, Result,
-    events::{Full, ImageMode, Minimal, RowImage, RowValue, TypedRowsDecoder},
+    events::{Full, ImageMode, Minimal, RowImage, RowValue, RowsDecoder},
     file::BinlogFile,
 };
 use std::{
@@ -34,20 +34,20 @@ fn print_image(output: &mut dyn Write, label: &str, image: &RowImage<'_>) -> Res
 }
 
 fn run<M: ImageMode>(path: &str, output: &mut dyn Write) -> Result<()> {
-    let mut reader = BinlogFile::new(BufReader::new(File::open(path)?))?;
+    let mut reader = BinlogFile::new(BufReader::new(File::open(path)?))?.with_mode::<M>();
     let mut tables = BTreeMap::new();
     while let Some(event) = reader.next_event()? {
         match event.event {
             EventData::FormatDescription(_) | EventData::Rotate(_) => tables.clear(),
             EventData::TableMap(table) => {
-                tables.insert(table.table_id, TypedRowsDecoder::<M>::new(&table)?);
+                tables.insert(table.table_id, RowsDecoder::new(&table)?);
             }
             EventData::Rows(event) => {
                 if event.table_id != 0x00ff_ffff || event.flags & STMT_END_F == 0 {
                     let decoder = tables.get(&event.table_id).ok_or_else(|| {
                         Error::Invalid(format!("missing TABLE_MAP for {}", event.table_id))
                     })?;
-                    for row in decoder.rows(&event)? {
+                    for row in event.rows(decoder)? {
                         let row = row?;
                         for (label, image) in [("before", row.before), ("after", row.after)] {
                             if let Some(image) = image {

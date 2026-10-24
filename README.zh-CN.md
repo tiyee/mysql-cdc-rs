@@ -1,6 +1,8 @@
-# mysql-cdc-rs
+# mysql-cdc
 
 [English](README.md) | 简体中文
+
+整套系统名称为 **mysql-cdc**，包含 `mysql-replication`、`mysql-canal` 和 `pikachu` 三个实现层；`mysql-cdc-rs` 包提供统一库入口。
 
 MySQL binlog 消费分为三层：`mysql-replication` 负责订阅、解析 binlog，可按需解码原始增、改、删行镜像；`mysql-canal` 将选中表的行事件转换为轻量 CDC 变更，管理事务与恢复；`pikachu` 基于 `mysql-canal` 提供 `pikachu-cdc` CLI。`mysql-cdc-rs`（导入路径 `mysql_cdc_rs`）是统一库入口，重导出上述两个库。
 
@@ -29,6 +31,14 @@ mysql-cdc-rs ──────────────────────�
 
 CDC 路径为 `借用事件视图 → EventConverter → Change + EventAction → Processor → CommittedTransaction → handlers → 检查点`。该路径通过自己的版本适配器和选择性解码器处理事件，不先调用 `RowsDecoder` 解出所有原始字段。`pikachu` 注册默认 JSON Lines 处理器，嵌入式应用自行注册处理器；聚合库不增加处理阶段。模块职责、启动恢复流程及两条解码路径见[架构与事件流](docs/architecture.zh-CN.md)。
 
+`pikachu` 负责命令参数与输出处理器装配；Canal 负责当前主键可用性检查及 `engine::Replay`，包括历史事件边界和事务交付；复制库负责传输与协议解析。
+
+复制配置还支持 `connect_timeout_secs`（默认 10）和 `read_timeout_secs`（默认 90），两者必须非零。TLS 路径相对 Canal 的 TOML 文件解析；binlog 文件和位点由运行时从检查点提供，不在静态配置重复指定。
+
+可通过共用的 `Minimal` / `Full` 标记类型在实例化时固定模式：`ReplicationStream::<Full>::for_mode(...)` 和 `Cdc::<Full>::for_mode(config)`。复制库将模式贯穿事件包络与行类型，Canal 选择对应泛型解码器并保持通用 CDC 输出；固定模式拒绝冲突配置。已有默认构造入口继续支持运行时配置及混合模式来源。参见[复制库泛型入口](crates/mysql-replication/README.zh-CN.md#实例化时固定模式)及[Canal 泛型入口](crates/mysql-canal/README.zh-CN.md#实例化时固定模式)。
+
+`BinlogEvent` / `EventHeader` 的公共字段、不含字段的 `Event` trait、具体协议事件字段及两种模式的 `before` / `after` 类型对照见[事件公共字段与模式差异](crates/mysql-replication/README.zh-CN.md#事件公共字段与模式差异)。
+
 ## 目录结构
 
 ```text
@@ -45,7 +55,7 @@ crates/mysql-canal/
 ├── src/model/           # Exact primary keys and lightweight changes
 ├── src/protocol/mysql/  # CDC adapters and selective primary-key decoding
 ├── src/source/          # Source plugins, schema discovery and initial positions
-├── src/engine/          # Event conversion, transactions and checkpoints
+├── src/engine/          # Event conversion, transactions, offline replay and checkpoints
 ├── src/sink/            # Transaction sinks and JSON Lines output
 ├── examples/            # CDC listeners, adapters and configuration
 ├── benches/             # Selective decoding benchmarks
@@ -86,7 +96,7 @@ use mysql_cdc_rs::{CommittedTransaction, Cdc, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let config = AppConfig::read(Path::new("cdc.toml"))?;
+    let config = AppConfig::read(Path::new("canal.toml"))?;
     let mut replication = Cdc::new(config)?;
     replication.add_handle(|event: CommittedTransaction<'_>| {
         for change in event.changes {
@@ -102,12 +112,14 @@ CDC 类型和模块同时从根路径（如 `mysql_cdc_rs::Cdc`、`mysql_cdc_rs:
 
 `Cdc::new` 也支持传入程序构造的 `AppConfig`。`add_handle` 接受闭包或 `TransactionHandler` 实现，多个 handle 按注册顺序执行。`CommittedTransaction` 包含来源 ID、事务提交位点及有序的 `OwnedChange` 变更列表；只在 COMMIT/XID 后回调，回滚与未完成事务不触发回调，完全被白名单过滤的提交收到空列表。全部 handle 成功后才保存检查点；失败停止消费，重启后可能重放先前 handle 已处理的事务，处理逻辑应容忍重放。回调借用事务数据，仅在需要跨回调持有时复制；不同来源的回调不交错，慢 handle 对消费施加背压。调用 `run()` 或 `run_once()` 前至少注册一个 handle，库没有默认输出；`run_once()` 消费当前可用事件后退出。完整示例见 [listen.rs](crates/mysql-canal/examples/listen.rs)。
 
-CLI 注册默认 `PrintHandle`，将事件打印为 stdout JSON Lines；命令名继续使用 `pikachu-cdc`。使用 `crates/pikachu/examples/config/multi-source.toml`，每个 `[[sources]]` 都有独立 `id`、`state_file`、`source` 和 `tables`：
+直接集成 Canal 时，将 `crates/mysql-canal/examples/config/multi-source.toml` 复制为 `canal.toml`；该文件从 `[[sources]]` 开始，各来源必须包含 `[sources.mysql-replication]`。下方产品包装层仅供 Pikachu 使用。
+
+CLI 注册默认 `PrintHandle`，将事件打印为 stdout JSON Lines；命令名继续使用 `pikachu-cdc`。产品配置必须包含 `mysql-canal`，Canal 的每个来源必须包含 `mysql-replication`；Pikachu 根层只放产品增量配置，目前没有额外必填项。使用 `crates/pikachu/examples/config/multi-source.toml`，每个 `[[mysql-canal.sources]]` 都有独立 `id`、`state_file`、`source` 和 `tables`：
 
 ```sh
 cargo build --release --locked -p pikachu
 cp crates/pikachu/examples/config/multi-source.toml cdc.toml
-# Set each source's [[sources.tables]] to exact database and table names, respecting server case rules.
+# Set each source's [[mysql-canal.sources.tables]] to exact database and table names, respecting server case rules.
 export MYSQL_EAST_URL='mysql://cdc:password@east.example:3306'
 export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 ./target/release/pikachu-cdc check cdc.toml
@@ -122,7 +134,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 | `pikachu-cdc run CONFIG.toml --once` | 消费当前可用事件后退出 |
 | `pikachu-cdc replay STATE.json BINLOG_FILE` | 按历史 schema 回放一个本地文件，不修改 state |
 
-在每个 `[sources.source]` 中设置 `row_image = "minimal"` 或 `row_image = "full"`，省略时默认 `minimal`，各来源可以不同。在线命令接受可重复的 `--row-image SOURCE_ID=minimal|full` 覆盖参数，可与 `run --once` 合用；回放接受 `--row-image minimal|full`，默认 `minimal`：
+在每个 `[mysql-canal.sources.mysql-replication]` 中设置 `row_image = "minimal"` 或 `row_image = "full"`，省略时默认 `minimal`，各来源可以不同。在线命令接受可重复的 `--row-image SOURCE_ID=minimal|full` 覆盖参数，可与 `run --once` 合用；回放接受 `--row-image minimal|full`，默认 `minimal`：
 
 ```sh
 ./target/release/pikachu-cdc check cdc.toml --row-image east=full
@@ -134,15 +146,15 @@ export MYSQL_WEST_URL='mysql://cdc:password@west.example:3306'
 
 检查点继续使用 v1 格式，不保存行镜像模式；回放时须选择历史文件对应的模式。当前 GLOBAL 设置不能代表历史日志。切换模式时，暂停写入，在旧模式下消费到提交边界并停止消费者，再修改服务器和写入会话设置，最后以新模式启动。不要重新初始化检查点来跳过未消费数据。混合模式的历史日志可能校验失败。
 
-2.0 新增 `SourceConfig::row_image`，Rust 结构体字面量须补充 `config::RowImageMode::Minimal` 或 `Full`。旧 TOML 及 `Decoder::new`、`EventConverter::new`、`Processor::new` / `with_registry` 继续默认 MINIMAL，显式模式入口使用 `with_row_image`。自定义版本适配器须通过 `validate_server_with_row_image` 和 `create_decoder_with_row_image` 显式支持 FULL；这两个方法的默认实现保留 MINIMAL，并拒绝 FULL。
+2.0 要求每个来源必须包含 `[mysql-canal.sources.mysql-replication]`。将 `url_env`、`server_id`、`tls_ca` 和 `row_image` 从 `[mysql-canal.sources.source]` 移入该段；`[mysql-canal.sources.source]` 仅保留 `plugin`、`adapter`。Rust 的 `Config` 字面量须增加 `replication: config::ReplicationConfig::new(url_env, server_id)`，需要 FULL 时再设置其 `row_image`。`ReplicationConfig` 和 `RowImageMode` 直接重导出 `mysql_replication::config` 的类型。旧 TOML 层级会报错；`Decoder::new`、`EventConverter::new`、`Processor::new` / `with_registry` 继续默认 MINIMAL，显式模式入口使用 `with_row_image`。自定义版本适配器须通过 `validate_server_with_row_image` 和 `create_decoder_with_row_image` 显式支持 FULL；这两个方法的默认实现保留 MINIMAL，并拒绝 FULL。
 
-配置统一使用 `[[sources]]` 列表；只连接一个实例时也使用一个具名条目。每个来源必须显式填写 `id` 和凭据环境变量 `sources.source.url_env`。来源的 ID 和 state 路径必须各不相同，state 的父目录须已存在；指向同一实例 UUID 的多个订阅还必须使用不同复制 `server_id`。不同实例可以复用复制 ID，但统一分配更便于运维。每个来源单独持有线程、连接、schema、table_id 映射、事务预算和提交位点。一个来源不能借用另一个来源的 TABLE_MAP，跨来源也没有全局事务或全局顺序。
+Pikachu 配置统一使用 `[[mysql-canal.sources]]` 列表；只连接一个实例时也使用一个具名条目。每个来源必须显式填写 `id` 和凭据环境变量 `mysql-canal.sources.mysql-replication.url_env`。来源的 ID 和 state 路径必须各不相同，state 的父目录须已存在；指向同一实例 UUID 的多个订阅还必须使用不同复制 `server_id`。不同实例可以复用复制 ID，但统一分配更便于运维。每个来源单独持有线程、连接、schema、table_id 映射、事务预算和提交位点。一个来源不能借用另一个来源的 TABLE_MAP，跨来源也没有全局事务或全局顺序。
 
-任一 worker 失败，进程通知其他 worker 在事件之间停止并返回非零状态；当前阻塞的 MySQL 读取最长等待其 90 秒 read timeout。重启后每个来源从自己的已提交位点继续。各来源初始化逐个获取读锁，不提供跨实例一致性快照；若初始化中途失败，已有成功的 state 会保留，下一次使用 `run` 继续准备剩余来源。
+任一 worker 失败，进程通知其他 worker 在事件之间停止并返回非零状态；当前阻塞的 MySQL 读取最长等待其配置的 read timeout（默认 90 秒）。重启后每个来源从自己的已提交位点继续。各来源初始化逐个获取读锁，不提供跨实例一致性快照；若初始化中途失败，已有成功的 state 会保留，下一次使用 `run` 继续准备剩余来源。
 
-需要 Rust 1.89+。`check` 检查服务器配置、表引擎及主键；字段的实际 wire 类型/长度在 TABLE_MAP 到达时进一步校验。配置相对路径以 TOML 所在目录为基准。凭据从环境变量读取，特殊字符应按 MySQL URL 规则编码；`source.tls_ca` 可配置 CA 证书，启用证书与域名验证。
+需要 Rust 1.89+。`check` 检查服务器配置、表引擎及主键；字段的实际 wire 类型/长度在 TABLE_MAP 到达时进一步校验。配置相对路径以 TOML 所在目录为基准。凭据从环境变量读取，特殊字符应按 MySQL URL 规则编码；`mysql-canal.sources.mysql-replication.tls_ca` 可配置 CA 证书，启用证书与域名验证。
 
-每次启动 MySQL 来源（包括从检查点恢复）都会调用 `mysql-replication` 检查白名单表当前的主键。主键缺失或不受支持时，在创建初始检查点和消费 binlog 前报错停止；历史事件仍按检查点中保存的 schema 解码。直接使用原始复制库时，可通过 `ReplicationStream::connect_with_tables` 或 `from_connection_with_tables` 传入指定表，见[复制库 API](crates/mysql-replication/README.zh-CN.md#配置与按需解析)。
+每次启动 MySQL 来源（包括从检查点恢复）都会在 `mysql-canal` 内检查白名单表当前的主键，与 CDC 转换复用同一套主键类型规则。主键缺失或不受支持时，在创建初始检查点和消费 binlog 前报错停止；历史事件仍按检查点中保存的 schema 解码。直接使用原始复制库时，可通过 `ReplicationStream::connect_with_tables` 或 `from_connection_with_tables` 传入指定表，见[复制库 API](crates/mysql-replication/README.zh-CN.md#配置与按需解析)。
 
 初次 `run` 会短暂执行 `FLUSH TABLES WITH READ LOCK`，在锁内读取白名单 schema 和当前提交位点，解锁后开始消费。**它从当前位点开始，不做全量数据快照**。也可以先运行 `init cdc.toml` 生成起点，稍后 `run`；已经存在的 state 不会被 `init` 覆盖。`run cdc.toml --once` 消费当前可用事件后退出，适合补采与测试。
 

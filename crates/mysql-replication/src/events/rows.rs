@@ -1,6 +1,6 @@
-use super::Event;
+use super::{BinlogMode, Event, Unspecified};
 use crate::{Result, error::invalid, wire::Cursor};
-use std::io::Write;
+use std::{io::Write, marker::PhantomData};
 
 mod decoder;
 mod typed;
@@ -22,18 +22,38 @@ pub enum RowsKind {
     Delete,
 }
 
+/// A ROWS body with the same public wire fields for every mode.
+/// `Minimal` rows expose sparse images; `Full` rows expose complete images.
+/// These decoded image types are obtained through `rows`, not stored as
+/// additional public fields on this envelope.
 #[derive(Debug, Clone, Copy)]
-pub struct RowsEvent<'a> {
+pub struct RowsEvent<'a, M: BinlogMode = Unspecified> {
+    /// TABLE_MAP identifier, independent from the common header's server ID.
     pub table_id: u64,
+    /// ROWS-body flags, independent from the common header's flags.
     pub flags: u16,
     pub kind: RowsKind,
     /// Extra data, bitmaps and values are delayed until after table selection.
     pub encoded_images: &'a [u8],
     pub(crate) post_header: usize,
     pub(crate) v2: bool,
+    mode: PhantomData<M>,
 }
 impl<'a> RowsEvent<'a> {
     pub fn with_layout(kind: RowsKind, post_header: usize, v2: bool) -> Self {
+        Self::for_mode(kind, post_header, v2)
+    }
+    /// Decodes row boundaries using a previously compiled TABLE_MAP layout.
+    pub fn rows(&self, decoder: &RowsDecoder) -> Result<Rows<'a>> {
+        decoder.rows(self)
+    }
+    /// Selects an image policy explicitly for an unclassified wire event.
+    pub fn with_mode<M: ImageMode>(&self, decoder: &RowsDecoder) -> Result<TypedRowsEvent<'a, M>> {
+        TypedRowsEvent::new(*self, decoder)
+    }
+}
+impl<'a, M: BinlogMode> RowsEvent<'a, M> {
+    pub(crate) fn for_mode(kind: RowsKind, post_header: usize, v2: bool) -> Self {
         Self {
             table_id: 0,
             flags: 0,
@@ -41,6 +61,7 @@ impl<'a> RowsEvent<'a> {
             encoded_images: &[],
             post_header,
             v2,
+            mode: PhantomData,
         }
     }
     pub fn images(&self) -> Result<RowImages<'a>> {
@@ -65,28 +86,38 @@ impl<'a> RowsEvent<'a> {
         } else {
             first
         };
-        Ok(RowImages {
+        let images = RowImages {
             extra_data,
             column_count,
             before_columns: first,
             after_columns: second,
             rows: input.remaining(),
-        })
+        };
+        M::validate_images(&images)?;
+        Ok(images)
     }
 
-    /// Decodes row boundaries using a previously compiled TABLE_MAP layout.
-    /// Values borrow the event; the returned iterator does not borrow the decoder.
-    pub fn rows(&self, decoder: &RowsDecoder) -> Result<Rows<'a>> {
-        decoder.rows(self)
-    }
-
-    /// Validates image shape and binds a typed view to this TABLE_MAP layout.
-    /// Row values are validated lazily before each typed row is returned.
-    pub fn with_mode<M: ImageMode>(&self, decoder: &RowsDecoder) -> Result<TypedRowsEvent<'a, M>> {
-        TypedRowsEvent::new(*self, decoder)
+    pub(crate) fn unclassified(&self) -> RowsEvent<'a> {
+        RowsEvent {
+            table_id: self.table_id,
+            flags: self.flags,
+            kind: self.kind,
+            encoded_images: self.encoded_images,
+            post_header: self.post_header,
+            v2: self.v2,
+            mode: PhantomData,
+        }
     }
 }
-impl<'a> Event<'a> for RowsEvent<'a> {
+impl<'a, M: ImageMode> RowsEvent<'a, M> {
+    /// Returns sparse or complete image types selected by the event's policy.
+    pub fn rows(&self, decoder: &RowsDecoder) -> Result<TypedRows<'a, M>> {
+        self.unclassified()
+            .with_mode::<M>(decoder)
+            .map(TypedRowsEvent::rows)
+    }
+}
+impl<'a, M: BinlogMode> Event<'a> for RowsEvent<'a, M> {
     fn dump(&self, writer: &mut dyn Write) -> Result<()> {
         writeln!(writer, "Table ID: {}", self.table_id)?;
         writeln!(writer, "Flags: {}", self.flags)?;
@@ -110,7 +141,7 @@ impl<'a> Event<'a> for RowsEvent<'a> {
         self.table_id = table_id;
         self.flags = flags;
         self.encoded_images = input.remaining();
-        Ok(())
+        M::validate_event(self)
     }
 }
 #[derive(Debug, Clone, Copy)]

@@ -18,7 +18,7 @@ use mysql_canal::{Cdc, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let mut canal = Cdc::new(AppConfig::read(Path::new("cdc.toml"))?)?;
+    let mut canal = Cdc::new(AppConfig::read(Path::new("canal.toml"))?)?;
     canal.add_handle(|event: CommittedTransaction<'_>| {
         for change in event.changes {
             println!("{} {:?} {:?}", event.source_id, change.operation, change.pk);
@@ -29,6 +29,8 @@ fn main() -> Result<()> {
 }
 ```
 
+Canal configuration contains only CDC additions (source plugin/adapter, tables, transaction budget, checkpoints) plus the required replication-owned `[sources.mysql-replication]` child. Standalone files begin with `[[sources]]`. Pikachu embeds this exact `AppConfig` under `[mysql-canal]`, producing `[[mysql-canal.sources]]` and `[mysql-canal.sources.mysql-replication]`; it does not copy canal fields. An embedding application deserializes its parent config and calls `app.resolve_paths(parent_toml_path)` to resolve child state/TLS paths and run canal validation. `AppConfig::read` accepts only standalone canal files.
+
 `Cdc::new` accepts `AppConfig`, loaded from TOML or constructed in code. Use the named `[[sources]]` format in [the configuration example](examples/config/multi-source.toml). Every source has an explicit ID, plugin, credentials environment variable, whitelist and checkpoint path. Connections, historical schemas, table maps, transaction budgets and checkpoints are independent across sources; there is no global ordering. Initial consumption starts at the current committed position without a full snapshot; subsequent runs recover from the persisted historical schema and source identity.
 
 `add_handle` accepts a `TransactionHandler` or closure. Callbacks receive a `CommittedTransaction` borrowing the source ID, checkpoint and ordered `OwnedChange` slice. COMMIT/XID delivers the transaction; rollback discards it. Filtered commits deliver an empty slice. Multiple handlers run in registration order, with whole transactions serialized across sources. Every handler must succeed before checkpoint persistence. Failures stop consumption, and a crash after output but before persistence can cause replay. Clone only data retained beyond the callback. Register at least one handler before `run()` or `run_once()`; slow handlers apply backpressure. `check()` validates configuration and server capabilities; `initialize()` creates initial checkpoints without consuming events.
@@ -37,7 +39,13 @@ Raw binlog events and CDC changes are separate types. `engine::converter::EventC
 
 The live source reads `ReplicationStream::next_view()`; offline replay adapts replication's `BinlogFile::next_frame()`. Both feed canal's `EventParser` and selective decoder. `EventConverter` emits `Change<'_>` before commit and returns `EventAction`; it provides no transaction delivery guarantee on its own. `Processor` retains `OwnedChange` values until COMMIT/XID, and `Cdc` delivers `CommittedTransaction` to handlers before saving the checkpoint. `convert_binlog` accepts a structured event by adapting its frame, not by consuming predecoded raw row values. See the [architecture and event flow](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md).
 
-The MySQL source passes its whitelist to `mysql-replication` for primary-key preflight validation on every connection, including checkpoint recovery, before any initial checkpoint is written or consumption starts. Missing, UNIQUE-only, composite or unsupported keys stop startup. Only selected tables are checked; recovery still decodes using the checkpoint's historical schema. Raw replication callers use `ReplicationStream::connect_with_tables` or `from_connection_with_tables` for the same check.
+`engine::Replay` owns offline replay, including file-name checks, FDE loading, checkpoint event boundaries and committed delivery. `Replay::new(state, budget)` defaults to MINIMAL; `Replay::with_row_image(state, budget, registry, adapter, mode)` selects FULL or custom adapters. Call `.run(path, &sink)` with an explicit `TransactionSink`. Replay never persists a checkpoint or queries MySQL. See [replay.rs](examples/replay.rs):
+
+```sh
+cargo run -p mysql-canal --example replay -- STATE.json /path/to/binlog.000001 full
+```
+
+The MySQL source validates its whitelist's current primary keys within canal, reusing the CDC key decoder's type rules on every connection, including checkpoint recovery, before any initial checkpoint is written or consumption starts. Missing, UNIQUE-only, composite or unsupported keys stop startup. Only selected tables are checked; recovery still decodes using the checkpoint's historical schema. Raw replication callers use `ReplicationStream::connect_with_tables` or `from_connection_with_tables` for an optional raw-library preflight; canal does not depend on those helpers.
 
 CDC output contains only the source, schema/table, operation, exact primary key, optional previous key and changed column names. It supports single-column signed/unsigned integers, exact DECIMAL and supported CHAR/VARCHAR keys. INSERT/UPDATE changed fields follow the after-image bitmap, including NULL and primary-key writes; DELETE has no changed fields. Unsupported keys, missing keys, truncated data and metadata mismatches fail explicitly. NULL in a NOT NULL column also fails, including non-key columns in sparse images, without delivering the transaction or advancing its checkpoint. The built-in source supports ROW + MINIMAL or FULL, selected per source; MINIMAL is the default. Table selection occurs before image parsing; only primary-key values are decoded, while other values are skipped by encoded length. UTF-8 keys and event views stay borrowed during conversion; field indices use shared `Arc<[u16]>`. The transport cannot reduce the columns already present in upstream binlog bytes.
 
@@ -53,9 +61,35 @@ cargo bench -p mysql-canal --bench event_adapter
 
 Default tests cover synthetic protocol, conversion, transactions, checkpoints, multi-source isolation and adapters. The 12 ignored `mysql_live` scenarios include primary-key rejection through check/init and fresh/resumed consumption. Raw protocol preflight/row decoding and online CLI behavior are tested independently in `mysql-replication` and `pikachu`. The shared MySQL matrix runs all three layers serially. Live tests require a dedicated disposable MySQL server and create/delete test databases. Use the repository's `tests/infra/compose.yaml` and cleanup instructions in the project guide; never point these tests at production.
 
+The required replication section also accepts `connect_timeout_secs` (default 10) and `read_timeout_secs` (default 90); both must be nonzero. TLS paths resolve relative to the canal TOML file. Binlog file/position are supplied from the checkpoint at runtime, rather than duplicated in static configuration.
+
+## Fix the policy at construction
+
+`Cdc<Minimal>` and `Cdc<Full>` fix the policy when instantiated through `Cdc::<M>::for_mode(config)`; custom runtimes use `with_runtime_for_mode`. Every source must have a matching `mysql-replication.row_image`, checked before connections or checkpoint initialization. Both libraries share the same marker types, re-exported by canal.
+
+```rust,no_run
+use mysql_canal::{Cdc, CommittedTransaction, Full, Result, config::AppConfig};
+use std::path::Path;
+
+fn main() -> Result<()> {
+    let mut cdc = Cdc::<Full>::for_mode(AppConfig::read(Path::new("full.toml"))?)?;
+    cdc.add_handle(|event: CommittedTransaction<'_>| {
+        for change in event.changes {
+            println!("{} {:?}", event.source_id, change.pk);
+        }
+        Ok(())
+    });
+    cdc.run()
+}
+```
+
+`Decoder::<Minimal>::for_mode(tables)` and `Decoder::<Full>::for_mode(tables)` instantiate distinct policies. Built-in version adapters select the corresponding generic decoder during FDE assembly; event processing no longer matches a stored mode enum. Object-safe source/version/row-decoder plugin boundaries remain supported. CDC output is still normalized `Change` / `CommittedTransaction`, with identical public types across modes.
+
+`Cdc::new` / `with_runtime` keep `Configured` as the default, allowing different modes per source. Runtime selection occurs during decoder construction, not inside row iteration. `Decoder::new` / `with_row_image` remain available; explicit `for_mode` constructors preserve type inference for existing calls. See [listen_typed.rs](examples/listen_typed.rs) for one startup dispatch into either generic path.
+
 ## Row image selection and migration
 
-Set `row_image = "full"` under `[sources.source]` for a FULL source; use `minimal` or omit the field for MINIMAL. Programmatic `SourceConfig` literals in version 2 must include `row_image: config::RowImageMode::Minimal` or `Full`. The parameter verifies the upstream setting without modifying it. NOBLOB is not a CDC mode.
+Set `row_image = "full"` under `[sources.mysql-replication]` for a FULL source; use `minimal` or omit the field for MINIMAL. Every source must include `[sources.mysql-replication]`, using `mysql_replication::config::Config` directly (re-exported as `config::ReplicationConfig`). Move `url_env`, `server_id`, `tls_ca` and `row_image` there; `[sources.source]` retains `plugin` and `adapter`. Rust `Config` literals must include `replication: config::ReplicationConfig::new(url_env, server_id)`; set its `row_image` to `Full` when needed. Missing sections and the old layout are rejected. `config::RowImageMode` re-exports the replication-owned type; its string parser returns `mysql_replication::Error`, converted by `?` to canal errors. The parameter verifies the upstream setting without modifying it. NOBLOB is not a CDC mode.
 
 `Decoder::with_row_image(tables, mode)` and `EventConverter::with_row_image(tables, registry, adapter, mode)` select the policy explicitly. Offline/custom engines use `Processor::with_row_image(state, state_path, budget, registry, adapter, mode)`. Old constructors retain MINIMAL defaults. Custom adapters must implement `validate_server_with_row_image` and `create_decoder_with_row_image` to opt into FULL; the defaults delegate MINIMAL to existing overrides and reject FULL.
 

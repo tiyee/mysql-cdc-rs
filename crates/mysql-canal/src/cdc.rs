@@ -1,7 +1,7 @@
 //! Configuration-driven CDC and committed transaction listeners.
 
 use crate::{
-    Error, OwnedChange, Result,
+    CdcMode, Configured, Error, OwnedChange, Result,
     config::AppConfig,
     engine::{Runtime, checkpoint::State},
     sink::TransactionSink,
@@ -45,7 +45,13 @@ where
 /// There is no default handler. Register at least one before starting, to avoid
 /// advancing checkpoints without a consumer. Use `with_runtime` to register
 /// custom source plugins or version adapters.
-pub struct Cdc {
+///
+/// ```compile_fail
+/// use mysql_canal::{Cdc, Full, Minimal};
+/// fn change_policy(cdc: Cdc<Full>) -> Cdc<Minimal> { cdc }
+/// ```
+pub struct Cdc<M: CdcMode = Configured> {
+    mode: std::marker::PhantomData<M>,
     config: AppConfig,
     runtime: Runtime,
     handlers: Vec<Box<dyn TransactionHandler>>,
@@ -57,8 +63,36 @@ impl Cdc {
     }
 
     pub fn with_runtime(config: AppConfig, runtime: Runtime) -> Result<Self> {
+        Self::build(config, runtime)
+    }
+}
+impl<M: CdcMode + mysql_replication::events::ImageMode> Cdc<M> {
+    /// Fixes the image policy before connections, handlers or checkpoints exist.
+    /// Every source's configured row image must agree with the type parameter.
+    ///
+    /// ```no_run
+    /// use mysql_canal::{Cdc, CommittedTransaction, Full, Result, config::AppConfig};
+    /// use std::path::Path;
+    /// fn main() -> Result<()> {
+    ///     let config = AppConfig::read(Path::new("full.toml"))?;
+    ///     let mut cdc = Cdc::<Full>::for_mode(config)?;
+    ///     cdc.add_handle(|_: CommittedTransaction<'_>| Ok(()));
+    ///     cdc.run()
+    /// }
+    /// ```
+    pub fn for_mode(config: AppConfig) -> Result<Self> {
+        Self::with_runtime_for_mode(config, Runtime::default())
+    }
+    pub fn with_runtime_for_mode(config: AppConfig, runtime: Runtime) -> Result<Self> {
+        Self::build(config, runtime)
+    }
+}
+impl<M: CdcMode> Cdc<M> {
+    fn build(config: AppConfig, runtime: Runtime) -> Result<Self> {
         config.validate()?;
+        M::validate_config(&config)?;
         Ok(Self {
+            mode: std::marker::PhantomData,
             config,
             runtime,
             handlers: Vec::new(),

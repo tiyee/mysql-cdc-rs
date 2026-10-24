@@ -58,3 +58,7 @@ harness = false
 [[test]]
 name = "converter"
 path = "tests/integration/converter.rs"
+
+[[test]]
+name = "replay"
+path = "tests/integration/replay.rs"

@@ -5,11 +5,17 @@ use std::io::Write;
 /// The complete MySQL binlog v4 common header. Unknown codes and flags survive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EventHeader {
+    /// Producer-recorded event time in Unix seconds.
     pub timestamp: u32,
+    /// Raw wire code; named constants live in `crate::event_type`.
     pub event_type: u8,
+    /// Producer's server ID, independent from a consumer's replication ID.
     pub server_id: u32,
+    /// Complete event length, including this header and any trailer/checksum.
     pub event_size: u32,
+    /// Recorded position, normally the next event; not an acknowledged checkpoint.
     pub log_pos: u32,
+    /// Common-header flags, distinct from flags in individual event bodies.
     pub flags: u16,
 }
 impl EventHeader {

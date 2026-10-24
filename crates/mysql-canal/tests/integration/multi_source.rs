@@ -49,11 +49,8 @@ impl Temp {
                 source: SourceConfig {
                     plugin: "fake".into(),
                     adapter: None,
-                    row_image: Default::default(),
-                    url_env: id.into(),
-                    server_id: 100,
-                    tls_ca: None,
                 },
+                replication: mysql_canal::config::ReplicationConfig::new(id, 100),
                 tables: vec![WhitelistTable {
                     schema: "app".into(),
                     table: "users".into(),
@@ -151,20 +148,20 @@ impl SourcePlugin for FakePlugin {
         config: &Config,
         registry: &VersionRegistry,
     ) -> Result<Box<dyn SourceSession>> {
-        let east = config.source.url_env == "east";
+        let east = config.replication.url_env == "east";
         let version = ServerVersion::parse(if east { "5.7.44-log" } else { "9.0.1" })?;
         let adapter = registry.resolve(&version, config.source.adapter.as_deref())?;
         let info = ServerInfo {
             uuid: if self.same_uuid {
                 "same".into()
             } else {
-                config.source.url_env.clone()
+                config.replication.url_env.clone()
             },
             version: version.clone(),
             adapter: adapter.name().into(),
         };
         let mut source_packets = packets(&version.raw, if east { 11 } else { 22 }, !east);
-        if config.source.row_image == mysql_canal::config::RowImageMode::Full {
+        if config.replication.row_image == mysql_canal::config::RowImageMode::Full {
             let mut values = Vec::new();
             for _ in 0..2 {
                 values.push(0);
@@ -346,7 +343,7 @@ fn rejects_checkpoint_identity_changes_and_duplicate_replication_ids() {
         .is_err()
     );
     let mut west = temp.config("west");
-    west.config.source.server_id = 101;
+    west.config.replication.server_id = 101;
     same.check(&AppConfig {
         sources: vec![temp.config("east"), west],
     })
@@ -1068,22 +1065,89 @@ fn replication_handle_failure_or_panic_prevents_peer_callbacks_and_checkpoints()
 fn config_defaults_to_minimal_and_accepts_only_supported_image_modes() {
     use mysql_canal::config::RowImageMode;
     let base = "url_env='DB_URL'\nserver_id=123\n";
-    let config: SourceConfig = toml::from_str(base).unwrap();
+    let config: mysql_canal::config::ReplicationConfig = toml::from_str(base).unwrap();
     assert_eq!(config.row_image, RowImageMode::Minimal);
     for (value, expected) in [
         ("minimal", RowImageMode::Minimal),
         ("full", RowImageMode::Full),
     ] {
-        let config: SourceConfig = toml::from_str(&format!("{base}row_image='{value}'")).unwrap();
+        let config: mysql_canal::config::ReplicationConfig =
+            toml::from_str(&format!("{base}row_image='{value}'")).unwrap();
         assert_eq!(config.row_image, expected);
         assert_eq!(value.parse::<RowImageMode>().unwrap(), expected);
     }
     for value in ["auto", "noblob", "FULL", "", "full "] {
-        assert!(toml::from_str::<SourceConfig>(&format!("{base}row_image='{value}'")).is_err());
+        assert!(
+            toml::from_str::<mysql_canal::config::ReplicationConfig>(&format!(
+                "{base}row_image='{value}'"
+            ))
+            .is_err()
+        );
         assert!(matches!(
             value.parse::<RowImageMode>(),
-            Err(Error::Invalid(_))
+            Err(mysql_replication::Error::Invalid(_))
         ));
+    }
+}
+
+#[test]
+fn canal_requires_replication_config_and_resolves_its_paths_and_modes() {
+    use mysql_canal::config::RowImageMode;
+    use mysql_replication::{config::Config as ReplicationConfig, stream::RowImage};
+
+    let temp = Temp::new();
+    let path = temp.0.join("cdc.toml");
+    let text = include_str!("../../examples/config/multi-source.toml")
+        .replacen("row_image = \"minimal\"", "row_image = \"full\"", 1)
+        .replacen(
+            "# tls_ca = \"/path/to/ca.pem\"",
+            "tls_ca = \"certs/ca.pem\"\nconnect_timeout_secs = 7\nread_timeout_secs = 45",
+            1,
+        );
+    std::fs::write(&path, &text).unwrap();
+    let app = AppConfig::read(&path).unwrap();
+    let east: &ReplicationConfig = &app.sources[0].config.replication;
+    assert_eq!(east.row_image, RowImageMode::Full);
+    let connection = east.connection_config().unwrap();
+    assert_eq!(connection.tls_ca, Some(temp.0.join("certs/ca.pem")));
+    assert_eq!(connection.connect_timeout.as_secs(), 7);
+    assert_eq!(connection.read_timeout.as_secs(), 45);
+    assert_eq!(
+        east.replication_config("binlog.000001", 4)
+            .unwrap()
+            .required_row_image,
+        Some(RowImage::Full)
+    );
+    let west = &app.sources[1].config.replication;
+    assert_eq!(west.row_image, RowImageMode::Minimal);
+    assert_eq!(west.connection_config().unwrap().read_timeout.as_secs(), 90);
+    assert_eq!(
+        west.replication_config("binlog.000001", 4)
+            .unwrap()
+            .required_row_image,
+        Some(RowImage::Minimal)
+    );
+    for bad in [
+        text.replace("[sources.mysql-replication]\n", ""),
+        text.replace("[sources.mysql-replication]", "[sources.replicaton]"),
+        text.replace(
+            "plugin = \"mysql\"",
+            "plugin = \"mysql\"\nrow_image = \"full\"",
+        ),
+    ] {
+        std::fs::write(&path, bad).unwrap();
+        assert!(matches!(AppConfig::read(&path), Err(Error::Toml(_))));
+    }
+    for (field, value) in [("connect_timeout_secs", 7), ("read_timeout_secs", 45)] {
+        std::fs::write(
+            &path,
+            text.replace(&format!("{field} = {value}"), &format!("{field} = 0")),
+        )
+        .unwrap();
+        assert!(
+            matches!(AppConfig::read(&path), Err(Error::Invalid(message))
+            if message == "replication timeouts must be nonzero")
+        );
     }
 }
 
@@ -1156,7 +1220,7 @@ fn concurrent_sources_select_full_and_minimal_independently() {
     use mysql_canal::config::RowImageMode;
     let temp = Temp::new();
     let mut east = temp.config("east");
-    east.config.source.row_image = RowImageMode::Full;
+    east.config.replication.row_image = RowImageMode::Full;
     let west = temp.config("west");
     let east_path = east.config.state_file.clone();
     let west_path = west.config.state_file.clone();
@@ -1189,4 +1253,68 @@ fn concurrent_sources_select_full_and_minimal_independently() {
     );
     assert_eq!(State::read(&east_path).unwrap().position, 240);
     assert_eq!(State::read(&west_path).unwrap().position, 240);
+}
+
+#[test]
+fn typed_cdc_rejects_configuration_conflicts_before_startup() {
+    use mysql_canal::{Cdc, Full, Minimal};
+    let temp = Temp::new();
+    assert!(
+        matches!(Cdc::<Full>::for_mode(AppConfig { sources: vec![temp.config("east")] }),
+        Err(Error::Schema(message)) if message == "source east row_image conflicts with generic full mode")
+    );
+    let mut east = temp.config("east");
+    east.config.replication.row_image = mysql_canal::config::RowImageMode::Full;
+    assert!(
+        matches!(Cdc::<Minimal>::for_mode(AppConfig { sources: vec![east] }),
+        Err(Error::Schema(message)) if message == "source east row_image conflicts with generic minimal mode")
+    );
+    assert!(!temp.0.join("east.json").exists());
+}
+
+#[test]
+fn typed_cdc_delivers_both_modes_with_commit_visibility_and_checkpointing() {
+    use mysql_canal::{Cdc, CommittedTransaction, Operation, PrimaryKey};
+    fn run<M: mysql_canal::CdcMode + mysql_replication::ImageMode>() {
+        let temp = Temp::new();
+        let mut east = temp.config("east");
+        east.config.replication.row_image = M::ROW_IMAGE;
+        let path = east.config.state_file.clone();
+        let rt = runtime(FakePlugin {
+            barrier: None,
+            same_uuid: false,
+            broken: false,
+        });
+        let mut cdc = Cdc::<M>::with_runtime_for_mode(
+            AppConfig {
+                sources: vec![east],
+            },
+            rt,
+        )
+        .unwrap();
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&changes);
+        let before_commit = path.clone();
+        cdc.add_handle(move |event: CommittedTransaction<'_>| {
+            assert_eq!(State::read(&before_commit)?.position, 4);
+            assert_eq!(event.source_id, "east");
+            assert_eq!(event.checkpoint.position, 240);
+            captured.lock().unwrap().extend_from_slice(event.changes);
+            Ok(())
+        });
+        cdc.run_once().unwrap();
+        assert_eq!(State::read(&path).unwrap().position, 240);
+        let changes = changes.lock().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].operation, Operation::Update);
+        assert_eq!(changes[0].pk, PrimaryKey::Signed(11));
+        assert_eq!(changes[0].previous_pk, None);
+        let expected = match M::ROW_IMAGE {
+            mysql_canal::config::RowImageMode::Minimal => vec!["name"],
+            mysql_canal::config::RowImageMode::Full => vec!["id", "name", "age"],
+        };
+        assert_eq!(changes[0].changed_names().collect::<Vec<_>>(), expected);
+    }
+    run::<mysql_canal::Minimal>();
+    run::<mysql_canal::Full>();
 }

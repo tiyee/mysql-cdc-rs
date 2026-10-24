@@ -39,7 +39,133 @@ fn main() -> Result<()> {
 
 结构化解析覆盖 FDE、ROTATE、QUERY、TABLE_MAP、ROWS v1/v2、XID、普通/匿名/Tagged GTID、Previous GTIDs 与 v1 心跳。GTID 可选元数据用 `Option` 区分缺失与零，Tagged GTID serialization v2 使用独立解码器。其他载荷，包括 v2 心跳、XA、压缩事务与未知事件码，明确交付为 `EventData::Raw`，不宣称已解码支持。SQL 和库名字节保持借用，DDL 正常交付为 QUERY。
 
+## 事件公共字段与模式差异
+
+Rust 类型名为 `BinlogEvent<'a, M>`。`Event<'a>` 是不含字段的共用、对象安全 **trait**；`EventData<'a, M>` 是保存在 `BinlogEvent.event` 中的枚举，通过匹配变体访问具体协议事件。`Minimal` 和 `Full` 区分 ROWS 策略及镜像类型，不增减包络字段或控制事件字段。
+
+### 共用包络与公共头
+
+以下是 `BinlogEvent<'a, M>` 的全部公共字段，适用于 `M = Unspecified`、`Minimal` 或 `Full`：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `raw_data` | `&'a [u8]` | 完整原始事件：公共头、body、实际 trailer/checksum，包含 FDE 算法字节；不包含文件 magic 和网络包头 |
+| `header` | `EventHeader` | 下表所示的 binlog v4 公共头，长度为 19 字节 |
+| `event` | `EventData<'a, M>` | 结构化协议 body，其中 ROWS 携带同一个 `M` |
+
+内部 `body` 字段不公开，可通过 `event.frame().body` 访问排除公共头和 framing trailer 的借用 body。`OwnedBinlogEvent<M>` 没有公共字段，使用 `raw_data()` 和 `view()`；`into_owned()` / `view()` 保留 `M` 和原始事件字节，视图借用 owned 缓冲区。
+
+| `EventHeader` 公共字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `timestamp` | `u32` | 生产者记录的事件时间，单位为 Unix 秒 |
+| `event_type` | `u8` | wire 事件码，使用 `event_type` 的具名常量 |
+| `server_id` | `u32` | 生产者记录的 server ID |
+| `event_size` | `u32` | 完整事件长度，包含公共头及存在的 trailer/checksum |
+| `log_pos` | `u32` | 头中记录的位点，通常是下一条事件的位置；不是已确认的 CDC 检查点，某些控制事件可能为零 |
+| `flags` | `u16` | 公共头标志，保留未知位 |
+
+`Event<'a>` 仅提供 `decode(&mut self, data: &'a [u8]) -> Result<()>` 和 `dump(&self, writer: &mut dyn Write) -> Result<()>`，并要求实现 `Debug`。`EventHeader::decode` 接收精确的 19 字节，body 解码器只接收 body。trait 本身没有 `header`、`pk`、`before` 或 `after` 字段；`dump` 用于诊断输出。
+
+### 两种模式共用的协议事件字段
+
+`EventData` 标记为 non-exhaustive，外部匹配须保留兜底分支。各变体具体 body 的公共字段如下，仅 `Rows` 的载荷携带 `M`：
+
+| 变体 / 载荷类型 | MINIMAL 与 FULL 共用的公共字段 |
+| --- | --- |
+| `FormatDescription` / `FormatDescriptionEvent<'a>` | `binlog_version: u16`、`server_version: &'a str`、`create_timestamp: u32`、`header_length: u8`、`post_header_lengths: &'a [u8]`、`checksum_algorithm: ChecksumAlgorithm` |
+| `Rotate` / `RotateEvent<'a>` | `position: u64`、`next_file: &'a [u8]` |
+| `Query` / `QueryEvent<'a>` | `thread_id: u32`、`execution_time: u32`、`error_code: u16`；`status_vars`、`schema`、`query` 均为 `&'a [u8]` |
+| `TableMap` / `TableMapEvent<'a>` | `table_id: u64`、`flags: u16`；`schema`、`table`、`column_data` 均为 `&'a [u8]` |
+| `Rows` / `RowsEvent<'a, M>` | `table_id: u64`、`flags: u16`、`kind: RowsKind`、`encoded_images: &'a [u8]` |
+| `Xid` / `XidEvent` | `xid: u64` |
+| `Gtid` 和 `AnonymousGtid` / `GtidEvent` | `flags: u8`、`sid: [u8; 16]`、`gno: i64`，以及下述可选元数据 |
+| `TaggedGtid` / `TaggedGtidEvent<'a>` | `gtid: GtidEvent`、`tag: &'a str`、`unknown_fields: &'a [u8]` |
+| `PreviousGtids` / `PreviousGtidsEvent<'a>` | `sid_count: u64`、`encoded_sids: &'a [u8]` |
+| `Heartbeat` / `HeartbeatEvent<'a>` | `log_file: &'a [u8]` |
+| `Raw` / `RawEvent<'a>` | `data: &'a [u8]`，保留未知或有意不解码的 body |
+
+`GtidEvent` 的可选字段包括：`last_committed` / `sequence_number`（`Option<i64>`）；`immediate_commit_timestamp` / `original_commit_timestamp` / `transaction_length` / `commit_group_ticket`（`Option<u64>`）；`immediate_server_version` / `original_server_version`（`Option<u32>`）。它们是否存在取决于生产者元数据和解析选项，与行镜像模式无关；`ParserConfig` 禁用结构化 GTID 解码时，也可将其保留为 `Raw`。
+
+`TableMapEvent::columns()` 返回 `TableColumns { count: usize, types, metadata, nullable, optional_metadata }`，后四项均为借用字节切片。`PreviousGtidsEvent::sids()` 返回 `SidIntervals { sid, intervals }`，两项也均为借用字节切片。这些访问接口在两种模式下相同。`RowsEvent.flags` 是 ROWS body 标志，与 `BinlogEvent.header.flags` 相互独立。
+
+### 随模式变化的字段类型与访问接口
+
+上述 `RowsEvent` 的四个公共字段保持相同名称和 wire 含义，差异体现在镜像和行解码结果中：
+
+| API / 属性 | `Minimal` | `Full` |
+| --- | --- | --- |
+| 包络 / body 类型 | `BinlogEvent<'a, Minimal>` / `EventData<'a, Minimal>` | `BinlogEvent<'a, Full>` / `EventData<'a, Full>` |
+| `RowsEvent<M>::rows(&RowsDecoder)` | `Result<TypedRows<'a, Minimal>>` | `Result<TypedRows<'a, Full>>` |
+| 迭代器元素 | `Result<TypedRow<'a, Minimal>>` | `Result<TypedRow<'a, Full>>` |
+| `TypedRow.before` 公共字段 | `Option<SparseImage<'a>>` | `Option<CompleteImage<'a>>` |
+| `TypedRow.after` 公共字段 | `Option<SparseImage<'a>>` | `Option<CompleteImage<'a>>` |
+| 镜像结构 | 只保留存在列；原始复制同样接受完整位图 | 每个存在的镜像必须包含全部列；拒绝稀疏输入，不补齐缺失值 |
+| `image.field(index)` | `Result<Option<RowValue<'a>>>`；未记录或越界的列返回 `None` | `Result<RowValue<'a>>`；范围内列必定存在，越界访问报错 |
+| 列索引 | `image.column_indices()` 返回实际存在列的从零开始的绝对索引 | 全部表列索引均存在，需要时使用 `image.as_ref().column_indices()` |
+
+`TypedRowsEvent<M>` 没有公共字段，使用 `table_id()`、`flags()`、`kind()`、`column_count()` 和 `rows()` 访问。
+
+两种镜像都提供 `column_count()`（表的总列数）和 `fields()`（实际存在字段的迭代器），内部缓冲区与执行计划不公开。两种模式的 `RowField` 公共字段都为 `column_index: u16` 和 `value: RowValue<'a>`；列名、SQL 符号和字符集解释不是某个模式额外提供的行字段。
+
+`RowsEvent::images()` 返回共用的编码视图 `RowImages { extra_data: &'a [u8], column_count: usize, before_columns: &'a [u8], after_columns: &'a [u8], rows: &'a [u8] }`。WRITE 的 `before_columns` 指 **wire 中第一份位图**，实际描述 after 镜像；DELETE 的两个位图字段都引用 before 位图，UPDATE 才有独立的前后位图。这些字段名不会使 INSERT 多出 before 镜像。Full 解析在返回普通 ROWS 包络前检查完整位图；语句结束哨兵没有镜像。字段值在行迭代时校验。
+
+默认的 `Unspecified` 保留未分类的原始接口：`RowsEvent::rows` 返回 `Rows<'a>`，包含 `Row { before: Option<RowImage<'a>>, after: Option<RowImage<'a>> }`，不据此确定生产者使用 MINIMAL 还是 FULL。`next_frame()` / `next_view()` 返回的原始视图同样不携带模式保证。
+
+| 操作（`RowsKind`） | 两种模式的 `before` | 两种模式的 `after` |
+| --- | --- | --- |
+| INSERT（`Write`） | `None` | `Some(image)` |
+| UPDATE（`Update`） | `Some(image)` | `Some(image)` |
+| DELETE（`Delete`） | `Some(image)` | `None` |
+
+须区分三种情况：`row.after` 为 `None` 表示该操作没有 after 镜像；`SparseImage::field(i)?` 返回 `None` 表示列未记录或越界；`Some(RowValue::Null)` 表示实际存在的列值为 SQL NULL。完整镜像中，实际存在的 SQL NULL 直接表示为 `RowValue::Null`。
+
+```rust,no_run
+use mysql_replication::{Full, Minimal, Result, events::{RowValue, TypedRow}};
+
+fn inspect_minimal(row: TypedRow<'_, Minimal>) -> Result<()> {
+    if let Some(after) = row.after {
+        match after.field(0)? {
+            None => println!("column 0 is absent"),
+            Some(RowValue::Null) => println!("column 0 is SQL NULL"),
+            Some(value) => println!("column 0: {value:?}"),
+        }
+    }
+    Ok(())
+}
+
+fn inspect_full(row: TypedRow<'_, Full>) -> Result<()> {
+    if let Some(after) = row.after {
+        let value: RowValue<'_> = after.field(0)?;
+        println!("column 0: {value:?}");
+    }
+    Ok(())
+}
+```
+
+这些类型属于原始复制记录。Canal 的 `Change` / `OwnedChange` 则包含 `table`、`operation`、`pk`、`previous_pk`、`changed`，`CommittedTransaction` 包含 `source_id`、`checkpoint`、`changes`；这些公共字段在两种模式下保持一致。FULL 改变 after 镜像在 `changed` 中包含的列索引，不会使 CDC 输出增加完整行值。Canal 对选中单列主键表还要求 MINIMAL before 镜像仅包含主键，而原始 `Minimal` 无需主键，也接受稀疏或完整镜像。
+
 ## 配置与按需解析
+
+`config::Config` 定义可复用的连接与订阅设置，支持 `config::RowImageMode::{Minimal, Full}`，默认 MINIMAL。该类型校验上游模式，不修改 MySQL，并构造已有的底层连接/流配置。Canal 的必填 `[sources.mysql-replication]` 直接包含该类型。`connect_timeout_secs` 默认 10 秒，`read_timeout_secs` 默认 90 秒，均拒绝零值；`tls_ca` 可选，相对路径由嵌入应用解析。binlog 文件与位点由消费方在运行时提供。
+
+```rust,no_run
+use mysql_replication::{Result, config::{Config, RowImageMode}, stream::ReplicationStream};
+
+fn main() -> Result<()> {
+    let mut settings = Config::new("MYSQL_URL", 123);
+    settings.row_image = RowImageMode::Full;
+    let mut stream = ReplicationStream::connect(
+        &settings.connection_config()?,
+        settings.replication_config("binlog.000001", 4)?,
+    )?;
+    while let Some(event) = stream.next_event()? {
+        println!("{}", event.header.log_pos);
+    }
+    Ok(())
+}
+```
+
+需要显式选择解析方式或可选表预检时，仍可直接使用底层 API：
 
 ```rust,no_run
 use mysql_replication::{Result, stream::{ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage}, parser::ParserConfig};
@@ -62,7 +188,7 @@ fn main() -> Result<()> {
 
 连接配置支持凭据环境变量、TLS CA 和超时；复制配置支持 server ID、file/position、阻塞模式、上游行镜像要求及解析选项。行镜像要求只校验，不修改服务器全局设置。MySQL 发送已经存在的 binlog 字节，复制协议不支持按列裁剪网络传输。
 
-`ReplicationStream::connect_with_tables` 和 `from_connection_with_tables` 在发送 binlog 请求前，通过 INFORMATION_SCHEMA 检查调用方指定的表。每张表必须有单列 PRIMARY KEY，类型为有符号/无符号 TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT、精确 DECIMAL，或使用 utf8、utf8mb3、utf8mb4、ascii、latin1 的 CHAR/VARCHAR。表或主键缺失、联合主键、只有 UNIQUE 索引、FLOAT/DOUBLE、二进制/日期主键和不支持的字符集均报错，包含库表及可获取的列名；空表列表也报错。该列表仅控制检测，不过滤事件。原有 `connect` 和 `from_connection` 保留不做此检测的原始复制能力。可通过 `primary_key::validate_primary_keys(&mut conn, tables)` 单独检测而不启动复制。`mysql-canal` 的 MySQL 来源自动调用该检测，包括从检查点恢复时。
+`ReplicationStream::connect_with_tables` 和 `from_connection_with_tables` 在发送 binlog 请求前，通过 INFORMATION_SCHEMA 检查调用方指定的表。每张表必须有单列 PRIMARY KEY，类型为有符号/无符号 TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT、精确 DECIMAL，或使用 utf8、utf8mb3、utf8mb4、ascii、latin1 的 CHAR/VARCHAR。表或主键缺失、联合主键、只有 UNIQUE 索引、FLOAT/DOUBLE、二进制/日期主键和不支持的字符集均报错，包含库表及可获取的列名；空表列表也报错。该列表仅控制检测，不过滤事件。原有 `connect` 和 `from_connection` 保留不做此检测的原始复制能力。可通过 `primary_key::validate_primary_keys(&mut conn, tables)` 单独检测而不启动复制。这些可选公共辅助 API 继续保留；`mysql-canal` 自行负责 CDC 启动可用性检查，不再依赖它们。原始事件解析和行解码不要求主键。
 
 - `next_event()` 返回具体协议事件和完整原始字节。
 - `next_frame()` 校验长度/checksum，保留原始字节，事件体留给自定义适配器。
@@ -111,6 +237,31 @@ fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
 ```sh
 cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
 ```
+
+## 实例化时固定模式
+
+`BinlogParser<M>`、`BinlogFile<R, M>`、`ReplicationStream<M>`、`BinlogEvent<M>`、`EventData<M>`、`RowsEvent<M>` 和 `OwnedBinlogEvent<M>` 携带同一个模式参数。可使用 `BinlogParser::<Full>::for_mode(config)` 或 `BinlogFile::<_, Full>::for_mode(reader, config)`；`BinlogFile::new(reader)?.with_mode::<Full>()` 同样保留帧与解析状态。将 `Full` 换成 `Minimal` 即使用稀疏镜像。公共 `Event` trait 和控制事件结构共用，ROWS 的类型随模式区分。
+
+```rust,no_run
+use mysql_replication::{Full, Result, file::BinlogFile, parser::ParserConfig};
+use std::{fs::File, io::BufReader};
+
+fn main() -> Result<()> {
+    let mut reader = BinlogFile::<_, Full>::for_mode(
+        BufReader::new(File::open("binlog.000001")?),
+        ParserConfig::default(),
+    )?;
+    while let Some(event) = reader.next_event()? {
+        let owned = event.into_owned()?;
+        let _view: mysql_replication::BinlogEvent<'_, Full> = owned.view()?;
+    }
+    Ok(())
+}
+```
+
+`ReplicationStream::<Full>::for_mode(connection, config)` 在连接前校验配置与类型一致，并要求上游记录 FULL；`next_event()` 返回 `BinlogEvent<Full>`。FULL 解析器即使采用延迟原始解析，也在返回 ROWS 包络前校验完整位图；字段值仍保持借用，在行迭代时校验。语句结束哨兵没有镜像。`RowsEvent<M>::rows(&RowsDecoder)` 返回 `TypedRows<M>`，包含对应的稀疏/完整镜像类型。`into_owned()` / `view()` 保留模式、原始字节和 checksum。
+
+已有不带类型参数的构造入口使用 `Unspecified`，继续按需延迟解析。类型化读取器的 `next_frame()` 和 `next_view()` 仍返回未分类原始视图，需要模式保证时使用 `next_event()`。运行时配置在启动入口分派一次泛型分支，数据和操作校验仍须执行。
 
 ## 通过泛型选择镜像类型
 

@@ -96,9 +96,9 @@ impl Processor {
     }
     /// Converts a protocol event before transaction delivery; this does not expose
     /// uncommitted rows to the transaction sink.
-    pub fn process_binlog(
+    pub fn process_binlog<M: mysql_replication::events::BinlogMode>(
         &mut self,
-        event: &mysql_replication::BinlogEvent<'_>,
+        event: &mysql_replication::BinlogEvent<'_, M>,
         sink: &dyn crate::sink::TransactionSink,
     ) -> Result<()> {
         self.process_to(event.frame().into(), sink)

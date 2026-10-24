@@ -2,7 +2,12 @@
 use super::{
     ColumnDefinition, RowFields, RowImage, RowValue, Rows, RowsDecoder, RowsEvent, RowsKind,
 };
-use crate::{Error, Result, error::invalid, events::TableMapEvent};
+use crate::{
+    Error, Result,
+    config::RowImageMode,
+    error::invalid,
+    events::{BinlogMode, TableMapEvent},
+};
 use std::{fmt::Debug, iter::FusedIterator, marker::PhantomData};
 
 mod sealed {
@@ -14,10 +19,13 @@ mod sealed {
 /// This trait is sealed so that a typed FULL event cannot bypass completeness
 /// validation. Modes describe accepted shapes, not a producer setting inferred
 /// from the bytes. MINIMAL may contain all columns and does not require a key.
-pub trait ImageMode: sealed::Sealed + Debug + Clone {
+pub trait ImageMode: sealed::Sealed + BinlogMode + Send + Sync + 'static {
     type Image<'a>: TryFrom<RowImage<'a>, Error = Error> + AsRef<RowImage<'a>> + Debug + Clone;
     #[doc(hidden)]
     const REQUIRE_COMPLETE: bool;
+    const ROW_IMAGE: RowImageMode;
+    #[doc(hidden)]
+    fn validate_rows(rows: &Rows<'_>) -> Result<()>;
 }
 
 /// Sparse images retain only the columns actually present in the binlog.
@@ -27,6 +35,10 @@ impl sealed::Sealed for Minimal {}
 impl ImageMode for Minimal {
     type Image<'a> = SparseImage<'a>;
     const REQUIRE_COMPLETE: bool = false;
+    const ROW_IMAGE: RowImageMode = RowImageMode::Minimal;
+    fn validate_rows(_: &Rows<'_>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Every column must be present in every existing image.
@@ -36,6 +48,10 @@ impl sealed::Sealed for Full {}
 impl ImageMode for Full {
     type Image<'a> = CompleteImage<'a>;
     const REQUIRE_COMPLETE: bool = true;
+    const ROW_IMAGE: RowImageMode = RowImageMode::Full;
+    fn validate_rows(rows: &Rows<'_>) -> Result<()> {
+        rows.require_complete()
+    }
 }
 
 /// A borrowed sparse image. A missing field is distinct from SQL NULL.
@@ -147,7 +163,11 @@ fn field<'a>(image: &RowImage<'a>, index: usize) -> Result<Option<RowValue<'a>>>
 /// ```
 #[derive(Debug, Clone)]
 pub struct TypedRow<'a, M: ImageMode> {
+    /// Before image for UPDATE/DELETE; `None` for INSERT. The image is sparse
+    /// under `Minimal` and complete under `Full`; SQL NULL is a field value.
     pub before: Option<M::Image<'a>>,
+    /// After image for INSERT/UPDATE; `None` for DELETE, with the same mode's
+    /// image type as `before`.
     pub after: Option<M::Image<'a>>,
 }
 
@@ -165,9 +185,7 @@ pub struct TypedRowsEvent<'a, M: ImageMode> {
 impl<'a, M: ImageMode> TypedRowsEvent<'a, M> {
     pub(super) fn new(event: RowsEvent<'a>, decoder: &RowsDecoder) -> Result<Self> {
         let rows = decoder.rows(&event)?;
-        if M::REQUIRE_COMPLETE {
-            rows.require_complete()?;
-        }
+        M::validate_rows(&rows)?;
         Ok(Self {
             event,
             rows,
