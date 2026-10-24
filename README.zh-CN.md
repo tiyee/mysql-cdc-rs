@@ -20,7 +20,7 @@ mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 | [pikachu](crates/pikachu/README.zh-CN.md) | `pikachu-cdc` | 基于 Canal 的 CLI 产品，默认输出 JSON Lines |
 | [mysql-cdc-rs](crates/mysql-cdc/README.zh-CN.md) | Rust 统一入口 | 统一库入口，重导出两个底层库 |
 
-四个包当前清单版本均为 **2.0.2**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
+四个包当前清单版本均为 **2.0.5**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
 
 ## CLI 使用示例
 
@@ -121,7 +121,7 @@ MINIMAL 模式下，这条变更通知表示“哪条记录被修改、日志记
 
 ```toml
 [dependencies]
-mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
+mysql-cdc-rs = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run

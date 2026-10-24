@@ -1,6 +1,6 @@
 [package]
 name = "mysql-cdc-rs"
-version = "2.0.2"
+version = "2.0.5"
 edition = "2024"
 rust-version = "1.89"
 description = "Unified MySQL CDC and replication API over mysql-canal and mysql-replication"
@@ -15,8 +15,8 @@ include = ["/src/**", "/examples/**", "/README.md", "/README.zh-CN.md", "/LICENS
 autoexamples = false
 
 [dependencies]
-mysql-canal = { path = "../mysql-canal", version = "=2.0.2" }
-mysql-replication = { path = "../mysql-replication", version = "=2.0.2" }
+mysql-canal = { path = "../mysql-canal", version = "=2.0.5" }
+mysql-replication = { path = "../mysql-replication", version = "=2.0.5" }
 
 [[example]]
 name = "canal_listen"

@@ -10,7 +10,7 @@ mysql-cdc 的中间层，基于 `mysql-replication` 将 binlog 转为通用 CDC 
 
 ```toml
 [dependencies]
-mysql-canal = { path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
+mysql-canal = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
 ```
 
 ```rust,no_run

@@ -20,7 +20,7 @@ mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 | [pikachu](crates/pikachu/README.md) | `pikachu-cdc` | CLI product built on canal, with JSON Lines output |
 | [mysql-cdc-rs](crates/mysql-cdc/README.md) | Unified Rust library | Unified library entry point re-exporting both libraries |
 
-All four package manifests specify **2.0.2** and require Rust **1.89+**. Built-in adapters cover Oracle MySQL 5.7, 8.0–8.4, 9.0 and 9.7. See the [testing guide](docs/testing.md) for real-server verification coverage.
+All four package manifests specify **2.0.5** and require Rust **1.89+**. Built-in adapters cover Oracle MySQL 5.7, 8.0–8.4, 9.0 and 9.7. See the [testing guide](docs/testing.md) for real-server verification coverage.
 
 ## CLI example
 
@@ -121,7 +121,7 @@ To integrate from local source, use the dependency below; replace `/path/to/mysq
 
 ```toml
 [dependencies]
-mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
+mysql-cdc-rs = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run

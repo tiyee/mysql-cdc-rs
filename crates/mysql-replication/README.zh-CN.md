@@ -10,7 +10,7 @@ mysql-cdc 的底层 Rust 库，负责同步监听 MySQL binlog、解析协议并
 
 ```toml
 [dependencies]
-mysql-replication = { path = "/path/to/mysql-cdc-rs/crates/mysql-replication" }
+mysql-replication = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-replication" }
 ```
 
 ```rust,no_run

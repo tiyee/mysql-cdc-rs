@@ -10,7 +10,7 @@
 
 ```toml
 [dependencies]
-mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
+mysql-cdc-rs = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 Rust 导入路径为 `mysql_cdc_rs`，包根路径仅重导出 `canal` 和 `replication`。`canal::Canal` 管理消费生命周期，`canal::config::AppConfig` 定义配置，`canal::Error` / `canal::Result` 处理错误。原始读取器、复制流及其配置和错误归属 `replication`。聚合层没有独立的消费实例、配置或错误类型。

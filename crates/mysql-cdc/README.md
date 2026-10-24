@@ -10,7 +10,7 @@ To integrate from local source, use the dependency below; replace `/path/to/mysq
 
 ```toml
 [dependencies]
-mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
+mysql-cdc-rs = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 The Rust import path is `mysql_cdc_rs`. The crate root only re-exports `canal` and `replication`. Use `canal::Canal` for the consumer lifecycle, `canal::config::AppConfig` for its configuration and `canal::Error` / `canal::Result` for its errors. Raw readers, streams, configuration and errors belong to `replication`. The aggregate has no consumer instance, configuration or error type of its own.

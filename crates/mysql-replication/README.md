@@ -10,7 +10,7 @@ To integrate from local source, use the dependency below; replace `/path/to/mysq
 
 ```toml
 [dependencies]
-mysql-replication = { path = "/path/to/mysql-cdc-rs/crates/mysql-replication" }
+mysql-replication = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-replication" }
 ```
 
 ```rust,no_run

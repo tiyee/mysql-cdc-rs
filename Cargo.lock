@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "mysql-canal"
-version = "2.0.2"
+version = "2.0.5"
 dependencies = [
  "crc32fast",
  "encoding_rs",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "mysql-cdc-rs"
-version = "2.0.2"
+version = "2.0.5"
 dependencies = [
  "mysql-canal",
  "mysql-replication",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "mysql-replication"
-version = "2.0.2"
+version = "2.0.5"
 dependencies = [
  "crc32fast",
  "mysql",
@@ -686,7 +686,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pikachu"
-version = "2.0.2"
+version = "2.0.5"
 dependencies = [
  "crc32fast",
  "mysql",
