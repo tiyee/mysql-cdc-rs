@@ -46,7 +46,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 消费错误写入 stderr，并返回非零退出码；变更记录使用 stdout。默认处理器在保存检查点前 flush stdout，但这不代表下游持久化确认，消费方须容忍重放。任何非 BEGIN/COMMIT/ROLLBACK 的 QUERY 都以 `Error::Statement` 停止 CDC，DDL 不会自动刷新 schema 并继续。
 
-2.0.0 在 crates.io 可用后，可使用 `cargo install pikachu --version 2.0.0 --locked` 安装，安装后的命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
+项目尚未发布，目前从源码构建，命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
 
 ## 行镜像模式
 
@@ -57,7 +57,7 @@ pikachu-cdc run cdc.toml --once --row-image east=full --row-image west=minimal
 pikachu-cdc replay east-state.json /path/to/binlog.000001 --row-image full
 ```
 
-回放默认 MINIMAL，不修改 v1 检查点。FULL 的 INSERT/UPDATE 在 `changed` 中列出 after image 的全部列，包括值未变化的列，不输出完整行值。模式参数检查上游设置与实际镜像结构，不修改 MySQL；写入会话和历史日志须符合所选策略，切换前须消费完旧模式事务并协调配置。未知来源、不支持的模式及重复覆盖在连接前报错。
+回放默认 MINIMAL，不修改检查点。FULL 的 INSERT/UPDATE 在 `changed` 中列出 after image 的全部列，包括值未变化的列，不输出完整行值。模式参数检查上游设置与实际镜像结构，不修改 MySQL；写入会话和历史日志须符合所选策略，切换前须消费完旧模式事务并协调配置。未知来源、不支持的模式及重复覆盖在连接前报错。
 
 ## 参考
 

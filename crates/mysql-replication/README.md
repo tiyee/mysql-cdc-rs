@@ -6,9 +6,11 @@ The bottom library in mysql-cdc: synchronous MySQL binlog subscription, protocol
 
 ## Read a local binlog
 
+The project is not yet released. The dependency below uses local source; replace `/path/to/mysql-cdc-rs` with your checkout path.
+
 ```toml
 [dependencies]
-mysql-replication = "2.0.0"
+mysql-replication = { path = "/path/to/mysql-cdc-rs/crates/mysql-replication" }
 ```
 
 ```rust,no_run
@@ -86,6 +88,7 @@ Run examples from the workspace root. See the [event reference](https://github.c
 
 ## Reference
 
+- [Rust fields and API reference](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/event-api.md)
 - [Connection settings, parser options and preflight](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/configuration.md)
 - [Layer boundaries and event flow](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md)
 - [Development and extension guide](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/development.md)

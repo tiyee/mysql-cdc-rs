@@ -6,9 +6,11 @@ mysql-cdc 的底层 Rust 库，负责同步监听 MySQL binlog、解析协议并
 
 ## 读取本地 binlog
 
+项目尚未发布。以下依赖使用本地源码，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
+
 ```toml
 [dependencies]
-mysql-replication = "2.0.0"
+mysql-replication = { path = "/path/to/mysql-cdc-rs/crates/mysql-replication" }
 ```
 
 ```rust,no_run
@@ -86,6 +88,7 @@ cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.00
 
 ## 参考
 
+- [Rust 字段与接口参考](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/event-api.zh-CN.md)
 - [连接配置、解析选项与表预检](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/configuration.zh-CN.md)
 - [分层职责与事件流](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)
 - [开发与扩展指南](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/development.zh-CN.md)

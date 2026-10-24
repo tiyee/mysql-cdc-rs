@@ -6,9 +6,11 @@ One dependency for MySQL CDC and replication. This facade re-exports `mysql-cana
 
 The processing layers are `pikachu → mysql-canal → mysql-replication`; this facade provides access to the two libraries without adding a processing stage. Use `replication` to subscribe to binlogs, parse protocol events and optionally inspect sparse raw row images with `events::RowsDecoder`. Use `Cdc` for whitelist-based conversion, committed transaction handlers and checkpoint recovery. See the [architecture guide](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md) for the event flow and boundaries.
 
+The project is not yet released. The dependency below uses local source; replace `/path/to/mysql-cdc-rs` with your checkout path.
+
 ```toml
 [dependencies]
-mysql-cdc-rs = "2.0.0"
+mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 The Rust import path is `mysql_cdc_rs`. CDC types and modules are available directly at the crate root and through `canal`; raw binlog events and replication transport are available through `replication`. Root `Error` and `Result` are the CDC types; raw protocol operations use `replication::Error` and `replication::Result`.

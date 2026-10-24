@@ -2,13 +2,23 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Start with the [system README](../README.md) for an overview and runnable examples, then choose a reference below. Package READMEs introduce their own APIs and examples; field contracts and contributor workflows live here.
+## Use the system
 
-| Guide | Contents |
+Start with the [system overview and examples](../README.md). Understand the notifications, then connect your database.
+
+| I want to understand | Read |
 | --- | --- |
-| [Configuration and operation](configuration.md) | Configuration layers, MySQL setup, mode switching, recovery and offline replay |
-| [Event reference](events.md) | BinlogEvent, Event trait, EventData, row images, canal events and JSON output |
-| [Architecture and event flow](architecture.md) | Layer responsibilities, decoding paths, transactions and source isolation |
-| [Development](development.md) | Source layout, performance implementation, version adapters and plugins |
-| [Testing](testing.md) | Local checks, synthetic tests, dedicated MySQL tests and coverage matrix |
-| [Releases](releasing.md) (Chinese) | CI, versioning, package verification, OIDC and release result checks |
+| What a data change produces and how MINIMAL/FULL differ | [Understanding events](events.md) |
+| What the three layers do and why delivery waits for commit | [How the system works](architecture.md) |
+| How to connect MySQL, select tables, consume and recover | [Configuration and operation](configuration.md) |
+
+## Develop and maintain
+
+Consult these references when integrating Rust libraries or changing the implementation.
+
+| Reference | Contents |
+| --- | --- |
+| [Rust event API](event-api.md) | Complete fields, types, generics, borrowing lifetimes and low-level connections |
+| [Development](development.md) | Source layout, implementation flow, performance and plugins |
+| [Testing](testing.md) | Local checks, dedicated MySQL tests and coverage |
+| [Releases](releasing.md) (Chinese) | Initial release, CI, packaging and OIDC |

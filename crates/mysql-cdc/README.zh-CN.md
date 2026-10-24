@@ -6,9 +6,11 @@
 
 处理分层为 `pikachu → mysql-canal → mysql-replication`，本聚合包提供两个库的入口，不增加处理阶段。通过 `replication` 订阅 binlog、解析协议事件，也可用 `events::RowsDecoder` 按需检查原始稀疏行镜像；通过 `Cdc` 使用白名单转换、已提交事务回调和检查点恢复。事件流与边界见[架构说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)。
 
+项目尚未发布。以下依赖使用本地源码，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
+
 ```toml
 [dependencies]
-mysql-cdc-rs = "2.0.0"
+mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 Rust 导入路径为 `mysql_cdc_rs`。CDC 类型和模块可直接从包根路径导入，也可通过 `canal` 访问；原始 binlog 事件和复制传输通过 `replication` 访问。根路径的 `Error`、`Result` 属于 CDC 层；原始协议操作使用 `replication::Error`、`replication::Result`。

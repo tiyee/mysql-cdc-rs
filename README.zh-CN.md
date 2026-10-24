@@ -13,14 +13,14 @@ pikachu (pikachu-cdc) ──> mysql-canal ──> mysql-replication
 mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 ```
 
-| 包 | 入口 | 职责 |
+| 组件 | 使用方式 | 职责 |
 | --- | --- | --- |
-| [mysql-replication](crates/mysql-replication/README.zh-CN.md) | `mysql_replication` | 监听、解析 binlog，生成原始事件 |
-| [mysql-canal](crates/mysql-canal/README.zh-CN.md) | `mysql_canal` | 将 binlog 转为通用 CDC 事件，管理事务与检查点 |
+| [mysql-replication](crates/mysql-replication/README.zh-CN.md) | Rust 库 | 监听、解析 binlog，生成原始事件 |
+| [mysql-canal](crates/mysql-canal/README.zh-CN.md) | Rust 库 | 将 binlog 转为通用 CDC 事件，管理事务与检查点 |
 | [pikachu](crates/pikachu/README.zh-CN.md) | `pikachu-cdc` | 基于 Canal 的 CLI 产品，默认输出 JSON Lines |
-| [mysql-cdc-rs](crates/mysql-cdc/README.zh-CN.md) | `mysql_cdc_rs` | 统一库入口，重导出两个底层库 |
+| [mysql-cdc-rs](crates/mysql-cdc/README.zh-CN.md) | Rust 统一入口 | 统一库入口，重导出两个底层库 |
 
-四个包当前版本均为 **2.0.0**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
+四个包当前清单版本均为 **2.0.0**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
 
 ## CLI 使用示例
 
@@ -65,19 +65,42 @@ Pikachu 必须包含 `mysql-canal`，每个 Canal 来源必须包含 `mysql-repl
 | `pikachu-cdc run cdc.toml --once` | 消费当前可用事件后退出 |
 | `pikachu-cdc replay local-state.json /path/to/binlog.000001` | 按历史 schema 回放单个文件，不修改 state |
 
-输出示例：
+## 一次更新会得到什么
 
-```json
-{"source":"local","schema":"app","table":"users","operation":"update","pk":{"type":"unsigned","value":42},"changed":["name","age"]}
+例如来源 `local` 的 `app.users` 表使用无符号整数主键，应用修改主键 42 的记录并提交：
+
+```sql
+UPDATE app.users SET name = 'Bob', age = 21 WHERE id = 42;
 ```
 
-`changed` 表示 after image 中记录的字段，FULL 下也包含值未改变的字段。字段、主键类型及 before/after 的完整说明见[事件参考](docs/events.zh-CN.md)。
+MINIMAL 模式下，这条变更通知表示“哪条记录被修改、日志记录了哪些字段”：
+
+```json
+{
+  "source": "local",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "name",
+    "age"
+  ]
+}
+```
+
+通知中的 `pk` 是用来定位记录的主键，`changed` 是日志记录的字段名。它不会输出 Bob、21 等非主键值。FULL 下，`changed` 还会包含值未改变但被完整记录的字段。完整对比见[事件说明](docs/events.zh-CN.md)。
 
 ## 库使用示例
 
+项目尚未发布。以下依赖使用本地源码，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
+
 ```toml
 [dependencies]
-mysql-cdc-rs = "2.0.0"
+mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run
@@ -99,7 +122,7 @@ fn main() -> Result<()> {
 
 `canal.toml` 使用[独立 Canal 配置](crates/mysql-canal/examples/config/multi-source.toml)，从 `[[sources]]` 开始；不要直接传入 Pikachu 的产品配置。根路径及 `canal` 导出 CDC API，`replication` 导出原始事件 API。库必须注册处理器，才能执行 `run` / `run_once`。
 
-通过 `Cdc::<Minimal>::for_mode(config)` 或 `Cdc::<Full>::for_mode(config)` 可在实例化时固定模式；各来源配置须与类型一致。复制库也提供 `BinlogFile::<_, Full>::for_mode(...)`、`ReplicationStream::<Full>::for_mode(...)`，其 `BinlogEvent` 与行镜像携带相同模式。示例见[类型化监听](crates/mysql-canal/examples/listen_typed.rs)及[原始行解码](crates/mysql-replication/examples/decode_typed_rows.rs)。
+按模式固定 Rust 类型及读取原始行值的示例见[Rust API 参考](docs/event-api.zh-CN.md)。
 
 ## 使用边界
 
@@ -112,8 +135,8 @@ fn main() -> Result<()> {
 
 - [文档目录](docs/README.zh-CN.md)
 - [配置、服务器准备与回放](docs/configuration.zh-CN.md)
-- [事件字段、MINIMAL/FULL 差异与输出契约](docs/events.zh-CN.md)
-- [架构与事件流](docs/architecture.zh-CN.md)
+- [事件说明与 MINIMAL/FULL 示例](docs/events.zh-CN.md)
+- [系统如何工作](docs/architecture.zh-CN.md)
 - [开发与扩展](docs/development.zh-CN.md)
 - [测试与实库矩阵](docs/testing.zh-CN.md)
 - [CI、打包与发布](docs/releasing.md)

@@ -6,9 +6,11 @@ mysql-cdc 的中间层，基于 `mysql-replication` 将 binlog 转为通用 CDC 
 
 ## 监听已提交事务
 
+项目尚未发布。以下依赖使用本地源码，请将 `/path/to/mysql-cdc-rs` 替换为实际仓库路径。
+
 ```toml
 [dependencies]
-mysql-canal = "2.0.0"
+mysql-canal = { path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
 ```
 
 ```rust,no_run
@@ -69,6 +71,7 @@ cargo run -p mysql-canal --example replay -- STATE.json /path/to/binlog.000001 f
 
 ## 参考
 
+- [Rust 字段与接口参考](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/event-api.zh-CN.md)
 - [配置、恢复与模式切换](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/configuration.zh-CN.md)
 - [CDC 字段与输出契约](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.zh-CN.md)
 - [事件流与分层职责](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)

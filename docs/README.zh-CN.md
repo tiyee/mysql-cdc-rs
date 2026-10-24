@@ -2,13 +2,23 @@
 
 [English](README.md) | 简体中文
 
-从[系统 README](../README.zh-CN.md)了解系统并运行第一个示例，再按问题选择下列参考。各包 README 仅介绍自身用途和使用示例；字段契约和开发流程在本目录维护。
+## 使用系统
+
+从[系统介绍与示例](../README.zh-CN.md)开始；理解通知后，再配置自己的数据库。
+
+| 我想了解 | 阅读 |
+| --- | --- |
+| 修改一条数据会收到什么，MINIMAL/FULL 有什么区别 | [事件说明](events.zh-CN.md) |
+| 三层各做什么，为什么提交后才收到通知 | [系统如何工作](architecture.zh-CN.md) |
+| 怎样连接 MySQL、选择表、消费和恢复 | [配置与运行](configuration.zh-CN.md) |
+
+## 开发和维护
+
+需要接入 Rust 库或修改实现时，再查阅这些文档。
 
 | 文档 | 内容 |
 | --- | --- |
-| [配置与运行](configuration.zh-CN.md) | 配置层级、MySQL 准备、模式切换、恢复和离线回放 |
-| [事件参考](events.zh-CN.md) | BinlogEvent、Event trait、EventData、行镜像、Canal 事件及 JSON 输出 |
-| [架构与事件流](architecture.zh-CN.md) | 分层职责、两条解码路径、事务与来源隔离 |
-| [开发指南](development.zh-CN.md) | 源码目录、性能实现、版本适配与插件扩展 |
-| [测试指南](testing.zh-CN.md) | 本地检查、合成测试、专用 MySQL 测试与覆盖矩阵 |
-| [发布指南](releasing.md) | CI、版本、包验证、OIDC 与发布结果核对 |
+| [Rust 事件 API 参考](event-api.zh-CN.md) | 完整字段、类型、泛型、借用生命周期及底层连接接口 |
+| [开发指南](development.zh-CN.md) | 源码目录、实现数据流、性能设计与插件扩展 |
+| [测试指南](testing.zh-CN.md) | 本地检查、专用 MySQL 测试与覆盖范围 |
+| [发布指南](releasing.md) | 首次发布、CI、打包和 OIDC |

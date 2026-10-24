@@ -45,8 +45,6 @@ MySQL 矩阵按每个系列的 MINIMAL / FULL 两种模式启动专用容器，�
 | Workflow filename | `release.yml`（只填文件名） |
 | Environment | 留空（当前发布 job 未指定 GitHub environment） |
 
-CLI 包已从 `pikachu-rs` 改名为 `pikachu`，位于 `crates/pikachu`；旧包的可信发布者配置不会随本地改名迁移，必须为 `pikachu` 单独配置。
-
 `release.yml` 只在 `publish` job 授予 `contents: read` 和 `id-token: write`，通过官方 [`rust-lang/crates-io-auth-action@v1`](https://github.com/rust-lang/crates-io-auth-action) 交换短期凭据。OIDC 认证在任何包上传之前执行，四个发布步骤各自通过 `CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}` 使用同一短期 token；任务结束后 action 自动撤销该凭据。发布仍按依赖顺序执行：
 
 ```sh
@@ -58,17 +56,13 @@ cargo publish --locked --registry crates-io --package pikachu
 
 四个包的版本号必须一致。普通 CI 和版本检查没有 OIDC 写权限，也不需要发布凭据；CI 的 `cargo publish --workspace --dry-run` 只验证包内容，不上传任何包。
 
-可信发布者的仓库与 workflow 文件名必须匹配实际执行的流程。若以后指定 GitHub environment，必须同步设置 job 的 `environment` 与 crates.io 的对应字段。工作流代码改为 OIDC 不会自动修改 crates.io 的可信发布者设置，须分别确认四个包的配置。
-
-发布工作流不再读取 `secrets.CARGO_REGISTRY_TOKEN`。确认四个包的 OIDC 发布均成功后，可删除 GitHub 仓库中旧的 `CARGO_REGISTRY_TOKEN` secret，并在 crates.io 撤销已不再使用的长期 API token；不要仅删除 secret 而保留无用途的有效凭据。
+可信发布者的仓库与 workflow 文件名必须匹配实际执行的流程。若以后指定 GitHub environment，必须同步设置 job 的 `environment` 与 crates.io 的对应字段。工作流不会自动修改 crates.io 的可信发布者设置，须分别确认四个包的配置。
 
 ## 发布版本
 
-当前四个包的清单版本为 `2.0.0`。不兼容的配置变更和迁移步骤见[配置迁移](configuration.zh-CN.md#从旧配置迁移到-20)，事件类型和 MINIMAL/FULL 输出契约见[事件参考](events.zh-CN.md)。清单版本不代表该版本已完成 CI 或上传 crates.io。
+项目尚未发版，当前四个包的清单版本为 `2.0.0`，本页说明首次发布的准备和执行流程。配置以[当前配置指南](configuration.zh-CN.md)为准，事件类型和 MINIMAL/FULL 输出契约见[事件参考](events.zh-CN.md)。
 
-历史标签 [`v1.0.0`](https://github.com/tiyee/mysql-cdc-rs/tree/v1.0.0) 已推送，指向版本提交 `edb1c72714e69c92cbf0ef412e77de3bdaacd85c`。不要重新创建、移动或强推该标签。标签存在不代表完整 CI 或 crates.io 上传成功；需分别查看 [Actions](https://github.com/tiyee/mysql-cdc-rs/actions) 和各 crate 的实际版本。
-
-后续版本按以下顺序准备：
+发布按以下顺序准备：
 
 1. 同步四个成员 `Cargo.toml` 的 `package.version`，以及 CLI 的 `mysql-canal`、canal 的 `mysql-replication`、聚合包两个库的精确依赖版本；同步根目录及各包双语 README 的版本示例。
 2. 执行 `cargo check --workspace --all-targets` 更新根目录 `Cargo.lock`，确认只改变预期的工作区版本，不无关升级依赖。运行下面的本地检查。
@@ -88,7 +82,7 @@ cargo publish --workspace --dry-run --locked --registry crates-io
 
 检查 `target/package` 下四个 `<crate>-<version>.crate`（workspace dry-run 可能将归档放在 `tmp-crate/` 子目录）中的文件列表、清单、精确依赖版本及 `.cargo_vcs_info.json`。确认包含预期源码、示例、测试、README、许可证及生成的 lockfile，不包含 AI 协作文件、本地 state 或凭据。需要分发本地归档时，可将验证后的四个包复制出来并生成 SHA256 校验文件；这些构建产物不加入源码提交。
 
-以下是**后续新版本**的标签模板，先将 `v<version>` 替换为四个清单中完全一致的版本。版本保护脚本同时校验包名、内部依赖路径和精确版本。`git ls-remote` 若返回已有同名标签，应停止，不覆盖该标签：
+以下是发布标签模板，先将 `v<version>` 替换为四个清单中完全一致的版本。版本保护脚本同时校验包名、内部依赖路径和精确版本。`git ls-remote` 若返回已有同名标签，应停止，不覆盖该标签：
 
 ```sh
 set -eu
@@ -113,7 +107,7 @@ git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}"
 mysql-cdc-rs = "2.0.0"
 ```
 
-统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu --version 2.0.0 --locked` 安装，命令名为 `pikachu-cdc`。四个包清单版本均为 `2.0.0`；旧包 `pikachu-rs 0.0.1` 的记录不代表这些包已发布。工作流本身不会创建 GitHub Release 或推送 Git tag。
+统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu --version 2.0.0 --locked` 安装，命令名为 `pikachu-cdc`。四个包清单版本均为 `2.0.0`，项目尚未发布。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 四个包发布不是原子操作。若部分包已上传而后续包失败，先确认各 crate 的实际状态，不要直接重跑整个发布 job 重复上传；可按依赖顺序恢复尚未发布的包。已成功上传的版本不能重复发布；修改内容需要同步增加四个包的版本号，并使用匹配的新 tag。
 

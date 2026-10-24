@@ -13,14 +13,14 @@ pikachu (pikachu-cdc) ──> mysql-canal ──> mysql-replication
 mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 ```
 
-| Package | Entry point | Responsibility |
+| Component | How to use it | Responsibility |
 | --- | --- | --- |
-| [mysql-replication](crates/mysql-replication/README.md) | `mysql_replication` | Subscribe to and parse binlogs into raw events |
-| [mysql-canal](crates/mysql-canal/README.md) | `mysql_canal` | Convert binlogs to normalized CDC events; manage transactions and checkpoints |
+| [mysql-replication](crates/mysql-replication/README.md) | Rust library | Subscribe to and parse binlogs into raw events |
+| [mysql-canal](crates/mysql-canal/README.md) | Rust library | Convert binlogs to normalized CDC events; manage transactions and checkpoints |
 | [pikachu](crates/pikachu/README.md) | `pikachu-cdc` | CLI product built on canal, with JSON Lines output |
-| [mysql-cdc-rs](crates/mysql-cdc/README.md) | `mysql_cdc_rs` | Unified library entry point re-exporting both libraries |
+| [mysql-cdc-rs](crates/mysql-cdc/README.md) | Unified Rust library | Unified library entry point re-exporting both libraries |
 
-All four packages are at **2.0.0** and require Rust **1.89+**. Built-in adapters cover Oracle MySQL 5.7, 8.0–8.4, 9.0 and 9.7. See the [testing guide](docs/testing.md) for real-server verification coverage.
+All four package manifests specify **2.0.0** and require Rust **1.89+**. Built-in adapters cover Oracle MySQL 5.7, 8.0–8.4, 9.0 and 9.7. See the [testing guide](docs/testing.md) for real-server verification coverage.
 
 ## CLI example
 
@@ -65,19 +65,42 @@ Pikachu requires a `mysql-canal` child; every canal source requires a `mysql-rep
 | `pikachu-cdc run cdc.toml --once` | Consume currently available events and exit |
 | `pikachu-cdc replay local-state.json /path/to/binlog.000001` | Replay one file using historical schema without changing state |
 
-Example output:
+## What an update produces
 
-```json
-{"source":"local","schema":"app","table":"users","operation":"update","pk":{"type":"unsigned","value":42},"changed":["name","age"]}
+Suppose source `local` has `app.users` with an unsigned integer key. An application updates record 42 and commits:
+
+```sql
+UPDATE app.users SET name = 'Bob', age = 21 WHERE id = 42;
 ```
 
-`changed` lists fields recorded in the after image; FULL includes fields whose values did not change. See the [event reference](docs/events.md) for fields, key types and before/after semantics.
+In MINIMAL mode, the notification identifies the record and fields recorded in the log:
+
+```json
+{
+  "source": "local",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "name",
+    "age"
+  ]
+}
+```
+
+`pk` identifies the record and `changed` lists the recorded column names. Values such as Bob and 21 are not included. In FULL, `changed` also includes unchanged fields present in the complete image. See the [event guide](docs/events.md) for the full comparison.
 
 ## Library example
 
+The project is not yet released. The dependency below uses local source; replace `/path/to/mysql-cdc-rs` with your checkout path.
+
 ```toml
 [dependencies]
-mysql-cdc-rs = "2.0.0"
+mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run
@@ -99,7 +122,7 @@ fn main() -> Result<()> {
 
 `canal.toml` uses the [standalone canal configuration](crates/mysql-canal/examples/config/multi-source.toml), beginning at `[[sources]]`; the Pikachu product file has a different outer layer. CDC APIs are exported at the root and under `canal`; raw APIs are under `replication`. Register a handler before calling `run` or `run_once`.
 
-Fix the mode at construction with `Cdc::<Minimal>::for_mode(config)` or `Cdc::<Full>::for_mode(config)`; every source must match the type. Replication also offers `BinlogFile::<_, Full>::for_mode(...)` and `ReplicationStream::<Full>::for_mode(...)`, carrying the mode through `BinlogEvent` and row images. See the [typed listener](crates/mysql-canal/examples/listen_typed.rs) and [raw row decoder](crates/mysql-replication/examples/decode_typed_rows.rs).
+See the [Rust API reference](docs/event-api.md) for fixing mode-specific types and inspecting raw row values.
 
 ## Usage boundaries
 
@@ -112,8 +135,8 @@ Fix the mode at construction with `Cdc::<Minimal>::for_mode(config)` or `Cdc::<F
 
 - [Documentation index](docs/README.md)
 - [Configuration, server setup and replay](docs/configuration.md)
-- [Event fields, MINIMAL/FULL differences and output contract](docs/events.md)
-- [Architecture and event flow](docs/architecture.md)
+- [Events and MINIMAL/FULL examples](docs/events.md)
+- [How the system works](docs/architecture.md)
 - [Development and extensions](docs/development.md)
 - [Testing and real-server matrix](docs/testing.md)
 - [CI, packaging and releases](docs/releasing.md) (Chinese)

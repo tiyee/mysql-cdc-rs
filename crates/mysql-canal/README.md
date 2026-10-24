@@ -6,9 +6,11 @@ The middle layer in mysql-cdc. Built on `mysql-replication`, it converts binlogs
 
 ## Listen for committed transactions
 
+The project is not yet released. The dependency below uses local source; replace `/path/to/mysql-cdc-rs` with your checkout path.
+
 ```toml
 [dependencies]
-mysql-canal = "2.0.0"
+mysql-canal = { path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
 ```
 
 ```rust,no_run
@@ -69,6 +71,7 @@ cargo run -p mysql-canal --example replay -- STATE.json /path/to/binlog.000001 f
 
 ## Reference
 
+- [Rust fields and API reference](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/event-api.md)
 - [Configuration, recovery and mode switching](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/configuration.md)
 - [CDC fields and output contract](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.md)
 - [Event flow and layer boundaries](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.md)

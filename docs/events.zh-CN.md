@@ -1,282 +1,198 @@
-# 事件参考
+# 事件说明
 
 [English](events.md) | 简体中文
 
 [文档目录](README.zh-CN.md)
 
-本页集中定义原始协议事件、行镜像和 Canal 的通用 CDC 事件。配置与模式切换见[配置指南](configuration.zh-CN.md)，实现流程见[架构](architecture.zh-CN.md)。
+读完本页，可以知道一次数据库修改会产生什么事件、每个输出字段是什么意思，以及 MINIMAL 和 FULL 有什么区别。无需先了解 Rust 类型。
 
-## 事件类型与边界
+## 从一次修改开始
 
-| 类型 | 所属层 | 用途 |
-| --- | --- | --- |
-| `BinlogEvent<'a, M>` | replication | 原始头、字节和协议事件体 |
-| `Event<'a>` / `EventData<'a, M>` | replication | 共用解码 trait / 实际事件体枚举 |
-| `Change<'a>` / `OwnedChange` | canal | 通用行变更，包含精确主键及字段索引 |
-| `CommittedTransaction<'a>` | canal | COMMIT 后交付的完整事务 |
+假设来源 `east` 中的 `app.users` 表有以下记录，`id` 是无符号整数主键，`age` 允许为 NULL：
 
-`Event` 是 trait，没有公共字段。它与 Canal 的通用变更事件不是同一个类型。普通 SELECT 不产生 CDC 变更；协议 QUERY 保存 SQL 字节，也可表示 DDL。
-
-`dump` 按字段逐行打印标签和值。例如 FDE 输出 `Version: 4`、`Server version: 8.4.6`、`Checksum algorithm: CRC32`，末尾为空行。checksum 算法来自已校验帧的尾部；仅解码事件体时保留调用方提供的值，未提供则为 `UNKNOWN`。`into_owned()` 与 `view()` 会保留该上下文。
-
-结构化解析覆盖 FDE、ROTATE、QUERY、TABLE_MAP、ROWS v1/v2、XID、普通/匿名/Tagged GTID、Previous GTIDs 与 v1 心跳。GTID 可选元数据用 `Option` 区分缺失与零，Tagged GTID serialization v2 使用独立解码器。其他载荷，包括 v2 心跳、XA、压缩事务与未知事件码，明确交付为 `EventData::Raw`，不宣称已解码支持。SQL 和库名字节保持借用，DDL 正常交付为 QUERY。
-
-## 事件公共字段与模式差异
-
-Rust 类型名为 `BinlogEvent<'a, M>`。`Event<'a>` 是不含字段的共用、对象安全 **trait**；`EventData<'a, M>` 是保存在 `BinlogEvent.event` 中的枚举，通过匹配变体访问具体协议事件。`Minimal` 和 `Full` 区分 ROWS 策略及镜像类型，不增减包络字段或控制事件字段。
-
-### 共用包络与公共头
-
-以下是 `BinlogEvent<'a, M>` 的全部公共字段，适用于 `M = Unspecified`、`Minimal` 或 `Full`：
-
-| 字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `raw_data` | `&'a [u8]` | 完整原始事件：公共头、body、实际 trailer/checksum，包含 FDE 算法字节；不包含文件 magic 和网络包头 |
-| `header` | `EventHeader` | 下表所示的 binlog v4 公共头，长度为 19 字节 |
-| `event` | `EventData<'a, M>` | 结构化协议 body，其中 ROWS 携带同一个 `M` |
-
-内部 `body` 字段不公开，可通过 `event.frame().body` 访问排除公共头和 framing trailer 的借用 body。`OwnedBinlogEvent<M>` 没有公共字段，使用 `raw_data()` 和 `view()`；`into_owned()` / `view()` 保留 `M` 和原始事件字节，视图借用 owned 缓冲区。
-
-| `EventHeader` 公共字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `timestamp` | `u32` | 生产者记录的事件时间，单位为 Unix 秒 |
-| `event_type` | `u8` | wire 事件码，使用 `event_type` 的具名常量 |
-| `server_id` | `u32` | 生产者记录的 server ID |
-| `event_size` | `u32` | 完整事件长度，包含公共头及存在的 trailer/checksum |
-| `log_pos` | `u32` | 头中记录的位点，通常是下一条事件的位置；不是已确认的 CDC 检查点，某些控制事件可能为零 |
-| `flags` | `u16` | 公共头标志，保留未知位 |
-
-`Event<'a>` 仅提供 `decode(&mut self, data: &'a [u8]) -> Result<()>` 和 `dump(&self, writer: &mut dyn Write) -> Result<()>`，并要求实现 `Debug`。`EventHeader::decode` 接收精确的 19 字节，body 解码器只接收 body。trait 本身没有 `header`、`pk`、`before` 或 `after` 字段；`dump` 用于诊断输出。
-
-### 两种模式共用的协议事件字段
-
-`EventData` 标记为 non-exhaustive，外部匹配须保留兜底分支。各变体具体 body 的公共字段如下，仅 `Rows` 的载荷携带 `M`：
-
-| 变体 / 载荷类型 | MINIMAL 与 FULL 共用的公共字段 |
-| --- | --- |
-| `FormatDescription` / `FormatDescriptionEvent<'a>` | `binlog_version: u16`、`server_version: &'a str`、`create_timestamp: u32`、`header_length: u8`、`post_header_lengths: &'a [u8]`、`checksum_algorithm: ChecksumAlgorithm` |
-| `Rotate` / `RotateEvent<'a>` | `position: u64`、`next_file: &'a [u8]` |
-| `Query` / `QueryEvent<'a>` | `thread_id: u32`、`execution_time: u32`、`error_code: u16`；`status_vars`、`schema`、`query` 均为 `&'a [u8]` |
-| `TableMap` / `TableMapEvent<'a>` | `table_id: u64`、`flags: u16`；`schema`、`table`、`column_data` 均为 `&'a [u8]` |
-| `Rows` / `RowsEvent<'a, M>` | `table_id: u64`、`flags: u16`、`kind: RowsKind`、`encoded_images: &'a [u8]` |
-| `Xid` / `XidEvent` | `xid: u64` |
-| `Gtid` 和 `AnonymousGtid` / `GtidEvent` | `flags: u8`、`sid: [u8; 16]`、`gno: i64`，以及下述可选元数据 |
-| `TaggedGtid` / `TaggedGtidEvent<'a>` | `gtid: GtidEvent`、`tag: &'a str`、`unknown_fields: &'a [u8]` |
-| `PreviousGtids` / `PreviousGtidsEvent<'a>` | `sid_count: u64`、`encoded_sids: &'a [u8]` |
-| `Heartbeat` / `HeartbeatEvent<'a>` | `log_file: &'a [u8]` |
-| `Raw` / `RawEvent<'a>` | `data: &'a [u8]`，保留未知或有意不解码的 body |
-
-`GtidEvent` 的可选字段包括：`last_committed` / `sequence_number`（`Option<i64>`）；`immediate_commit_timestamp` / `original_commit_timestamp` / `transaction_length` / `commit_group_ticket`（`Option<u64>`）；`immediate_server_version` / `original_server_version`（`Option<u32>`）。它们是否存在取决于生产者元数据和解析选项，与行镜像模式无关；`ParserConfig` 禁用结构化 GTID 解码时，也可将其保留为 `Raw`。
-
-`TableMapEvent::columns()` 返回 `TableColumns { count: usize, types, metadata, nullable, optional_metadata }`，后四项均为借用字节切片。`PreviousGtidsEvent::sids()` 返回 `SidIntervals { sid, intervals }`，两项也均为借用字节切片。这些访问接口在两种模式下相同。`RowsEvent.flags` 是 ROWS body 标志，与 `BinlogEvent.header.flags` 相互独立。
-
-### 随模式变化的字段类型与访问接口
-
-上述 `RowsEvent` 的四个公共字段保持相同名称和 wire 含义，差异体现在镜像和行解码结果中：
-
-| API / 属性 | `Minimal` | `Full` |
-| --- | --- | --- |
-| 包络 / body 类型 | `BinlogEvent<'a, Minimal>` / `EventData<'a, Minimal>` | `BinlogEvent<'a, Full>` / `EventData<'a, Full>` |
-| `RowsEvent<M>::rows(&RowsDecoder)` | `Result<TypedRows<'a, Minimal>>` | `Result<TypedRows<'a, Full>>` |
-| 迭代器元素 | `Result<TypedRow<'a, Minimal>>` | `Result<TypedRow<'a, Full>>` |
-| `TypedRow.before` 公共字段 | `Option<SparseImage<'a>>` | `Option<CompleteImage<'a>>` |
-| `TypedRow.after` 公共字段 | `Option<SparseImage<'a>>` | `Option<CompleteImage<'a>>` |
-| 镜像结构 | 只保留存在列；原始复制同样接受完整位图 | 每个存在的镜像必须包含全部列；拒绝稀疏输入，不补齐缺失值 |
-| `image.field(index)` | `Result<Option<RowValue<'a>>>`；未记录或越界的列返回 `None` | `Result<RowValue<'a>>`；范围内列必定存在，越界访问报错 |
-| 列索引 | `image.column_indices()` 返回实际存在列的从零开始的绝对索引 | 全部表列索引均存在，需要时使用 `image.as_ref().column_indices()` |
-
-`TypedRowsEvent<M>` 没有公共字段，使用 `table_id()`、`flags()`、`kind()`、`column_count()` 和 `rows()` 访问。
-
-两种镜像都提供 `column_count()`（表的总列数）和 `fields()`（实际存在字段的迭代器），内部缓冲区与执行计划不公开。两种模式的 `RowField` 公共字段都为 `column_index: u16` 和 `value: RowValue<'a>`；列名、SQL 符号和字符集解释不是某个模式额外提供的行字段。
-
-`RowsEvent::images()` 返回共用的编码视图 `RowImages { extra_data: &'a [u8], column_count: usize, before_columns: &'a [u8], after_columns: &'a [u8], rows: &'a [u8] }`。WRITE 的 `before_columns` 指 **wire 中第一份位图**，实际描述 after 镜像；DELETE 的两个位图字段都引用 before 位图，UPDATE 才有独立的前后位图。这些字段名不会使 INSERT 多出 before 镜像。Full 解析在返回普通 ROWS 包络前检查完整位图；语句结束哨兵没有镜像。字段值在行迭代时校验。
-
-默认的 `Unspecified` 保留未分类的原始接口：`RowsEvent::rows` 返回 `Rows<'a>`，包含 `Row { before: Option<RowImage<'a>>, after: Option<RowImage<'a>> }`，不据此确定生产者使用 MINIMAL 还是 FULL。`next_frame()` / `next_view()` 返回的原始视图同样不携带模式保证。
-
-| 操作（`RowsKind`） | 两种模式的 `before` | 两种模式的 `after` |
-| --- | --- | --- |
-| INSERT（`Write`） | `None` | `Some(image)` |
-| UPDATE（`Update`） | `Some(image)` | `Some(image)` |
-| DELETE（`Delete`） | `Some(image)` | `None` |
-
-须区分三种情况：`row.after` 为 `None` 表示该操作没有 after 镜像；`SparseImage::field(i)?` 返回 `None` 表示列未记录或越界；`Some(RowValue::Null)` 表示实际存在的列值为 SQL NULL。完整镜像中，实际存在的 SQL NULL 直接表示为 `RowValue::Null`。
-
-```rust,no_run
-use mysql_replication::{Full, Minimal, Result, events::{RowValue, TypedRow}};
-
-fn inspect_minimal(row: TypedRow<'_, Minimal>) -> Result<()> {
-    if let Some(after) = row.after {
-        match after.field(0)? {
-            None => println!("column 0 is absent"),
-            Some(RowValue::Null) => println!("column 0 is SQL NULL"),
-            Some(value) => println!("column 0: {value:?}"),
-        }
-    }
-    Ok(())
-}
-
-fn inspect_full(row: TypedRow<'_, Full>) -> Result<()> {
-    if let Some(after) = row.after {
-        let value: RowValue<'_> = after.field(0)?;
-        println!("column 0: {value:?}");
-    }
-    Ok(())
-}
-```
-
-这些类型属于原始复制记录。Canal 的 `Change` / `OwnedChange` 则包含 `table`、`operation`、`pk`、`previous_pk`、`changed`，`CommittedTransaction` 包含 `source_id`、`checkpoint`、`changes`；这些公共字段在两种模式下保持一致。FULL 改变 after 镜像在 `changed` 中包含的列索引，不会使 CDC 输出增加完整行值。Canal 对选中单列主键表还要求 MINIMAL before 镜像仅包含主键，而原始 `Minimal` 无需主键，也接受稀疏或完整镜像。
-
-## 解码原始行镜像
-
-事件框架位于 `events`：`BinlogEvent` 是通用容器，`EventHeader` 是公共头，`EventData` 是具体事件体枚举。容器所有权、控制事件、TABLE_MAP 和 ROWS 分别由独立模块实现；现有公共导入路径保持不变。`RowsEvent` 描述协议事件，`RowsDecoder` 独立于 CDC 策略编译列布局。
-
-```rust,no_run
-use mysql_replication::{Result, events::{RowValue, RowsDecoder, RowsEvent, TableMapEvent}};
-
-fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
-    let decoder = RowsDecoder::new(table)?;
-    for row in event.rows(&decoder)? {
-        let row = row?;
-        for (label, image) in [("before", row.before), ("after", row.after)] {
-            if let Some(image) = image {
-                for field in image.fields() {
-                    let field = field?;
-                    match field.value {
-                        RowValue::Null => println!("{label}[{}] = NULL", field.column_index),
-                        RowValue::Decimal(value) => println!("{label}[{}] = {value}", field.column_index),
-                        value => println!("{label}[{}] = {value:?}", field.column_index),
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-```
-
-每个来源为当前有效的 TABLE_MAP 缓存独立解码器。table ID 重映射时替换解码器，文件或语句边界清理映射。解码器检查 table ID 和列数，但不能识别 ID、列数均相同的过期映射。解码器持有编译后的布局，可释放输入 TABLE_MAP。每个 ROWS 迭代器仅编译一次稀疏镜像计划，各行共享字段索引；行载荷保持借用，不分配完整行向量。每次交付行操作前校验其完整边界、字段长度、NULL 约束及压缩 DECIMAL 数字组。解码错误仅返回一次，随后结束该迭代器；此前的行可能已被调用方消费。该 API 不提供事务缓冲。
-
-- WRITE 仅有 `after`，DELETE 仅有 `before`，UPDATE 有配对镜像。不存在的镜像为 `None`。镜像的 `fields()` 仅返回存在列，列索引为从零开始的表绝对序号。`RowValue::Null` 表示存在列的 SQL NULL；缺失列不填充、不推断。紧凑 NULL 位图支持稀疏镜像及超过 64 列的表。
-- 整数通过 `IntegerValue` 保留实际编码宽度。根据已知 SQL 元数据调用 `signed()` 或 `unsigned()`；TABLE_MAP 必需元数据不包含符号信息。`DecimalValue` 保留 precision/scale，校验压缩数字组并精确格式化，包括 65 位数值。FLOAT/DOUBLE、BIT、ENUM 索引、SET 掩码和 YEAR 使用明确的值枚举。
-- CHAR/VARCHAR 和 BLOB 返回借用的 `Bytes`，不含长度前缀，不猜测字符集。时间类型、JSON、geometry 和 vector 返回借用的 `Encoded` 字节；`decoder.columns()` 暴露其类型及编码元数据。该 API 不将它们转换成日期、JSON 对象或向量。旧 DECIMAL、typed array 和未知列类型明确报不支持。
-- 非法长度、不完整 UPDATE 配对、非法元数据及 NOT NULL 列的 NULL 返回原始协议错误。原始行解码不要求主键；独立的指定表预检在调用方启用时应用主键限制。CDC 特有的解码错误属于 `mysql-canal`。CDC 路径继续跳读非主键值，不调用该解码器。
-
-使用包含 FDE 和 TABLE_MAP 的 binlog 文件运行完整离线示例：
-
-```sh
-cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
-```
-
-## 通过泛型选择镜像类型
-
-`RowsEvent` 保留通用的借用协议事件结构。`TypedRowsDecoder<M>` 将 TABLE_MAP 执行计划绑定到镜像模式，返回 `TypedRowsEvent<'a, M>` / `TypedRow<'a, M>`：
-
-| 模式 | 镜像类型 | `field(index)` 返回值 |
-| --- | --- | --- |
-| `Minimal` | `SparseImage<'a>` | `Result<Option<RowValue<'a>>>`；缺失为 `None`，SQL NULL 为 `Some(RowValue::Null)` |
-| `Full` | `CompleteImage<'a>` | `Result<RowValue<'a>>`；范围内的列全部存在，SQL NULL 为 `RowValue::Null` |
-
-```rust,no_run
-use mysql_replication::{Result, events::{
-    Full, Minimal, RowValue, RowsEvent, TableMapEvent, TypedRowsDecoder,
-}};
-
-fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
-    let full = TypedRowsDecoder::<Full>::new(table)?;
-    for row in full.rows(event)? {
-        if let Some(after) = row?.after {
-            let value: RowValue<'_> = after.field(0)?;
-            println!("{value:?}");
-        }
-    }
-    let minimal = TypedRowsDecoder::<Minimal>::new(table)?;
-    for row in minimal.rows(event)? {
-        if let Some(after) = row?.after {
-            let value: Option<RowValue<'_>> = after.field(0)?;
-            println!("{value:?}");
-        }
-    }
-    Ok(())
-}
-```
-
-`TypedRowsDecoder::<Full>::event` 在迭代前检查所有存在镜像的位图，不完整时返回 `Error::Unsupported`。字段值及 UPDATE 完整配对在交付每行前校验；畸形输入只返回一次错误，随后结束迭代。WRITE 只有 `after`，DELETE 只有 `before`，UPDATE 两者都有。泛型改变镜像类型，不改变操作本身是否存在前后镜像。`CompleteImage::try_from(raw_image)` 同样校验完整性。
-
-`column_count()` 返回 TABLE_MAP 的总列数，包含缺失列。`fields()` 按绝对列序号流式遍历存在字段，顺序读取优先使用该接口。`field(index)` 无分配地扫描至目标列；越界时 FULL 返回 `Error::Invalid`，MINIMAL 返回 `None`。字节值保持借用，各行共享编译后的字段索引计划；类型化事件及行可以比解码器存活更久，但不能超过输入字节的生命周期。通过 `AsRef<RowImage>` 编写通用泛型逻辑，不分配完整行向量。
-
-已有 `RowsDecoder` 可调用 `raw_event.with_mode::<Full>(&raw_decoder)`，或通过 `TypedRowsDecoder::<Full>::from(raw_decoder)` 复用执行计划。模式 trait 封闭，不能绕过完整性校验。MINIMAL 也接受完整位图：INSERT 或没有主键的表即使使用 MINIMAL 日志，也可能包含全部列。仅凭字节不能确定生产者设置；在线调用方另行通过 `required_row_image` 校验服务器设置。
-
-运行时参数在入口通过 `match mode { ... run::<Minimal>(), ... run::<Full>() }` 选择泛型实现。以下示例默认 MINIMAL，也接受两种参数值：
-
-```sh
-cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image full
-cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image minimal
-```
-
-## Canal 通用事件字段
-
-`Change` 是转换回调中的借用视图；`into_owned()` 生成可跨事件持有的 `OwnedChange`。两者字段含义相同：
-
-| 字段 | `Change<'a>` | `OwnedChange` | 含义 |
+| id | name | age | status |
 | --- | --- | --- | --- |
-| `table` | `&'a Arc<TableMeta>` | `Arc<TableMeta>` | 历史库表及有序列元数据 |
-| `operation` | `Operation` | `Operation` | `Insert`、`Update` 或 `Delete` |
-| `pk` | `PrimaryKey<'a>` | `PrimaryKey<'static>` | 精确主键；主键变更时为新值 |
-| `previous_pk` | `Option<PrimaryKey<'a>>` | `Option<PrimaryKey<'static>>` | 主键变更时的旧值 |
-| `changed` | `&'a Arc<[u16]>` | `Arc<[u16]>` | 按表顺序排列、共享的绝对列索引 |
+| 42 | Alice | 20 | active |
 
-`PrimaryKey` 变体为 `Signed(i64)`、`Unsigned(u64)`、`Text(Cow<'a, str>)` 和 `Decimal(String)`。DECIMAL 不经过浮点转换。`OwnedChange::changed_names()` 通过 `table` 将索引映射为字段名。
+应用执行更新，并提交事务：
 
-| `CommittedTransaction<'a>` 字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `source_id` | `&'a str` | 配置中的稳定来源身份 |
-| `checkpoint` | `&'a State` | 所有处理器成功后才保存的提交边界 |
-| `changes` | `&'a [OwnedChange]` | 按 binlog 顺序排列的变更；完全过滤的提交为空 |
+```sql
+UPDATE app.users SET name = 'Bob', age = NULL WHERE id = 42;
+```
 
-`State` 携带历史 schema、文件/位点及来源 UUID、ID、插件。事务数据只在回调期间借用，需要跨回调持有时才克隆。`EventConverter` 的回调可能发生在 COMMIT 之前；提交交付应使用 `Cdc` 或 `Processor`。
+mysql-cdc 会经过三个步骤：
 
-MINIMAL 与 FULL 使用相同的通用类型和字段。区别在于下文所述的 `changed` 中 after-image 索引，两者都不增加完整行值。
+1. **读取数据库日志**：mysql-replication 读取 MySQL 记录的行数据和事务标记，生成原始 binlog 事件。
+2. **整理成变更通知**：mysql-canal 找出来源、库表、主键和记录过的字段，等事务提交后交付。
+3. **输出通知**：Pikachu 默认把变更写成每行一条的 JSON。使用库时，可以自行处理提交的事务。
 
-## 输出语义
-
-每行一条 JSON，同一来源按 binlog 顺序输出；不同来源按事务写入顺序合流，同一事务的行不会被其他来源插入。UPDATE 示例：
+在 MINIMAL 模式下，这次更新的输出是：
 
 ```json
-{"source":"east","schema":"app","table":"users","operation":"update","pk":{"type":"unsigned","value":42},"changed":["name","age"]}
+{
+  "source": "east",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": { "type": "unsigned", "value": 42 },
+  "changed": ["name", "age"]
+}
 ```
 
-`source` 是配置中的稳定来源 ID，防止不同实例相同库表/主键混淆。`operation` 区分 insert/update/delete。主键变更时 `pk` 是新值，附带 `previous_pk`，消费者可以同时处理旧键与新键。INSERT 的 `changed` 是 after image 中存在的列；DELETE 是空数组；UPDATE 是 after image 位图中的列，包括写入 NULL 的字段和被修改的主键。
+这条通知表示：**east 来源的 app.users 表中，主键为 42 的记录发生了更新，日志记录了 name 和 age 两个字段。** 通知不包含 Bob 或 NULL 等非主键字段值；需要查看原始行值时，使用复制库的行镜像读取功能。
 
-**FULL 模式下 INSERT/UPDATE 的 `changed` 包含 after image 的全部列，包括值未变化的字段和未变化的主键；不做新旧值比较，CDC 输出仍不包含完整行值。**
+为便于阅读，本页将 JSON 展开显示；CLI 实际每条记录输出一行。
 
-**这里的“变动字段”精确定义为 binlog after image 中记录的字段，不保证值确实不同。** MINIMAL 日志不包含非主键旧值，SQL 指定但值未改变的列也可能出现，无法仅凭日志逐值比较。依据：[MySQL binlog_row_image 文档](https://dev.mysql.com/doc/refman/8.0/en/replication-options-binary-log.html) 与 [MySQL 已确认的问题 #83418](https://bugs.mysql.com/bug.php?id=83418)。
+## 通用事件中的字段
 
-主键支持：
+通用事件是应用消费的变更通知。下面这些字段在 MINIMAL 和 FULL 下都存在，含义也相同。
 
-- TINYINT / SMALLINT / MEDIUMINT / INT / BIGINT，含 UNSIGNED。按真实字节宽度解码，正确符号扩展，不经过浮点数。
-- DECIMAL，保持 scale，输出 `{"type":"decimal","value":"-12345678.90"}`。
-- CHAR / VARCHAR，支持 utf8、utf8mb3、utf8mb4、ascii、latin1。UTF-8 主键在底层 `Decoder` 回调中直接借用事件缓冲区；转为事务持有的 owned 值时才复制。CHAR 移除末尾空格填充。
+| 字段 | 表示什么 | 示例 |
+| --- | --- | --- |
+| `source` | 配置中的来源名称，用于区分不同 MySQL 实例 | `east` |
+| `schema` | 数据库名 | `app` |
+| `table` | 表名 | `users` |
+| `operation` | 新增、更新或删除 | `insert`、`update`、`delete` |
+| `pk` | 用来定位这条记录的主键；主键变更时为新值 | 主键 42 |
+| `previous_pk` | 主键变更前的值，仅在主键确实变更时提供 | 主键从 42 变成 43 时为 42 |
+| `changed` | 日志在修改后的数据中记录了哪些字段，按表列顺序列出 | `name`、`age` |
 
-拒绝联合主键、无主键、FLOAT/DOUBLE 主键、二进制主键、其他主键字符集。JSON 数字能表示 u64，但 JavaScript 消费方直接解析大整数会损失精度，应使用保留大整数的 JSON 解析器，或在自定义输出层转成字符串。
+主键同时携带类型和值。例如 `{"type":"unsigned","value":42}` 是无符号整数，`{"type":"text","value":"user-42"}` 是文本，`{"type":"decimal","value":"123.40"}` 是保留小数位的精确数值。有符号整数使用 `signed`。
 
-非主键字段支持跳过整数、FLOAT/DOUBLE、DECIMAL、BIT、日期时间及其小数秒、CHAR/VARCHAR/BINARY/VARBINARY、ENUM/SET、BLOB/TEXT、JSON、空间类型、VECTOR。非主键值不解码，因此不会为 JSON/字符串/BLOB 内容分配对象。NULL 位图仍按保存的 schema 校验：NOT NULL 列出现 NULL 时明确报错，不交付事务或持久化检查点。生成列、不可见列、旧 DECIMAL wire 类型和 typed array 明确报错，不推测布局。
+**`changed` 不表示系统逐个比较新旧值后发现的差异。** 它表示 MySQL 在修改后的日志数据中记录了这些字段；字段值可能与修改前相同。
 
-## 事务与限制
+## MINIMAL 和 FULL 记录了什么
 
-只有 XID/COMMIT 后输出。ROLLBACK 丢弃缓冲。输出成功且 flush 后才原子替换 state，并同步文件和父目录；文件锁阻止同一 state 的并发消费者。输出或保存失败就停止。崩溃在输出与 state 保存之间会重复投递，消费者须幂等；stdout 的 flush 仅代表写入 OS/管道，**不代表下游持久化确认，不能承诺 exactly-once，也不能承诺下游故障时无丢失**。
+“行镜像”就是日志保存的那部分行数据。`before` 表示修改前的数据，`after` 表示修改后的数据。
 
-遇到任何非 BEGIN/COMMIT/ROLLBACK 的 QUERY_EVENT 都停止，包含其他库的 DDL。这是保守策略，因为跨库 SQL、RENAME、TRUNCATE 无法按默认库安全过滤。DDL 不会自动刷新当前 schema 并继续读取历史流。线上迁移需要消费到 DDL 前，明确处理 schema 版本和 DDL 后位点；另建 state 从当前开始只适用于已确认旧积压处理完毕的切换，不应直接删除旧 state 跳过积压。
+仍以上面那次更新为例，原始日志中的信息可以这样理解。此表是内容说明，不是系统额外输出的一种格式：
 
-XA、部分 JSON 更新、压缩事务、MariaDB 扩展、非可忽略未知事件均拒绝。心跳、GTID、ROTATE、格式描述和普通可忽略事件被处理；恢复方式是 file/position，不是 GTID failover。断线返回错误，可由进程管理器重启后从 state 恢复；不在进程内静默重连。源码布局校验参考 [MySQL 8.4 格式描述源码](https://raw.githubusercontent.com/mysql/mysql-server/mysql-8.4.6/libs/mysql/binlog/event/control_events.cpp)。
+| 数据 | MINIMAL：修改前 | MINIMAL：修改后 | FULL：修改前 | FULL：修改后 |
+| --- | --- | --- | --- | --- |
+| id | 42 | 未记录 | 42 | 42 |
+| name | 未记录 | Bob | Alice | Bob |
+| age | 未记录 | NULL | 20 | NULL |
+| status | 未记录 | 未记录 | active | active |
 
-## 错误边界
+对本系统支持的单列主键表，MINIMAL 更新前的数据用主键定位记录，修改后只含日志实际记录的列。FULL 的每份行镜像包含全部列。
 
-| Canal 错误 | 触发条件 |
+两种模式的 **通用事件字段不变**，上例的区别是：
+
+| 内容 | MINIMAL | FULL |
+| --- | --- | --- |
+| `operation` | `update` | `update` |
+| `pk` | 无符号整数 42 | 无符号整数 42 |
+| `changed` | `name`、`age` | `id`、`name`、`age`、`status` |
+| 是否输出完整行值 | 否 | 否 |
+
+因此，FULL 中 `status` 即使仍是 active，也会出现在 `changed` 中。它在完整的 after 镜像中被记录了。
+
+模式在配置中明确选择。程序会检查上游设置与输入数据是否符合要求；它不会替 MySQL 修改配置，也不会给 MINIMAL 数据补齐缺失的值。原始复制读取不要求表有主键，其 MINIMAL 读取也可以接受完整镜像；上面的主键定位要求属于 Canal 的 CDC 规则。
+
+### 未记录与 NULL 的区别
+
+| 情况 | 含义 | 能否当作数据库中的空值 |
+| --- | --- | --- |
+| 字段未记录 | 这次日志没有携带该字段，无法据此知道它的值 | 不能 |
+| 字段记录为 NULL | 日志明确表示这个字段是 SQL NULL | 可以 |
+| 整份镜像不存在 | 这种操作没有修改前或修改后的记录 | 不能当作一行空值 |
+
+上例 MINIMAL 中的 `status` 是“未记录”，`age` 的修改后值是“NULL”。二者不能混为一谈。
+
+## 新增、更新、删除分别怎样表示
+
+| 操作 | 修改前的数据 | 修改后的数据 | 通用事件的 `changed` |
+| --- | --- | --- | --- |
+| 新增 `insert` | 不存在 | 存在 | 修改后日志中实际记录的字段 |
+| 更新 `update` | 存在 | 存在 | 修改后日志中实际记录的字段 |
+| 删除 `delete` | 存在 | 不存在 | 空列表 |
+
+“存在”不代表包含完整行；包含哪些字段取决于模式和该事件实际携带的数据。INSERT 也按实际记录的字段处理，不在消费端假定它必定包含所有列。
+
+例如删除主键 42 的记录，输出为：
+
+```json
+{
+  "source": "east",
+  "schema": "app",
+  "table": "users",
+  "operation": "delete",
+  "pk": { "type": "unsigned", "value": 42 },
+  "changed": []
+}
+```
+
+如果更新把主键从 42 改为 43，通知会同时提供新旧主键。下面展示 MINIMAL 模式下只修改主键的例子：
+
+```json
+{
+  "source": "east",
+  "schema": "app",
+  "table": "users",
+  "operation": "update",
+  "pk": { "type": "unsigned", "value": 43 },
+  "previous_pk": { "type": "unsigned", "value": 42 },
+  "changed": ["id"]
+}
+```
+
+## 原始 BinlogEvent 又包含什么
+
+原始事件描述 MySQL 日志本身，除了行修改，还包含事务开始与提交、日志轮换和格式说明。一个 SQL 可以产生多个事件，一个行事件也可以包含多条记录。
+
+每个原始事件都有三个共用部分，两种模式下都一样：
+
+| 部分 | 含义 |
 | --- | --- |
-| `Error::Schema` | 非主键 NOT NULL 列出现 NULL，或 schema 不匹配 |
-| `Error::MissingPrimaryKey` | 主键缺失或为 NULL |
-| `Error::Invalid` | 畸形生产者版本等非法输入 |
-| `Error::Unsupported` | 未支持的厂商、FDE 布局或类型 |
-| `Error::Statement` | 非 BEGIN/COMMIT/ROLLBACK 的 QUERY，包括 DDL |
+| 原始数据 `raw_data` | 从日志读取的完整事件字节，包含实际校验信息 |
+| 事件头 `header` | 事件时间、类型、生产者 ID、长度、日志位置和标志 |
+| 事件内容 `event` | 这是一条行修改、表说明、提交标记，还是其他事件 |
 
-错误停止消费，未确认事务不得推进磁盘检查点。复制库返回独立的 `mysql_replication::Error`；不要混用两层错误类型。验证这些边界的回归入口见[测试指南](testing.zh-CN.md)。
+事件头中的公共字段如下。它们描述日志，不是业务行里的字段：
+
+| 字段 | 含义 | 读者需要注意什么 |
+| --- | --- | --- |
+| `timestamp` | 生产者记录的时间，单位为 Unix 秒 | 不等于消费程序收到事件的时间 |
+| `event_type` | 事件种类 | 行修改和提交标记是不同事件 |
+| `server_id` | 生产者记录的服务器 ID | 不等于配置里的来源名称 `source` |
+| `event_size` | 完整事件占用的字节数 | 包含头部及实际校验信息 |
+| `log_pos` | 日志记录的位置，通常指向下一条事件 | 不等于已经消费确认的检查点 |
+| `flags` | 协议标志 | 用于协议解析和诊断 |
+
+常见事件可以按用途理解：
+
+| 事件 | 作用 | 主要内容 |
+| --- | --- | --- |
+| 格式说明（FDE） | 告诉读取方怎样理解这个日志文件 | 生产者版本、事件布局、校验方式 |
+| 表映射（TABLE_MAP） | 告诉读取方后面的行属于哪张表、怎样解释列 | 临时表编号、库表名、列类型信息 |
+| 行修改（ROWS） | 记录新增、更新、删除 | 表编号、操作、修改前后数据 |
+| 语句（QUERY） | 记录 SQL 语句或事务边界 | SQL、默认数据库等 |
+| 事务提交（XID） | 确认事务已提交 | 事务标识 |
+| 日志轮换（ROTATE） | 切换到下一个日志文件 | 下个文件名与起点 |
+| GTID / 心跳 | 描述事务身份或维持复制连接 | 事务标识、相关元数据或日志文件名 |
+
+MINIMAL/FULL 的内容差异发生在行修改的前后数据中；公共头和这些事件种类不会因此增加或减少。复制库可以读取包含 DDL 的语句事件，Canal 遇到不支持的语句会停止。
+
+## 什么时候收到事件，失败后会怎样
+
+使用 Canal 或 Pikachu 时，应用在事务提交后才收到变更。事务回滚则丢弃这批变更；不属于白名单的行不会输出。库的事务处理器仍会收到完全过滤的已提交事务，其中变更列表为空。
+
+处理器成功后才保存检查点。若处理器已产生外部副作用，而程序在保存检查点前退出，重启后可能再次交付这批数据。消费方需要能安全处理重复通知。CLI 刷新标准输出不等于下游已经持久保存数据。
+
+同一来源按日志顺序交付，同一个事务不会被其他来源的事务打断。不同 MySQL 实例之间没有全局时间顺序。
+
+直接读取原始 BinlogEvent 时，看到行修改不代表事务已经提交。需要提交后交付的应用应使用 Canal 的事务消费接口。
+
+## 支持范围与停止条件
+
+CDC 要求单列主键，支持整数、精确 DECIMAL，以及 utf8、utf8mb3、utf8mb4、ascii、latin1 的 CHAR/VARCHAR。联合主键、无主键和未支持的主键类型会报错。大整数消费方应使用能保留精度的 JSON 解析器。
+
+遇到表结构变更（DDL）、不支持的语句或格式、损坏/截断日志、缺失主键、字段元数据不匹配，程序会停止。未确认的事务不会推进磁盘检查点。NOT NULL 列出现 NULL 也会报错，不会因为它不是主键而忽略。
+
+DDL 不会自动刷新表结构并继续。恢复会使用检查点保存的历史表结构解释历史日志。不要删除检查点来跳过未处理的数据。
+
+## 继续阅读
+
+- [配置与运行](configuration.zh-CN.md)：选择模式、准备 MySQL、恢复和回放。
+- [系统如何工作](architecture.zh-CN.md)：分层、事务和多来源的配合。
+- [Rust 事件 API 参考](event-api.zh-CN.md)：完整字段、泛型接口、访问方式与借用生命周期。
