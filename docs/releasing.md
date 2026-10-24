@@ -60,7 +60,7 @@ cargo publish --locked --registry crates-io --package pikachu
 
 ## 发布版本
 
-项目尚未发版，当前四个包的清单版本为 `2.0.0`，本页说明首次发布的准备和执行流程。配置以[当前配置指南](configuration.zh-CN.md)为准，事件类型和 MINIMAL/FULL 输出契约见[事件参考](events.zh-CN.md)。
+项目尚未发版，当前四个包的清单版本为 `2.0.1`，本页说明首次发布的准备和执行流程。配置以[当前配置指南](configuration.zh-CN.md)为准，事件类型和 MINIMAL/FULL 输出契约见[事件参考](events.zh-CN.md)。
 
 发布按以下顺序准备：
 
@@ -104,10 +104,10 @@ git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}"
 
 ```toml
 [dependencies]
-mysql-cdc-rs = "2.0.0"
+mysql-cdc-rs = "2.0.1"
 ```
 
-统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu --version 2.0.0 --locked` 安装，命令名为 `pikachu-cdc`。四个包清单版本均为 `2.0.0`，项目尚未发布。工作流本身不会创建 GitHub Release 或推送 Git tag。
+统一库入口为 [mysql-cdc-rs](https://crates.io/crates/mysql-cdc-rs)，API 文档为 [docs.rs](https://docs.rs/mysql-cdc-rs)，直接导入 `mysql_cdc_rs`。CDC 类型可从根路径或 `canal` 导入，原始事件从 `replication` 导入；底层 [mysql-canal](https://crates.io/crates/mysql-canal) 与 [mysql-replication](https://crates.io/crates/mysql-replication) 仍可独立使用。CLI 使用 `cargo install pikachu --version 2.0.1 --locked` 安装，命令名为 `pikachu-cdc`。四个包清单版本均为 `2.0.1`，项目尚未发布。工作流本身不会创建 GitHub Release 或推送 Git tag。
 
 四个包发布不是原子操作。若部分包已上传而后续包失败，先确认各 crate 的实际状态，不要直接重跑整个发布 job 重复上传；可按依赖顺序恢复尚未发布的包。已成功上传的版本不能重复发布；修改内容需要同步增加四个包的版本号，并使用匹配的新 tag。
 

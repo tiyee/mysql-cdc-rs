@@ -20,7 +20,7 @@ mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 | [pikachu](crates/pikachu/README.zh-CN.md) | `pikachu-cdc` | 基于 Canal 的 CLI 产品，默认输出 JSON Lines |
 | [mysql-cdc-rs](crates/mysql-cdc/README.zh-CN.md) | Rust 统一入口 | 统一库入口，重导出两个底层库 |
 
-四个包当前清单版本均为 **2.0.0**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
+四个包当前清单版本均为 **2.0.1**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
 
 ## CLI 使用示例
 
