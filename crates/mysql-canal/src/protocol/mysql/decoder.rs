@@ -354,6 +354,32 @@ fn compile<M: CdcImageMode>(meta: Arc<TableMeta>, data: &[u8]) -> Result<TablePl
     mapping.table = meta.table.as_bytes();
     mapping.column_data = data;
     let fields = mysql_replication::events::RowsDecoder::<M>::new(&mapping)?;
+    for (column, wire) in meta.columns.iter().zip(fields.columns()) {
+        use mysql_replication::events::ColumnType::*;
+        // Signedness changes integer interpretation; absent attributes stay unknown.
+        if matches!(
+            wire.definition.column_type(),
+            MYSQL_TYPE_TINY
+                | MYSQL_TYPE_SHORT
+                | MYSQL_TYPE_INT24
+                | MYSQL_TYPE_LONG
+                | MYSQL_TYPE_LONGLONG
+        ) && wire
+            .unsigned
+            .is_some_and(|unsigned| unsigned != column.is_unsigned())
+        {
+            return Err(Error::Schema(format!("{} signedness differs", column.name)));
+        }
+        if wire
+            .primary_key
+            .is_some_and(|key| key != column.primary_key)
+        {
+            return Err(Error::Schema(format!(
+                "{} primary-key membership differs",
+                column.name
+            )));
+        }
+    }
     Ok(TablePlan {
         fields,
         meta,

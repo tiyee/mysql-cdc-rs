@@ -125,3 +125,5 @@ mysql-cdc-rs = "2.0.1"
 不要将 dry-run 日志中的 `Uploading` 行当成上传成功：其后的 `aborting upload due to dry run` 表示未上传。标签推送成功也不能替代 CI 和四包发布结果确认。
 
 Canal 的首版输出同时包含 `fields.before` / `fields.after`，每个字段有绝对索引、历史 SQL 列元数据和日志值。MINIMAL 不补齐缺列，FULL 保留适用镜像的全部列；SQL NULL 与缺列必须分开验证。发布前同步双语 JSON 示例、字段借用/owned 生命周期、事务预算及输出失败不确认检查点的回归。聚合层不增加构造或配置入口，也不保留旧输出的兼容路径。
+
+TABLE_MAP 已携带的整数符号和主键成员属性须与历史 SQL schema 一致；冲突在编译映射时以 `Error::Schema` 拒绝，不能按旧 schema 静默解释字节。发布回归同时检查属性匹配、缺失和冲突，以及未确认检查点保持不变。

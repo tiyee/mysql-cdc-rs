@@ -676,3 +676,60 @@ fn invalid_field_json_does_not_acknowledge_the_transaction() {
     assert_eq!(fs::read(&path).unwrap(), saved);
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn conflicting_optional_metadata_never_emits_or_advances_disk_checkpoint() {
+    use mysql_canal::config::RowImageMode;
+    use mysql_common::binlog::consts::OptionalMetadataFieldType as Tag;
+    for mode in [RowImageMode::Minimal, RowImageMode::Full] {
+        for (tag, data, message) in [
+            (Tag::SIGNEDNESS, vec![0x80], "id signedness differs"),
+            (
+                Tag::SIMPLE_PRIMARY_KEY,
+                vec![2],
+                "id primary-key membership differs",
+            ),
+        ] {
+            let path = temporary("metadata-conflict");
+            let snapshot = state();
+            snapshot.save(&path).unwrap();
+            let saved = fs::read(&path).unwrap();
+            let mut processor = Processor::new(
+                snapshot,
+                Some(path.clone()),
+                100_000,
+                mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+                None,
+                mode,
+            )
+            .unwrap();
+            let mut output = Vec::new();
+            feed(
+                &mut processor,
+                FORMAT_DESCRIPTION_EVENT,
+                100,
+                &format(),
+                &mut output,
+            )
+            .unwrap();
+            feed(
+                &mut processor,
+                QUERY_EVENT,
+                150,
+                &query("BEGIN"),
+                &mut output,
+            )
+            .unwrap();
+            let mut body = table_map(7, &basic(), &[3, 15, 3], &[100, 0]);
+            body.push(tag as u8);
+            lenenc(&mut body, data.len());
+            body.extend(data);
+            assert!(
+                matches!(feed(&mut processor, TABLE_MAP_EVENT, 200, &body, &mut output), Err(Error::Schema(value)) if value == message)
+            );
+            assert!(output.is_empty());
+            assert_eq!(fs::read(&path).unwrap(), saved);
+            fs::remove_file(path).unwrap();
+        }
+    }
+}

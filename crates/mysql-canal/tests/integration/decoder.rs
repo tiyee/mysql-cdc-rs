@@ -1246,3 +1246,104 @@ fn malformed_non_key_decimal_is_rejected_before_delivery() {
     );
     assert_eq!(delivered, 0);
 }
+
+#[test]
+fn table_map_optional_metadata_must_match_historical_integer_signs_and_keys() {
+    use mysql_common::binlog::consts::OptionalMetadataFieldType as Tag;
+    fn run<M: mysql_canal::CdcImageMode>() {
+        let mut meta = basic();
+        meta.columns[2].column_type = "int unsigned".into();
+        for (tag, data, message) in [
+            (Tag::SIGNEDNESS, vec![0xc0], "id signedness differs"),
+            (Tag::SIGNEDNESS, vec![0], "age signedness differs"),
+            (
+                Tag::SIMPLE_PRIMARY_KEY,
+                vec![2],
+                "id primary-key membership differs",
+            ),
+            (
+                Tag::SIMPLE_PRIMARY_KEY,
+                vec![0, 2],
+                "age primary-key membership differs",
+            ),
+            (
+                Tag::PRIMARY_KEY_WITH_PREFIX,
+                vec![2, 0],
+                "id primary-key membership differs",
+            ),
+        ] {
+            let mut body = table_map(7, &meta, &[3, 15, 3], &[100, 0]);
+            body.push(tag as u8);
+            lenenc(&mut body, data.len());
+            body.extend(data);
+            let mut decoder = Decoder::<M>::new(vec![meta.clone()]).unwrap();
+            assert!(
+                matches!(decode_table(&mut decoder, &body), Err(Error::Schema(value)) if value == message)
+            );
+        }
+    }
+    run::<mysql_canal::Minimal>();
+    run::<mysql_canal::Full>();
+}
+
+#[test]
+fn matching_or_absent_optional_metadata_preserves_exact_field_values() {
+    use mysql_common::binlog::consts::OptionalMetadataFieldType as Tag;
+    fn run<M: mysql_canal::CdcImageMode>() {
+        let mut meta = basic();
+        meta.columns[2].column_type = "int unsigned".into();
+        for signedness in [false, true] {
+            for key in [
+                None,
+                Some(Tag::SIMPLE_PRIMARY_KEY),
+                Some(Tag::PRIMARY_KEY_WITH_PREFIX),
+            ] {
+                let mut body = table_map(7, &meta, &[3, 15, 3], &[100, 0]);
+                if signedness {
+                    // Numeric ordinals exclude the intervening VARCHAR column.
+                    body.extend([Tag::SIGNEDNESS as u8, 1, 0x40]);
+                }
+                if let Some(key) = key {
+                    body.extend([
+                        key as u8,
+                        if matches!(key, Tag::SIMPLE_PRIMARY_KEY) {
+                            1
+                        } else {
+                            2
+                        },
+                        0,
+                    ]);
+                    if matches!(key, Tag::PRIMARY_KEY_WITH_PREFIX) {
+                        body.push(0);
+                    }
+                }
+                let mut decoder = Decoder::<M>::new(vec![meta.clone()]).unwrap();
+                decode_table(&mut decoder, &body).unwrap();
+                let mut data = vec![0];
+                data.extend((-1i32).to_le_bytes());
+                data.extend([1, b'N']);
+                data.extend(u32::MAX.to_le_bytes());
+                let mut delivered = 0;
+                decode_rows(
+                    &mut decoder,
+                    WRITE_ROWS_EVENT,
+                    &rows(7, WRITE_ROWS_EVENT, 3, &[7], &[], &data),
+                    |change| {
+                        assert_eq!(change.pk, PrimaryKey::Signed(-1));
+                        let json = serde_json::to_value(&change).unwrap();
+                        assert_eq!(json["fields"]["after"][0]["value"], -1);
+                        assert_eq!(json["fields"]["after"][1]["value"], "N");
+                        assert_eq!(json["fields"]["after"][2]["value"], u32::MAX);
+                        assert_eq!(serde_json::to_value(change.into_owned()).unwrap(), json);
+                        delivered += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(delivered, 1);
+            }
+        }
+    }
+    run::<mysql_canal::Minimal>();
+    run::<mysql_canal::Full>();
+}

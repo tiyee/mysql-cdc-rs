@@ -264,6 +264,8 @@ MINIMAL 与 FULL 使用相同的通用类型和字段。MINIMAL 仅提供已记�
 
 JSON 输出、数据类型支持及提交和失败行为见[事件说明](events.zh-CN.md)。
 
+TABLE_MAP 提供整数符号或主键成员属性时，Canal 在接受映射前将其与历史 SQL schema 核对；冲突返回 `Error::Schema`，发生在行回调和检查点确认之前。缺失可选属性保持未知，不覆盖保存的 schema。
+
 ### 读取 Canal 字段
 
 `FieldImage` 和 `OwnedFieldImage` 提供 `table()`、`columns()`、`column_indices()`、`fields()` 和 `field(index)`。`Field` 包含 `index: u16`、`column: &ColumnMeta` 及 `value: RowValue`。索引为历史表的绝对列序号；`field(index)` 返回 `Result<Option<Field>>`，仅未记录列为 `None`，越界报错。SQL NULL 为 `RowValue::Null`。INSERT 只有 after，UPDATE 两者都有，DELETE 只有 before，由 `RowOperation` 变体表达。

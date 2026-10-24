@@ -22,6 +22,8 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 
 携带字段的泛型事件回归独立构造 TABLE_MAP 可选 TLV 和 ROWS 字节，覆盖列名、MSB 优先符号位图、紧凑字符列 collation 索引、主键前缀、未知/畸形元数据、未记录/NULL 字段、owned 视图保留历史定义、重映射和来源隔离。原始实库行场景还会将泛型 `next_event()` 的自动绑定结果与现有手动解码器逐项比较。
 
+Canal TABLE_MAP 回归同时覆盖两种镜像策略下的整数符号、主键元数据冲突，匹配或缺失的可选元数据、紧凑数字列序号，以及拒绝后无输出、不确认检查点。
+
 Canal 字段回归比较完整借用/owned JSON、历史列元数据、稀疏缺列与 SQL NULL、无符号整数及精确 DECIMAL、文本/字节和编码值、输入缓冲区复用、混合来源模式、镜像内存预算，以及序列化失败不推进检查点。实库预期同时比较 before/after 字段、主键和变动字段名；二进制 JSON 仅在专门的语义断言中解码。
 
 ## 专用 MySQL 测试

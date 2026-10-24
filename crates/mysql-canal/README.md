@@ -35,7 +35,7 @@ Each source owns its connection, schema and checkpoint. Initial consumption star
 
 ## Events and handlers
 
-`CommittedTransaction` contains `source_id`, the commit `checkpoint` and ordered `changes`. Each change contains its table, operation, exact key, optional previous key, changed column indices and `fields`. `fields.before()` / `fields.after()` expose applicable images; each image iterates logged fields with absolute indices, historical `ColumnMeta` and borrowed `RowValue`. Committed changes own compact image bytes and share column definitions. Field bytes count toward the transaction budget before copying.
+`CommittedTransaction` contains `source_id`, the commit `checkpoint` and ordered `changes`. Each change contains its table, operation, exact key, optional previous key, changed column indices and `fields`. `fields.before()` / `fields.after()` expose applicable images; each image iterates logged fields with absolute indices, historical `ColumnMeta` and borrowed `RowValue`. Committed changes own compact image bytes and share column definitions. Field bytes count toward the transaction budget before copying. Logged integer signedness and primary-key metadata must agree with historical schema; conflicts stop consumption before rows are delivered.
 
 Handlers run synchronously in registration order. All must succeed before checkpoint persistence. COMMIT/XID delivers the transaction; rollback discards it. Fully filtered commits deliver an empty slice. Failures can cause replay, so handlers must be idempotent. Register at least one handler before running; slow handlers apply backpressure.
 

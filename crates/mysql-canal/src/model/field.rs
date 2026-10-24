@@ -147,12 +147,7 @@ impl Serialize for Value<'_> {
         match self.0 {
             RowValue::Null => serializer.serialize_none(),
             RowValue::Integer(value) => {
-                if self
-                    .1
-                    .column_type
-                    .split_ascii_whitespace()
-                    .any(|v| v.eq_ignore_ascii_case("unsigned"))
-                {
+                if self.1.is_unsigned() {
                     serializer.serialize_u64(value.unsigned())
                 } else {
                     serializer.serialize_i64(value.signed())

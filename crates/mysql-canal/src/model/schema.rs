@@ -19,6 +19,14 @@ pub struct ColumnMeta {
     pub extra: String,
 }
 
+impl ColumnMeta {
+    pub(crate) fn is_unsigned(&self) -> bool {
+        self.column_type
+            .split_ascii_whitespace()
+            .any(|part| part.eq_ignore_ascii_case("unsigned"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableMeta {
@@ -73,12 +81,7 @@ impl TableMeta {
 pub(crate) type KeyDecoder = for<'a> fn(&'a [u8], &ColumnMeta) -> Result<crate::PrimaryKey<'a>>;
 
 pub(crate) fn key_decoder(col: &ColumnMeta) -> Result<KeyDecoder> {
-    let unsigned = col
-        .column_type
-        .to_ascii_lowercase()
-        .split_ascii_whitespace()
-        .any(|s| s == "unsigned");
-    Ok(match (col.data_type.as_str(), unsigned) {
+    Ok(match (col.data_type.as_str(), col.is_unsigned()) {
         ("tinyint", false) => integer::<1, false>,
         ("tinyint", true) => integer::<1, true>,
         ("smallint", false) => integer::<2, false>,

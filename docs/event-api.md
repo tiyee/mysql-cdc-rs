@@ -264,6 +264,8 @@ MINIMAL and FULL use these same normalized types and fields. MINIMAL exposes onl
 
 See the [event guide](events.md) for JSON output, supported data types, commit delivery and failure behavior.
 
+When TABLE_MAP provides integer signedness or primary-key membership, canal checks these attributes against the historical SQL schema before accepting the mapping. Conflicts return `Error::Schema` before row callbacks or checkpoint acknowledgement. Missing optional attributes stay unknown; they do not override the saved schema.
+
 ### Inspect canal fields
 
 `FieldImage` and `OwnedFieldImage` provide `table()`, `columns()`, `column_indices()`, `fields()` and `field(index)`. `Field` has `index: u16`, `column: &ColumnMeta` and `value: RowValue`. Indices are absolute historical ordinals; `field(index)` returns `Result<Option<Field>>`, with `None` only for unlogged columns and an error outside the table. SQL NULL is `RowValue::Null`. INSERT carries only after, UPDATE both and DELETE only before, encoded by `RowOperation` variants.
