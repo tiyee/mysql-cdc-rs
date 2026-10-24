@@ -96,11 +96,16 @@ fn replay_uses_saved_schema_boundary_and_delivers_only_commits() {
         .unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
-        serde_json::json!({
-            "source": "test", "schema": "app", "table": "users",
-            "operation": "delete", "pk": {"type": "signed", "value": 42},
-            "changed": []
-        })
+        with_fields(
+            serde_json::json!({
+                "source": "test", "schema": "app", "table": "users",
+                "operation": "delete", "pk": {"type": "signed", "value": 42},
+                "changed": []
+            }),
+            &basic(),
+            Some(&[(0, serde_json::json!(42))]),
+            None
+        )
     );
 }
 

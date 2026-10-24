@@ -38,7 +38,7 @@ fn main() -> Result<()> {
 
 Protocol events can be passed directly to CDC conversion without wrapping or copying them:
 
-Raw events use `replication::BinlogEvent<Full>` / `BinlogEvent<Minimal>` to select image types statically, sharing marker types with canal. Generic readers bind TABLE_MAP automatically; image `fields()` provides column definitions and borrowed values. MINIMAL distinguishes absent fields from SQL NULL, while FULL requires every column in each existing image. Missing optional metadata such as column names stays unknown; CDC changes do not acquire complete row values.
+Raw events use `replication::BinlogEvent<Full>` / `BinlogEvent<Minimal>` to select image types statically, sharing marker types with canal. Generic readers bind TABLE_MAP automatically; image `fields()` provides column definitions and borrowed values. MINIMAL distinguishes absent fields from SQL NULL, while FULL requires every column in each existing image. Missing optional metadata such as column names stays unknown; canal changes expose logged before/after values with historical SQL `ColumnMeta` in `fields`.
 
 ```rust
 use mysql_cdc_rs::{
@@ -67,7 +67,7 @@ cargo run -p mysql-cdc-rs --example canal_listen -- canal.toml
 cargo run -p mysql-cdc-rs --example replication_dump_file -- /path/to/binlog.000001
 ```
 
-CDC uses named sources with independent schemas, whitelists and checkpoints. It delivers only committed changes containing the source, database/table, operation, exact primary key and changed column names. Rollback discards buffered changes; failures stop consumption, and a crash before checkpoint persistence may cause replay. There is no default output handler in the library. The `pikachu` package provides the `pikachu-cdc` CLI.
+CDC uses named sources with independent schemas, whitelists and checkpoints. It delivers only committed changes containing the source, database/table, operation, exact primary key, changed column names and before/after fields with metadata and values. Rollback discards buffered changes; failures stop consumption, and a crash before checkpoint persistence may cause replay. There is no default output handler in the library. The `pikachu` package provides the `pikachu-cdc` CLI.
 
 The lower-level crates remain available as separate dependencies. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme), [CDC library](https://docs.rs/mysql-canal) and [replication library](https://docs.rs/mysql-replication) for configuration, output contracts, version support and limitations.
 

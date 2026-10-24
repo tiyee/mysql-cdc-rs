@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
 ## 事件与处理器
 
-`CommittedTransaction` 包含 `source_id`、提交 `checkpoint` 和有序 `changes`。每条变更包含表、操作、精确主键、可选旧主键及字段索引。库只解码主键，其他字段值按长度跳过。
+`CommittedTransaction` 包含 `source_id`、提交 `checkpoint` 和有序 `changes`。每条变更包含表、操作、精确主键、可选旧主键、变动字段索引和 `fields`。`fields.before()` / `fields.after()` 返回适用的镜像；镜像按绝对列索引遍历日志字段，提供历史 `ColumnMeta` 和借用 `RowValue`。提交变更持有紧凑镜像字节并共享列定义；复制前将字段字节计入事务预算。
 
 处理器按注册顺序同步执行；所有处理器成功后才保存检查点。COMMIT/XID 前不交付，回滚丢弃；完全过滤的提交仍交付空切片。失败可能导致重放，处理器须幂等。运行前必须注册至少一个处理器，慢处理器会施加背压。
 
@@ -55,7 +55,7 @@ fn full_decoder(tables: Vec<TableMeta>) -> Result<Decoder<Full>> {
 }
 ```
 
-MINIMAL 使用 `Decoder::<Minimal>::new(tables)`。两种模式交付相同的 `Change` / `CommittedTransaction` 字段；FULL 的 `changed` 包含全部 after-image 列，也可能包含值未改变的列。见[监听示例](examples/listen.rs)。
+MINIMAL 使用 `Decoder::<Minimal>::new(tables)`。两种模式交付相同的 `Change` / `CommittedTransaction` API；MINIMAL 仅保留日志记录字段，FULL 的每份适用镜像保留全部列；FULL 的 `changed` 包含全部 after-image 列，也可能包含值未改变的列。见[监听示例](examples/listen.rs)。
 
 ## 离线回放
 

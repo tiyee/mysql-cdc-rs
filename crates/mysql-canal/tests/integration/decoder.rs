@@ -146,6 +146,18 @@ fn multiple_rows_share_changed_indices_and_metadata() {
     assert_eq!(out.len(), 3);
     assert!(Arc::ptr_eq(&out[0].changed, &out[2].changed));
     assert!(Arc::ptr_eq(&out[0].table, &out[2].table));
+    for side in [
+        mysql_canal::RowOperation::before,
+        mysql_canal::RowOperation::after,
+    ] {
+        let first = side(&out[0].fields).unwrap();
+        let last = side(&out[2].fields).unwrap();
+        assert_eq!(
+            first.column_indices().as_ptr(),
+            last.column_indices().as_ptr()
+        );
+        assert!(std::ptr::eq(first.columns(), last.columns()));
+    }
     assert_eq!(out[2].pk, PrimaryKey::Signed(3));
 }
 
@@ -404,7 +416,7 @@ fn more_than_64_columns_and_pk_after_nulls() {
 }
 
 #[test]
-fn skip_mixed_types_before_key_without_decoding_values() {
+fn mixed_fields_before_key_preserve_wire_values() {
     let mut cols = Vec::new();
     let mut types = Vec::new();
     let mut metadata = Vec::new();
@@ -416,7 +428,7 @@ fn skip_mixed_types_before_key_without_decoding_values() {
         ("time", 19, vec![1], vec![0; 4]),
         ("timestamp", 17, vec![2], vec![0; 5]),
         ("bit", 16, vec![1, 1], vec![0; 2]),
-        ("decimal", 246, vec![12, 4], vec![0; 6]),
+        ("decimal", 246, vec![12, 4], vec![0x80, 0, 0, 0, 0, 0]),
         ("enum", 254, vec![247, 2], vec![0; 2]),
         ("set", 254, vec![248, 3], vec![0; 3]),
         ("blob", 252, vec![2], vec![3, 0, 1, 2, 3]),
@@ -785,6 +797,44 @@ fn full_v1_v2_images_preserve_operations_keys_nulls_and_shared_changed_fields() 
             );
         }
         assert!(Arc::ptr_eq(&out[0].changed, &out[1].changed));
+        for (index, change) in out.iter().enumerate() {
+            let original_id = index as i32 + 1;
+            assert_eq!(change.fields.before().is_some(), update || delete);
+            assert_eq!(change.fields.after().is_some(), !delete);
+            for image in [change.fields.before(), change.fields.after()]
+                .into_iter()
+                .flatten()
+            {
+                assert_eq!(image.column_indices(), [0, 1, 2]);
+                assert_eq!(image.columns(), basic().columns);
+                assert_eq!(image.fields().count(), 3);
+            }
+            let serialized = serde_json::to_value(change).unwrap();
+            if update || delete {
+                assert_eq!(serialized["fields"]["before"][0]["value"], original_id);
+                assert_eq!(serialized["fields"]["before"][1]["value"], "old");
+                assert_eq!(serialized["fields"]["before"][2]["value"], 20);
+            }
+            if !delete {
+                assert_eq!(
+                    serialized["fields"]["after"][0]["value"],
+                    if update && index == 0 {
+                        10
+                    } else {
+                        original_id
+                    }
+                );
+                assert_eq!(
+                    serialized["fields"]["after"][1]["value"],
+                    if update {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!("old")
+                    }
+                );
+                assert_eq!(serialized["fields"]["after"][2]["value"], 20);
+            }
+        }
     }
 }
 
@@ -976,4 +1026,223 @@ fn statically_selected_decoders_validate_mode_before_emitting() {
         emitted[0].changed_names().collect::<Vec<_>>(),
         ["id", "name", "age"]
     );
+}
+
+#[test]
+fn field_images_borrow_values_and_owned_changes_survive_event_reuse() {
+    fn run<M: mysql_canal::CdcImageMode>() {
+        use mysql_canal::{RowValue, config::RowImageMode};
+        let mut decoder = Decoder::<M>::new(vec![basic()]).unwrap();
+        decode_table(
+            &mut decoder,
+            &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+        )
+        .unwrap();
+        let full = M::ROW_IMAGE == RowImageMode::Full;
+        let mut data = if full {
+            full_image(7, Some("old"), 20)
+        } else {
+            let mut bytes = vec![0];
+            bytes.extend(7i32.to_le_bytes());
+            bytes
+        };
+        data.push(if full { 4 } else { 2 });
+        if full {
+            data.extend(7i32.to_le_bytes());
+        }
+        data.extend([3, b'B', b'o', b'b']);
+        let mut body = rows(
+            7,
+            UPDATE_ROWS_EVENT,
+            3,
+            if full { &[7] } else { &[1] },
+            if full { &[7] } else { &[6] },
+            &data,
+        );
+        let mut captured = None;
+        let mut borrowed_json = None;
+        decode_rows(&mut decoder, UPDATE_ROWS_EVENT, &body, |change| {
+            let before = change.fields.before().unwrap();
+            let after = change.fields.after().unwrap();
+            assert_eq!(
+                before.column_indices(),
+                if full { &[0, 1, 2][..] } else { &[0][..] }
+            );
+            assert_eq!(
+                after.column_indices(),
+                if full { &[0, 1, 2][..] } else { &[1, 2][..] }
+            );
+            assert_eq!(after.columns().len(), 3);
+            assert_eq!(after.field(0)?.is_some(), full);
+            let name = after.field(1)?.unwrap();
+            assert_eq!(name.index, 1);
+            assert!(std::ptr::eq(name.column, &change.table.columns[1]));
+            let RowValue::Bytes(value) = name.value else {
+                panic!("expected borrowed name")
+            };
+            assert_eq!(value, b"Bob");
+            assert!(
+                (body.as_ptr() as usize..body.as_ptr() as usize + body.len())
+                    .contains(&(value.as_ptr() as usize))
+            );
+            assert_eq!(after.field(2)?.unwrap().value, RowValue::Null);
+            assert!(matches!(after.field(3), Err(Error::Invalid(_))));
+            borrowed_json = Some(serde_json::to_value(&change).unwrap());
+            captured = Some(change.into_owned());
+            Ok(())
+        })
+        .unwrap();
+        body.fill(0xff);
+        drop(body);
+        drop(decoder);
+        let change = captured.unwrap();
+        assert_eq!(
+            serde_json::to_value(&change).unwrap(),
+            borrowed_json.unwrap()
+        );
+        let after = change.fields.after().unwrap();
+        assert_eq!(
+            after.field(1).unwrap().unwrap().value,
+            RowValue::Bytes(b"Bob")
+        );
+        assert_eq!(after.field(2).unwrap().unwrap().value, RowValue::Null);
+        assert!(std::ptr::eq(
+            after.field(1).unwrap().unwrap().column,
+            &change.table.columns[1]
+        ));
+    }
+    run::<mysql_canal::Minimal>();
+    run::<mysql_canal::Full>();
+}
+
+#[test]
+fn field_json_preserves_exact_numbers_text_binary_and_encoded_values() {
+    let mut id = column("id", "bigint", true);
+    id.column_type = "bigint unsigned".into();
+    let mut amount = column("amount", "decimal", false);
+    amount.numeric_precision = Some(10);
+    amount.numeric_scale = Some(2);
+    let mut text = column("label", "varchar", false);
+    text.charset = Some("utf8mb4".into());
+    text.octet_length = Some(100);
+    let mut binary = column("binary", "varbinary", false);
+    binary.octet_length = Some(8);
+    let mut latin = column("latin", "varchar", false);
+    latin.charset = Some("latin1".into());
+    latin.octet_length = Some(100);
+    let mut bits = column("bits", "bit", false);
+    bits.numeric_precision = Some(9);
+    let meta = mysql_canal::TableMeta {
+        schema: "app".into(),
+        table: "values".into(),
+        columns: vec![
+            id,
+            amount,
+            text,
+            binary,
+            column("document", "json", false),
+            latin,
+            column("real", "double", false),
+            bits,
+            column("choice", "enum", false),
+            column("tags", "set", false),
+            column("year", "year", false),
+        ],
+    };
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    decode_table(
+        &mut decoder,
+        &table_map(
+            1,
+            &meta,
+            &[8, 246, 15, 15, 245, 15, 5, 16, 254, 254, 13],
+            &[10, 2, 100, 0, 8, 0, 4, 100, 0, 8, 1, 1, 247, 1, 248, 1],
+        ),
+    )
+    .unwrap();
+    let mut data = vec![0, 0];
+    data.extend(u64::MAX.to_le_bytes());
+    data.extend([0x80, 0xbc, 0x61, 0x4e, 0x5a]);
+    data.push(3);
+    data.extend("文".as_bytes());
+    data.extend([2, 0, 255]);
+    data.extend(2u32.to_le_bytes());
+    data.extend([255, 0]);
+    data.extend([1, 0xe9]);
+    data.extend(1.25f64.to_le_bytes());
+    data.extend([1, 255, 2, 5, 126]);
+    let mut emitted = 0;
+    decode_rows(
+        &mut decoder,
+        WRITE_ROWS_EVENT,
+        &rows(1, WRITE_ROWS_EVENT, 11, &[255, 7], &[], &data),
+        |change| {
+            let json = serde_json::to_value(&change).unwrap();
+            assert_eq!(json["pk"]["value"], serde_json::json!(u64::MAX));
+            let fields = json["fields"]["after"].as_array().unwrap();
+            assert_eq!(
+                fields
+                    .iter()
+                    .map(|f| f["value"].clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    serde_json::json!(u64::MAX),
+                    serde_json::json!("12345678.90"),
+                    serde_json::json!("文"),
+                    serde_json::json!([0, 255]),
+                    serde_json::json!([255, 0]),
+                    serde_json::json!("é"),
+                    serde_json::json!(1.25),
+                    serde_json::json!(511),
+                    serde_json::json!(2),
+                    serde_json::json!(5),
+                    serde_json::json!(2026)
+                ]
+            );
+            for (index, field) in fields.iter().enumerate() {
+                assert_eq!(field["index"], index);
+                assert_eq!(
+                    field["column"],
+                    serde_json::to_value(&meta.columns[index]).unwrap()
+                );
+            }
+            assert!(json["fields"].get("before").is_none());
+            assert_eq!(serde_json::to_value(change.into_owned()).unwrap(), json);
+            emitted += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(emitted, 1);
+}
+
+#[test]
+fn malformed_non_key_decimal_is_rejected_before_delivery() {
+    let mut amount = column("amount", "decimal", false);
+    amount.numeric_precision = Some(10);
+    amount.numeric_scale = Some(2);
+    let meta = mysql_canal::TableMeta {
+        schema: "app".into(),
+        table: "money".into(),
+        columns: vec![column("id", "int", true), amount],
+    };
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    decode_table(&mut decoder, &table_map(1, &meta, &[3, 246], &[10, 2])).unwrap();
+    let mut bytes = vec![0];
+    bytes.extend(42i32.to_le_bytes());
+    bytes.extend([255; 5]);
+    let mut delivered = 0;
+    let result = decode_rows(
+        &mut decoder,
+        WRITE_ROWS_EVENT,
+        &rows(1, WRITE_ROWS_EVENT, 2, &[3], &[], &bytes),
+        |_| {
+            delivered += 1;
+            Ok(())
+        },
+    );
+    assert!(
+        matches!(result, Err(Error::Invalid(message)) if message == "invalid packed DECIMAL digit group")
+    );
+    assert_eq!(delivered, 0);
 }

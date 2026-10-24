@@ -1317,8 +1317,30 @@ fn canal_consumes_full_and_minimal_sources_together() {
     assert_eq!(
         changes,
         vec![
-            serde_json::json!({"source":"east","schema":"app","table":"users","operation":"update","pk":{"type":"signed","value":11},"changed":["id","name","age"]}),
-            serde_json::json!({"source":"west","schema":"app","table":"users","operation":"update","pk":{"type":"signed","value":22},"changed":["age"]}),
+            with_fields(
+                serde_json::json!({"source":"east","schema":"app","table":"users","operation":"update","pk":{"type":"signed","value":11},"changed":["id","name","age"]}),
+                &basic(),
+                Some(&[
+                    (0, serde_json::json!(11)),
+                    (1, serde_json::json!("x")),
+                    (2, serde_json::json!(20))
+                ]),
+                Some(&[
+                    (0, serde_json::json!(11)),
+                    (1, serde_json::json!("x")),
+                    (2, serde_json::json!(20))
+                ])
+            ),
+            with_fields(
+                serde_json::json!({"source":"west","schema":"app","table":"users","operation":"update","pk":{"type":"signed","value":22},"changed":["age"]}),
+                &{
+                    let mut west = basic();
+                    west.columns.swap(0, 2);
+                    west
+                },
+                Some(&[(2, serde_json::json!(22))]),
+                Some(&[(0, serde_json::json!(25))])
+            ),
         ]
     );
     assert_eq!(State::read(&east_path).unwrap().position, 240);

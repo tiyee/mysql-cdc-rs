@@ -34,12 +34,39 @@ In MINIMAL mode, this update produces:
   "schema": "app",
   "table": "users",
   "operation": "update",
-  "pk": { "type": "unsigned", "value": 42 },
-  "changed": ["name", "age"]
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "name",
+    "age"
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": null
+      }
+    ]
+  }
 }
 ```
 
-This means: **record 42 in east's app.users table was updated, and the log recorded the name and age fields.** The notification does not include non-key values such as Bob or NULL. Use replication's row-image reader to inspect raw values.
+This means: **record 42 in east's app.users table was updated, and the log recorded the name and age fields.** `fields` includes historical column metadata and logged values: before id=42, after name=Bob and age=NULL. Unlogged columns have no entry.
 
 JSON is expanded here for readability; the CLI writes each record on one line.
 
@@ -56,6 +83,7 @@ These fields have the same meanings in MINIMAL and FULL.
 | `pk` | Key identifying the record; the new value if an update changes it | Key 42 |
 | `previous_pk` | Previous key, supplied only when the key changes | 42 when the key changes from 42 to 43 |
 | `changed` | Fields recorded in the after image, listed in table-column order | `name`, `age` |
+| `fields` | Applicable before/after arrays of `{index, column, value}` | Historical column metadata and logged values |
 
 Keys carry a type and a value. For example, `{"type":"unsigned","value":42}` is an unsigned integer, `{"type":"text","value":"user-42"}` is text, and `{"type":"decimal","value":"123.40"}` is an exact decimal preserving its scale. Signed integers use `signed`.
 
@@ -83,7 +111,7 @@ The **notification fields stay the same**. The difference for this update is:
 | `operation` | `update` | `update` |
 | `pk` | Unsigned integer 42 | Unsigned integer 42 |
 | `changed` | `name`, `age` | `id`, `name`, `age`, `status` |
-| Full row values in the notification | No | No |
+| `fields.before` / `fields.after` | Only logged columns and values | All columns and values in each applicable image |
 
 In FULL, `status` appears in `changed` even though it is still active, because the complete after image records it.
 
@@ -117,8 +145,20 @@ Deleting record 42 produces:
   "schema": "app",
   "table": "users",
   "operation": "delete",
-  "pk": { "type": "unsigned", "value": 42 },
-  "changed": []
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ]
+  }
 }
 ```
 
@@ -130,9 +170,33 @@ Changing a key from 42 to 43 supplies both values. This MINIMAL example changes 
   "schema": "app",
   "table": "users",
   "operation": "update",
-  "pk": { "type": "unsigned", "value": 43 },
-  "previous_pk": { "type": "unsigned", "value": 42 },
-  "changed": ["id"]
+  "pk": {
+    "type": "unsigned",
+    "value": 43
+  },
+  "previous_pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "id"
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 43
+      }
+    ]
+  }
 }
 ```
 
@@ -378,7 +442,7 @@ For example, the after-image name field provides ordinal 1, its available name a
 
 ### What canal delivers after conversion
 
-Replication exposes the raw values above, such as `name=Bob` and `age=NULL`. Canal's `Change` / `OwnedChange` still deliver only the table, operation, exact key, optional old key and `changed` column indices. They do not carry `SparseImage`, `CompleteImage` or full row values. For this update, MINIMAL `changed` is `[1, 2]` and FULL is `[0, 1, 2, 3]`; the CLI maps these indices to column names.
+Canal's `Change` / `OwnedChange` include `fields` with applicable before/after images. Each field contains an absolute `index`, historical SQL `column: ColumnMeta` and logged `value`. These definitions come from the saved schema, independently of replication's optional wire metadata. Borrowed conversion views become owned compact images when buffered for committed delivery. For this update, MINIMAL `changed` is `[1, 2]` and FULL is `[0, 1, 2, 3]`; the CLI maps these indices to column names.
 
 #### Canal / CLI JSON
 
@@ -399,7 +463,28 @@ MINIMAL:
   "changed": [
     "name",
     "age"
-  ]
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": null
+      }
+    ]
+  }
 }
 ```
 
@@ -420,13 +505,65 @@ FULL:
     "name",
     "age",
     "status"
-  ]
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      },
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Alice"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 20
+      },
+      {
+        "index": 3,
+        "column": {"name": "status", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "active"
+      }
+    ],
+    "after": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      },
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": null
+      },
+      {
+        "index": 3,
+        "column": {"name": "status", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "active"
+      }
+    ]
+  }
 }
 ```
 
-FULL `changed` contains every after-image column, but neither notification includes the name, age or status values.
+FULL `changed` and `fields.after` contain every column, including unchanged status. MINIMAL omits unlogged columns while retaining the explicit age NULL. INSERT has only `fields.after`; DELETE has only `fields.before`; UPDATE has both.
 
 See the [Rust event API](event-api.md#read-concrete-operations-for-each-mode) for code matching `EventData::Rows`, reading fields and handling borrowing lifetimes.
+
+### Field values in JSON
+
+SQL integers are JSON numbers with signedness from historical SQL metadata; DECIMAL is an exact string preserving scale. UTF-8, ASCII and latin1 text use JSON strings. Binary values and unsupported character sets use byte arrays. Temporal, MySQL binary JSON, geometry and vector values remain encoded byte arrays, identified by `column.data_type`; they are not application JSON objects or formatted dates. BIT/SET are integer masks; ENUM is an integer index and YEAR an integer. SQL NULL is `null`; a missing column has no array entry. Invalid text or non-finite floats cause JSON output to fail, so the transaction is not acknowledged.
+
+`column` includes name, SQL type, nullability, primary-key flag, charset, octet length, numeric precision/scale, datetime precision and extra attributes. `index` is zero-based and absolute in the historical table definition.
 
 ## When delivery happens, and what failure means
 

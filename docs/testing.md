@@ -24,6 +24,8 @@ CI configuration and publishing are described in the [release guide](releasing.m
 
 Field-bearing generic event regressions independently construct TABLE_MAP optional TLVs and ROWS bytes. They cover column names, MSB-first signedness, compact character collation indices, primary-key prefixes, unknown/malformed metadata, absent/NULL fields, historical definitions retained by owned views, remaps and source isolation. The raw-server row scenario also compares automatic generic `next_event()` decoding against the existing manual decoder.
 
+Canal field regressions compare complete borrowed/owned JSON, historical column metadata, sparse absence versus SQL NULL, unsigned integers and exact DECIMAL, text/bytes and opaque values, input-buffer reuse, mixed-source modes, image memory budgets and serialization failure without checkpoint advancement. Live expectations compare before/after fields as well as keys and changed names; binary JSON is decoded only in its dedicated semantic assertion.
+
 ## Dedicated MySQL tests
 
 Run real-MySQL tests explicitly against a dedicated test server. The fixtures create and drop uniquely named databases:

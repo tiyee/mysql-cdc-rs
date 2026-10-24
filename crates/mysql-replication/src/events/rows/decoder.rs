@@ -1,6 +1,6 @@
 use super::{
-    BinlogMode, ColumnInfo, ColumnType, DecimalValue, Field, IntegerValue, RowValue, Rows,
-    RowsEvent, RowsKind, TableDefinition,
+    BinlogMode, ColumnInfo, ColumnType, DecimalValue, Field, IntegerValue, RowImages, RowValue,
+    Rows, RowsEvent, RowsKind, TableDefinition,
 };
 use crate::{Error, Result, error::invalid, events::TableMapEvent, wire::Cursor};
 use std::{iter::FusedIterator, sync::Arc};
@@ -139,12 +139,22 @@ impl<M: BinlogMode> RowsDecoder<M> {
         if event.table_id != self.table_id {
             return Err(invalid("ROWS table ID differs from TABLE_MAP"));
         }
-        let images = event.images()?;
+        self.rows_from_images(event.kind, event.images()?)
+    }
+
+    /// Decodes normalized images with this TABLE_MAP and a statically fixed mode.
+    /// Callers adapting a different event layout retain responsibility for table IDs.
+    pub fn rows_from_images<'a>(
+        &self,
+        kind: RowsKind,
+        images: RowImages<'a>,
+    ) -> Result<Rows<'a, M>> {
+        M::validate_images(&images)?;
         if images.column_count != self.columns().len() {
             return Err(invalid("ROWS column count differs from TABLE_MAP"));
         }
         let first = ImagePlan::new(&self.table, images.before_columns)?;
-        let (before, after) = match event.kind {
+        let (before, after) = match kind {
             RowsKind::Write => (None, Some(first)),
             RowsKind::Delete => (Some(first), None),
             RowsKind::Update => (
@@ -249,17 +259,82 @@ impl<'a> RowImage<'a> {
     /// Fields contain only columns present in this image; bytes remain borrowed.
     pub fn fields(&self) -> Fields<'_, 'a> {
         Fields {
-            image: self,
+            plan: &self.plan,
+            nulls: self.nulls,
             input: Cursor::new(self.data),
             index: 0,
             done: false,
         }
     }
+
+    /// Size of a retained copy, conservatively charging the shared image layout.
+    pub fn retained_bytes(&self) -> usize {
+        retained_size(&self.plan, self.nulls.len() + self.data.len())
+    }
+    /// Copies only this image's compact NULL bitmap and encoded values.
+    /// The immutable historical column plan remains shared across rows.
+    pub fn into_owned(self) -> OwnedRowImage {
+        let null_bytes = self.nulls.len();
+        let mut data = Vec::with_capacity(null_bytes + self.data.len());
+        data.extend_from_slice(self.nulls);
+        data.extend_from_slice(self.data);
+        OwnedRowImage {
+            plan: self.plan,
+            data: data.into_boxed_slice(),
+            null_bytes,
+        }
+    }
+}
+
+/// An owned row image with no self references; values borrow it when accessed.
+#[derive(Debug, Clone)]
+pub struct OwnedRowImage {
+    plan: Arc<ImagePlan>,
+    data: Box<[u8]>,
+    null_bytes: usize,
+}
+impl OwnedRowImage {
+    pub fn view(&self) -> RowImage<'_> {
+        RowImage {
+            plan: Arc::clone(&self.plan),
+            nulls: &self.data[..self.null_bytes],
+            data: &self.data[self.null_bytes..],
+        }
+    }
+    pub fn column_indices(&self) -> &[u16] {
+        &self.plan.indices
+    }
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.plan.table.columns
+    }
+    pub fn fields(&self) -> Fields<'_, '_> {
+        Fields {
+            plan: &self.plan,
+            nulls: &self.data[..self.null_bytes],
+            input: Cursor::new(&self.data[self.null_bytes..]),
+            index: 0,
+            done: false,
+        }
+    }
+    /// Charges the buffer and shared image layout conservatively per retained image.
+    /// The TABLE_MAP definition is shared separately and excluded from this count.
+    pub fn retained_bytes(&self) -> usize {
+        retained_size(&self.plan, self.data.len())
+    }
+}
+
+fn retained_size(plan: &ImagePlan, data_len: usize) -> usize {
+    data_len
+        + std::mem::size_of::<ImagePlan>()
+        + 4 * std::mem::size_of::<usize>()
+        + plan.indices.len() * std::mem::size_of::<u16>()
+        + plan.columns.capacity() * std::mem::size_of::<ColumnDefinition>()
 }
 
 /// Streaming fields of a previously validated image.
 pub struct Fields<'image, 'event> {
-    image: &'image RowImage<'event>,
+    plan: &'image ImagePlan,
+    nulls: &'event [u8],
     input: Cursor<'event>,
     index: usize,
     done: bool,
@@ -270,15 +345,14 @@ impl<'image, 'event> Iterator for Fields<'image, 'event> {
         if self.done {
             return None;
         }
-        let column = self.image.plan.columns.get(self.index)?;
-        let value = if bit(self.image.nulls, self.index) {
+        let column = self.plan.columns.get(self.index)?;
+        let value = if bit(self.nulls, self.index) {
             Ok(RowValue::Null)
         } else {
             column.value(&mut self.input)
         };
         let result = value.map(|value| Field {
-            column: &self.image.plan.table.columns
-                [usize::from(self.image.plan.indices[self.index])],
+            column: &self.plan.table.columns[usize::from(self.plan.indices[self.index])],
             value,
         });
         self.index += 1;

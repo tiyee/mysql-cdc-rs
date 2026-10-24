@@ -43,7 +43,7 @@ docs/                   # Configuration, events, architecture, development, test
 
 应用通过 `Canal` 传入 CDC 配置，通过 `TransactionHandler` 注册已提交事务监听。`mysql_cdc_rs::replication::BinlogEvent` 表示一条协议事件，`mysql_cdc_rs::canal::CommittedTransaction` 表示转换并提交后的变更集合。`engine::converter::EventConverter` 明确负责 binlog 视图到行变更及事务动作的转换；`Processor` 缓冲变更并在提交后交付。包含 DDL 的 QUERY 在复制层是有效事件，在 CDC 层触发 `Error::Statement`。
 
-CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不额外组装完整原始缓冲区；离线回放使用 `next_frame()`。两者均在匹配表之后解析 ROWS 镜像，只解码主键，其余值按长度跳过。准确定位字段仍需表布局元数据。所选行镜像模式的检查针对上游配置，复制协议无法从已有 binlog 中按列请求数据。原始事件、解析配置和传输限制见[复制库说明](../crates/mysql-replication/README.zh-CN.md)。
+CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不额外组装完整原始缓冲区；离线回放使用 `next_frame()`。两者均在匹配表之后解析 ROWS 镜像，解码精确主键、校验日志字段值，并提供携带历史 SQL 元数据的 before/after 镜像。准确定位字段仍需表布局元数据。所选行镜像模式的检查针对上游配置，复制协议无法从已有 binlog 中按列请求数据。原始事件、解析配置和传输限制见[复制库说明](../crates/mysql-replication/README.zh-CN.md)。
 
 原始行检查使用 `mysql_replication::events::RowsDecoder<M>`，返回携带借用镜像的泛型行操作，独立于 CDC 路径；见[行解码说明](event-api.zh-CN.md#读取携带字段的事件)。
 
@@ -52,12 +52,12 @@ CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不�
 - TABLE_MAP 先做精确白名单查找。非白名单 ROWS 不解析位图和列值；同一 table_id 重映射会替换旧计划。
 - 每张表预处理字段长度规则、主键索引和主键解码函数。整数解码用 const 泛型按宽度/符号实例化，运行时每个主键一次已选定的函数调用，无 `Any`、下转型或类型断言。
 - 同一 schema 的 TABLE_MAP 内容相同时复用执行计划；每个 ROWS 事件仅生成一次稀疏镜像计划，NULL 位图按存在列的紧凑序号读取。
-- 每行只扫描实际存在的列，用长度前缀跳过其他值。没有 `Vec<RowValue>`，没有整行反序列化。
+- 每行扫描实际存在列以校验主键、约束并解码借用字段；不构造逐行 `Vec<RowValue>`。时间、JSON、空间和向量值保留编码表示。
 - 主键以外的值切片均借用原始缓冲区；`changed` 是一份事件内共享的 `Arc<[u16]>`，输出时映射字段名，不为每行复制字段名。
 - table_id 用有序 Vec + 二分查找；位图逐字节取 `trailing_zeros` 并清除最低位，支持最多 4096 列。
 - 核心代码禁止 `unsafe`；缺失主键、截断、元数据不一致和输出错误均返回 `Result`。
 
-“零拷贝”限定在核心行解码：网络驱动仍需要接收/组装事件，持有跨事件的字符串主键也需要复制。数值主键行的借用回调无需逐行堆分配。命令行为了提交后可见会缓冲轻量 Change；`max_transaction_bytes` 限制其记账内存（含 Vec 预留空间、主键与共享索引的保守估算，不是进程 RSS 硬上限），超限直接停止且不推进位点。
+“零拷贝”限定在核心行解码：网络驱动仍需要接收/组装事件，持有跨事件的字符串主键也需要复制。数值主键行的借用回调无需逐行堆分配。命令行为了提交后可见会缓冲轻量 Change；`max_transaction_bytes` 限制其记账内存（含 Vec 预留空间、主键、持有字段字节及共享布局/索引的保守估算，在复制 owned 镜像前检查，不是进程 RSS 硬上限），超限直接停止且不推进位点。
 
 ```sh
 cargo bench -p mysql-canal --bench minimal_rows
@@ -164,9 +164,9 @@ Offline: replication BinlogFile::next_frame ──> canal EventView
                                       └─> Canal handlers ──> save checkpoint
 ```
 
-[`EventConverter`](../crates/mysql-canal/src/engine/converter.rs) 按各 FDE 的生产者版本选择适配器。[`EventParser`](../crates/mysql-canal/src/protocol/mysql/events/parser.rs) 归一化不同版本的事件布局。[`RowDecoder`](../crates/mysql-canal/src/protocol/mysql/version.rs) 接口及内置 [`Decoder`](../crates/mysql-canal/src/protocol/mysql/decoder.rs) 应用历史 SQL schema 与精确库表白名单。非选中表在行镜像解析前跳过；选中表仅解码主键，其余值按编码长度跳过，同时校验 NULL 约束与字节边界。
+[`EventConverter`](../crates/mysql-canal/src/engine/converter.rs) 按各 FDE 的生产者版本选择适配器。[`EventParser`](../crates/mysql-canal/src/protocol/mysql/events/parser.rs) 归一化不同版本的事件布局。[`RowDecoder`](../crates/mysql-canal/src/protocol/mysql/version.rs) 接口及内置 [`Decoder`](../crates/mysql-canal/src/protocol/mysql/decoder.rs) 应用历史 SQL schema 与精确库表白名单。非选中表在行镜像解析前跳过；选中表校验精确主键、NULL 约束、字段编码及字节边界，再按相同的静态 `Decoder<M>` 策略附加借用字段镜像。
 
-`Change<'_>` 包含表元数据、操作、精确主键、可选旧主键及共享的变动列索引。INSERT/UPDATE 索引遵循 after-image 位图，DELETE 的变动字段为空；after-image 中出现的字段不一定与旧值不同。来源身份由事务提供，JSON sink 将列索引映射为字段名。CDC 不输出完整行对象或非主键字段值。
+`Change<'_>` 包含表元数据、操作、精确主键、可选旧主键、共享变动列索引及 `fields: RowOperation<FieldImage>`。INSERT/UPDATE 索引遵循 after-image 位图，DELETE 的变动字段为空；after-image 中出现的字段不一定与旧值不同。来源身份由事务提供，JSON sink 将列索引映射为字段名。每个已记录字段提供绝对索引、历史 `ColumnMeta` 和 `RowValue`。`Change::into_owned()` 复制紧凑镜像字节并共享不可变布局；事务预算包含镜像字节及保守计入的共享布局，在复制前检查。
 
 转换不等于已提交交付。`EventConverter::convert_binlog` 接收结构化 `BinlogEvent`，将其 frame 转成 CDC 视图后交给 canal 适配器，不消费预解码的原始 `RowValue` 对象。该转换回调可能早于 COMMIT，不缓冲事务，也不丢弃已回调的回滚行。需要事务交付时使用 [`Processor`](../crates/mysql-canal/src/engine/processor.rs) 或 [`Canal`](../crates/mysql-canal/src/engine/canal.rs)。
 
@@ -196,4 +196,4 @@ Offline: replication BinlogFile::next_frame ──> canal EventView
 
 ### 镜像策略
 
-`mysql_replication::config::RowImageMode` 由 Canal 重导出，在 `[sources.mysql-replication]` 中按来源独立设置，默认 MINIMAL。Runtime 将模式传给在线服务器检查，以及 Processor → EventConverter → VersionAdapter → Decoder<M>；每次 FDE 重建解码器都保留该策略。离线回放显式传入模式。原始 `RowsEvent`、`RowsDecoder` 继续按位图工作，不依赖 CDC 策略。FULL 要求完整镜像，仍仅解码主键，保留 UTF-8 主键借用和共享 after-image 字段索引。检查点保存历史 schema；模式属于运行参数，不能从当前服务器设置或 FDE 推断历史文件的模式。
+`mysql_replication::config::RowImageMode` 由 Canal 重导出，在 `[sources.mysql-replication]` 中按来源独立设置，默认 MINIMAL。Runtime 将模式传给在线服务器检查，以及 Processor → EventConverter → VersionAdapter → Decoder<M>；每次 FDE 重建解码器都保留该策略。离线回放显式传入模式。原始 `RowsEvent`、`RowsDecoder` 继续按位图工作，不依赖 CDC 策略。FULL 要求完整镜像并提供全部字段值，同时保留 UTF-8 主键借用和共享 after-image 字段索引。检查点保存历史 schema；模式属于运行参数，不能从当前服务器设置或 FDE 推断历史文件的模式。

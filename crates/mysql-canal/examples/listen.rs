@@ -19,6 +19,24 @@ fn main() -> Result<()> {
                 change.pk,
                 change.changed_names().collect::<Vec<_>>()
             );
+            for (side, image) in [
+                ("before", change.fields.before()),
+                ("after", change.fields.after()),
+            ] {
+                if let Some(image) = image {
+                    for field in image.fields() {
+                        let field = field?;
+                        println!(
+                            "{} [{}] {} {}: {:?}",
+                            side,
+                            field.index,
+                            field.column.name,
+                            field.column.column_type,
+                            field.value
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     });

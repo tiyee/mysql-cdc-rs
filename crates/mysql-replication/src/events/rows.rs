@@ -7,7 +7,7 @@ mod metadata;
 mod typed;
 mod value;
 
-pub use decoder::{ColumnDefinition, Fields, RowImage, RowsDecoder};
+pub use decoder::{ColumnDefinition, Fields, OwnedRowImage, RowImage, RowsDecoder};
 pub use metadata::{ColumnInfo, TableDefinition};
 pub use mysql_common::constants::ColumnType;
 pub use typed::{CompleteImage, Field, Row, RowOperation, Rows, SparseImage};

@@ -34,12 +34,39 @@ mysql-cdc 会经过三个步骤：
   "schema": "app",
   "table": "users",
   "operation": "update",
-  "pk": { "type": "unsigned", "value": 42 },
-  "changed": ["name", "age"]
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "name",
+    "age"
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": null
+      }
+    ]
+  }
 }
 ```
 
-这条通知表示：**east 来源的 app.users 表中，主键为 42 的记录发生了更新，日志记录了 name 和 age 两个字段。** 通知不包含 Bob 或 NULL 等非主键字段值；需要查看原始行值时，使用复制库的行镜像读取功能。
+这条通知表示：**east 来源的 app.users 表中，主键为 42 的记录发生了更新，日志记录了 name 和 age 两个字段。** `fields` 包含历史列元数据和日志值：before 的 id=42，after 的 name=Bob、age=NULL；未记录列没有条目。
 
 为便于阅读，本页将 JSON 展开显示；CLI 实际每条记录输出一行。
 
@@ -56,6 +83,7 @@ mysql-cdc 会经过三个步骤：
 | `pk` | 用来定位这条记录的主键；主键变更时为新值 | 主键 42 |
 | `previous_pk` | 主键变更前的值，仅在主键确实变更时提供 | 主键从 42 变成 43 时为 42 |
 | `changed` | 日志在修改后的数据中记录了哪些字段，按表列顺序列出 | `name`、`age` |
+| `fields` | 适用的 before/after 数组，条目为 `{index, column, value}` | 历史列元数据及日志值 |
 
 主键同时携带类型和值。例如 `{"type":"unsigned","value":42}` 是无符号整数，`{"type":"text","value":"user-42"}` 是文本，`{"type":"decimal","value":"123.40"}` 是保留小数位的精确数值。有符号整数使用 `signed`。
 
@@ -83,7 +111,7 @@ mysql-cdc 会经过三个步骤：
 | `operation` | `update` | `update` |
 | `pk` | 无符号整数 42 | 无符号整数 42 |
 | `changed` | `name`、`age` | `id`、`name`、`age`、`status` |
-| 是否输出完整行值 | 否 | 否 |
+| `fields.before` / `fields.after` | 仅记录列及其值 | 每份适用镜像的全部列及其值 |
 
 因此，FULL 中 `status` 即使仍是 active，也会出现在 `changed` 中。它在完整的 after 镜像中被记录了。
 
@@ -117,8 +145,20 @@ mysql-cdc 会经过三个步骤：
   "schema": "app",
   "table": "users",
   "operation": "delete",
-  "pk": { "type": "unsigned", "value": 42 },
-  "changed": []
+  "pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ]
+  }
 }
 ```
 
@@ -130,9 +170,33 @@ mysql-cdc 会经过三个步骤：
   "schema": "app",
   "table": "users",
   "operation": "update",
-  "pk": { "type": "unsigned", "value": 43 },
-  "previous_pk": { "type": "unsigned", "value": 42 },
-  "changed": ["id"]
+  "pk": {
+    "type": "unsigned",
+    "value": 43
+  },
+  "previous_pk": {
+    "type": "unsigned",
+    "value": 42
+  },
+  "changed": [
+    "id"
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 43
+      }
+    ]
+  }
 }
 ```
 
@@ -378,7 +442,7 @@ FULL 遇到缺列的镜像会返回 `Error::Unsupported`，不会把稀疏数据
 
 ### 转换到 Canal 后交付什么
 
-上述原始事件中的 `name=Bob`、`age=NULL` 等字段值可以由复制库读取。Canal 的 `Change` / `OwnedChange` 仍只交付表、操作、精确主键、可选旧主键及 `changed` 列索引，不附带 `SparseImage`、`CompleteImage` 或完整行值。上例 MINIMAL 的 `changed` 是 `[1, 2]`，FULL 为 `[0, 1, 2, 3]`；CLI 再将其映射为字段名。
+Canal 的 `Change` / `OwnedChange` 通过 `fields` 提供适用的 before/after 镜像。每个字段包含绝对 `index`、历史 SQL `column: ColumnMeta` 和日志 `value`。列定义来自保存的 schema，与复制库的可选 wire 元数据独立。借用转换视图在缓冲以等待提交时转成持有紧凑字节的镜像。上例 MINIMAL 的 `changed` 是 `[1, 2]`，FULL 为 `[0, 1, 2, 3]`；CLI 再将其映射为字段名。
 
 #### Canal / CLI JSON
 
@@ -399,7 +463,28 @@ MINIMAL：
   "changed": [
     "name",
     "age"
-  ]
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": null
+      }
+    ]
+  }
 }
 ```
 
@@ -420,13 +505,65 @@ FULL：
     "name",
     "age",
     "status"
-  ]
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      },
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Alice"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 20
+      },
+      {
+        "index": 3,
+        "column": {"name": "status", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "active"
+      }
+    ],
+    "after": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      },
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": null
+      },
+      {
+        "index": 3,
+        "column": {"name": "status", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "active"
+      }
+    ]
+  }
 }
 ```
 
-FULL 的 `changed` 包含全部 after-image 字段，但两条通知都不包含 name、age、status 的字段值。
+FULL 的 `changed` 和 `fields.after` 包含全部列，也包含未改变的 status。MINIMAL 省略未记录列，同时保留 age 的显式 NULL。INSERT 仅有 `fields.after`，DELETE 仅有 `fields.before`，UPDATE 两者都有。
 
 按类型匹配 `EventData::Rows`、读取字段以及处理借用生命周期的代码见 [Rust 事件 API 参考](event-api.zh-CN.md#按模式读取具体行操作)。
+
+### JSON 字段值
+
+SQL 整数按历史 SQL 元数据的符号输出 JSON 数字；DECIMAL 用保留 scale 的精确字符串。UTF-8、ASCII 和 latin1 文本输出字符串；二进制值及不支持的字符集输出字节数组。时间、MySQL 二进制 JSON、空间和向量值保持编码字节数组，通过 `column.data_type` 识别，不自动转成应用 JSON 对象或格式化日期。BIT/SET 为整数位掩码，ENUM 为整数序号，YEAR 为整数。SQL NULL 为 `null`，未记录列没有数组条目。非法文本或非有限浮点值使 JSON 输出失败，该事务不会得到确认。
+
+`column` 包含名称、SQL 类型、可空性、主键标记、字符集、字节长度、数字精度/scale、时间精度及额外属性。`index` 为历史表定义中从零开始的绝对索引。
 
 ## 什么时候收到事件，失败后会怎样
 

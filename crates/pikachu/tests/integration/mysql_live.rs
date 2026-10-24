@@ -93,13 +93,54 @@ impl Fixture {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
-    fn expected(&self, operation: &str, id: i32, changed: &[&str]) -> Value {
+    fn expected(
+        &self,
+        operation: &str,
+        id: i32,
+        changed: &[&str],
+        before_note: Option<&str>,
+        after_note: Option<&str>,
+    ) -> Value {
         let changed = if row_image_mode() == RowImageMode::Full && operation != "delete" {
             &["id", "note"]
         } else {
             changed
         };
-        json!({"source":"cli-live", "schema":self.schema, "table":"items", "operation":operation, "pk":{"type":"signed", "value":id}, "changed":changed})
+        let state = State::read(&self.state).unwrap();
+        let meta = &state.tables[0];
+        let image = |note: Option<&str>, before: bool| {
+            Value::Array(
+                meta.columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, col)| {
+                        if row_image_mode() == RowImageMode::Full {
+                            true
+                        } else if before {
+                            col.primary_key
+                        } else {
+                            changed.contains(&col.name.as_str())
+                        }
+                    })
+                    .map(|(index, col)| {
+                        let value = if col.primary_key {
+                            json!(id)
+                        } else {
+                            json!(note)
+                        };
+                        json!({"index": index, "column": col, "value": value})
+                    })
+                    .collect(),
+            )
+        };
+        let mut fields = serde_json::Map::new();
+        if operation != "insert" {
+            fields.insert("before".into(), image(before_note, true));
+        }
+        if operation != "delete" {
+            fields.insert("after".into(), image(after_note, false));
+        }
+        json!({"source":"cli-live", "schema":self.schema, "table":"items", "operation":operation, "pk":{"type":"signed", "value":id}, "changed":changed, "fields": fields})
     }
 }
 impl Drop for Fixture {
@@ -150,9 +191,9 @@ fn mysql_cli_checks_initializes_consumes_resumes_and_stops_at_ddl() {
     assert_eq!(
         fixture.success("run"),
         [
-            fixture.expected("insert", 1, &["id", "note"]),
-            fixture.expected("update", 1, &["note"]),
-            fixture.expected("delete", 1, &[])
+            fixture.expected("insert", 1, &["id", "note"], None, Some("created")),
+            fixture.expected("update", 1, &["note"], Some("created"), None),
+            fixture.expected("delete", 1, &[], None, None)
         ]
     );
     let committed = State::read(&fixture.state).unwrap();
@@ -167,7 +208,7 @@ fn mysql_cli_checks_initializes_consumes_resumes_and_stops_at_ddl() {
     fixture.sql("INSERT INTO items VALUES (3,'resumed')");
     assert_eq!(
         fixture.success("run"),
-        [fixture.expected("insert", 3, &["id", "note"])]
+        [fixture.expected("insert", 3, &["id", "note"], None, Some("resumed"))]
     );
     let before = fs::read(&fixture.state).unwrap();
     fixture.sql("ALTER TABLE items ADD extra INT");
@@ -300,8 +341,8 @@ fn mysql_cli_source_override_controls_preflight_and_decoder() {
     assert_eq!(
         actual,
         [
-            fixture.expected("insert", 1, &["id", "note"]),
-            fixture.expected("update", 1, &["note"])
+            fixture.expected("insert", 1, &["id", "note"], None, Some("old")),
+            fixture.expected("update", 1, &["note"], Some("old"), None)
         ]
     );
 }

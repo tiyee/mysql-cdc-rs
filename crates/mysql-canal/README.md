@@ -35,7 +35,7 @@ Each source owns its connection, schema and checkpoint. Initial consumption star
 
 ## Events and handlers
 
-`CommittedTransaction` contains `source_id`, the commit `checkpoint` and ordered `changes`. Each change contains its table, operation, exact key, optional previous key and column indices. Only key values are decoded; other values are skipped by encoded length.
+`CommittedTransaction` contains `source_id`, the commit `checkpoint` and ordered `changes`. Each change contains its table, operation, exact key, optional previous key, changed column indices and `fields`. `fields.before()` / `fields.after()` expose applicable images; each image iterates logged fields with absolute indices, historical `ColumnMeta` and borrowed `RowValue`. Committed changes own compact image bytes and share column definitions. Field bytes count toward the transaction budget before copying.
 
 Handlers run synchronously in registration order. All must succeed before checkpoint persistence. COMMIT/XID delivers the transaction; rollback discards it. Fully filtered commits deliver an empty slice. Failures can cause replay, so handlers must be idempotent. Register at least one handler before running; slow handlers apply backpressure.
 
@@ -55,7 +55,7 @@ fn full_decoder(tables: Vec<TableMeta>) -> Result<Decoder<Full>> {
 }
 ```
 
-Use `Decoder::<Minimal>::new(tables)` for MINIMAL. Both modes deliver the same `Change` / `CommittedTransaction` fields; FULL `changed` includes every after-image column, even unchanged values. See the [listener example](examples/listen.rs).
+Use `Decoder::<Minimal>::new(tables)` for MINIMAL. Both modes deliver the same `Change` / `CommittedTransaction` API; MINIMAL retains only logged fields, while FULL retains every column in each applicable image; FULL `changed` includes every after-image column, even unchanged values. See the [listener example](examples/listen.rs).
 
 ## Offline replay
 

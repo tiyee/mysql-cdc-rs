@@ -142,3 +142,26 @@ pub fn framed(ty: u8, pos: u32, body: &[u8], crc: bool) -> Vec<u8> {
     }
     out
 }
+
+/// Builds expected field images from fixture metadata and independently supplied values.
+pub fn with_fields(
+    mut change: serde_json::Value,
+    table: &TableMeta,
+    before: Option<&[(usize, serde_json::Value)]>,
+    after: Option<&[(usize, serde_json::Value)]>,
+) -> serde_json::Value {
+    let image = |values: &[(usize, serde_json::Value)]| {
+        serde_json::Value::Array(values.iter().map(|(index, value)| {
+            serde_json::json!({"index": index, "column": table.columns[*index], "value": value})
+        }).collect())
+    };
+    let mut fields = serde_json::Map::new();
+    if let Some(before) = before {
+        fields.insert("before".into(), image(before));
+    }
+    if let Some(after) = after {
+        fields.insert("after".into(), image(after));
+    }
+    change["fields"] = fields.into();
+    change
+}

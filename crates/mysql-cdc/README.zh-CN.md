@@ -38,7 +38,7 @@ fn main() -> Result<()> {
 
 协议事件可直接传给 CDC 转换器，无需包装或复制：
 
-原始事件可用 `replication::BinlogEvent<Full>` / `BinlogEvent<Minimal>` 静态选择镜像模式，标记类型与 canal 共用。泛型 reader 自动关联 TABLE_MAP，行操作的 `fields()` 提供列定义与借用值；MINIMAL 的 `field()` 区分未记录与 SQL NULL，FULL 保证存在镜像包含全部列。缺失列名等可选元数据保持未知，CDC 变更输出不增加完整行值。
+原始事件可用 `replication::BinlogEvent<Full>` / `BinlogEvent<Minimal>` 静态选择镜像模式，标记类型与 canal 共用。泛型 reader 自动关联 TABLE_MAP，行操作的 `fields()` 提供列定义与借用值；MINIMAL 的 `field()` 区分未记录与 SQL NULL，FULL 保证存在镜像包含全部列。缺失列名等可选元数据保持未知，Canal 变更通过 `fields` 提供日志 before/after 值及历史 SQL `ColumnMeta`。
 
 ```rust
 use mysql_cdc_rs::{
@@ -67,7 +67,7 @@ cargo run -p mysql-cdc-rs --example canal_listen -- canal.toml
 cargo run -p mysql-cdc-rs --example replication_dump_file -- /path/to/binlog.000001
 ```
 
-CDC 使用具名来源，各自维护 schema、白名单和检查点。仅交付已提交变更，包含来源、库表、操作、精确主键和变动字段名。回滚丢弃缓冲；失败停止消费，检查点持久化前崩溃可能导致重放。库不注册默认输出处理器；`pikachu` 包提供 `pikachu-cdc` CLI。
+CDC 使用具名来源，各自维护 schema、白名单和检查点。仅交付已提交变更，包含来源、库表、操作、精确主键、变动字段名及携带元数据和值的 before/after 字段。回滚丢弃缓冲；失败停止消费，检查点持久化前崩溃可能导致重放。库不注册默认输出处理器；`pikachu` 包提供 `pikachu-cdc` CLI。
 
 底层两个库仍可单独依赖。配置、输出契约、版本支持和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)、[CDC 库](https://docs.rs/mysql-canal)和[复制库](https://docs.rs/mysql-replication)。
 

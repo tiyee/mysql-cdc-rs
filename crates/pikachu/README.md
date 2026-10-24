@@ -34,7 +34,7 @@ The first `init` or `run` captures the current position under a brief global rea
 
 Every online MySQL connection checks the selected tables' current primary keys, including checkpoint recovery; missing or unsupported keys stop startup. Recovery still decodes historical events using the schema saved in the checkpoint. Local replay uses that saved schema without connecting to MySQL.
 
-The [configuration example](examples/config/multi-source.toml) uses named sources with independent credentials, whitelists and checkpoints. Changes contain the source, database, table, operation, exact primary key and changed column names. Output appears only after transaction commit; rollback discards buffered changes. Output failures stop consumption, and a crash before checkpoint persistence may cause replay.
+The [configuration example](examples/config/multi-source.toml) uses named sources with independent credentials, whitelists and checkpoints. Changes contain the source, database, table, operation, exact primary key, changed column names and `fields.before` / `fields.after` containing column metadata and logged values. Output appears only after transaction commit; rollback discards buffered changes. Output failures stop consumption, and a crash before checkpoint persistence may cause replay.
 
 Replay a local binlog using a saved historical schema:
 
@@ -57,7 +57,7 @@ pikachu-cdc run cdc.toml --once --row-image east=full --row-image west=minimal
 pikachu-cdc replay east-state.json /path/to/binlog.000001 --row-image full
 ```
 
-Replay defaults to MINIMAL and does not modify the checkpoint. FULL INSERT/UPDATE output lists every after-image column in `changed`, including unchanged values; it does not print full row values. The mode checks upstream settings and actual image shape without changing MySQL. Writer sessions and historical logs must match the selected policy; drain old-mode transactions before coordinating a mode switch. Unknown sources, unsupported modes and duplicate overrides fail before connecting.
+Replay defaults to MINIMAL and does not modify the checkpoint. FULL INSERT/UPDATE output lists every after-image column in `changed`, including unchanged values; `fields` also prints all values and column metadata in each applicable FULL image. MINIMAL prints only logged fields; absent columns are omitted and SQL NULL is `null`. See the [JSON examples](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.md#canal--cli-json). The mode checks upstream settings and actual image shape without changing MySQL. Writer sessions and historical logs must match the selected policy; drain old-mode transactions before coordinating a mode switch. Unknown sources, unsupported modes and duplicate overrides fail before connecting.
 
 ## Reference
 

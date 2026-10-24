@@ -38,9 +38,9 @@ See the [event guide](events.md) for actual data and MINIMAL/FULL examples.
 
 Raw events answer “what did the log record?” They include format descriptions, encoded table information, row changes and transaction markers, useful for protocol inspection and raw-data analysis.
 
-Normalized notifications answer “which source, table and record changed?” They keep the source, database/table, operation, key and recorded column names for application handling. FULL does not automatically add complete row values to notifications.
+Normalized notifications answer “which source, table and record changed?” They keep the source, database/table, operation, key, recorded column names and `fields` with historical column definitions and before/after values. FULL includes every column in each applicable image; MINIMAL includes only logged columns.
 
-Canal reads key values selectively and skips other values, without first building full application row objects. Missing MINIMAL data is not filled in, and the current database is not queried to guess historical values.
+Canal validates logged values and exposes borrowed field views without building application row objects. Retained transactions copy only the image bytes they need, sharing historical column definitions. Missing MINIMAL data is not filled in, and the current database is not queried to guess historical values.
 
 ## Why configuration is nested
 

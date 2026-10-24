@@ -2,7 +2,7 @@
 
 use crate::{OwnedChange, engine::checkpoint::State};
 
-/// A normalized, committed transaction. Row values are not materialized.
+/// A normalized, committed transaction. Fields retain their logged values and historical column definitions.
 ///
 /// The data is borrowed from the transaction buffer and is valid only during
 /// the callback. Clone changes only when retaining them beyond the callback.

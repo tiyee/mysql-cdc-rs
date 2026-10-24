@@ -18,8 +18,8 @@ pub use header::EventHeader;
 pub use mode::{BinlogMode, Full, Minimal};
 pub use rows::{
     ColumnDefinition, ColumnInfo, ColumnType, CompleteImage, DecimalValue, Field, Fields,
-    IntegerValue, Row, RowImage, RowImages, RowOperation, RowValue, Rows, RowsDecoder, RowsEvent,
-    RowsKind, RowsStatementEndEvent, SparseImage, TableDefinition,
+    IntegerValue, OwnedRowImage, Row, RowImage, RowImages, RowOperation, RowValue, Rows,
+    RowsDecoder, RowsEvent, RowsKind, RowsStatementEndEvent, SparseImage, TableDefinition,
 };
 use std::{fmt::Debug, io::Write};
 pub use table_map::{TableColumns, TableMapEvent};

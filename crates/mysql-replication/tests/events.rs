@@ -2136,3 +2136,42 @@ fn optional_metadata_uses_compact_numeric_and_enum_set_column_ordinals() {
         [None, Some(63), Some(45), Some(255)]
     );
 }
+
+#[test]
+fn normalized_images_and_owned_copies_preserve_columns_nulls_and_values() {
+    let owned = {
+        let table_body = table_with_optional(&column_metadata("name"));
+        let mut table = TableMapEvent::default();
+        table.decode(&table_body).unwrap();
+        let decoder = RowsDecoder::<Minimal>::new(&table).unwrap();
+        let body = rows_body(3, &[3], &[2, 7], true);
+        let event = rows_event(&body, RowsKind::Write, true);
+        let mut rows = decoder
+            .rows_from_images(RowsKind::Write, event.images().unwrap())
+            .unwrap();
+        let row = rows.next().unwrap().unwrap();
+        let (_, after) = row.operation.into_images();
+        let image = after.unwrap().as_ref().clone();
+        let bytes = image.retained_bytes();
+        let owned = image.into_owned();
+        assert_eq!(owned.retained_bytes(), bytes);
+        owned
+    };
+    assert_eq!(owned.column_indices(), &[0, 1]);
+    assert_eq!(owned.columns()[1].name.as_deref(), Some("name"));
+    let fields = owned.fields().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(fields[0].column.index, 0);
+    let RowValue::Integer(key) = fields[0].value else {
+        panic!("expected integer")
+    };
+    assert_eq!(key.unsigned(), 7);
+    assert_eq!(fields[1].value, RowValue::Null);
+    assert_eq!(
+        owned
+            .view()
+            .fields()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        fields
+    );
+}

@@ -1,6 +1,7 @@
 use super::events::{GENERATED_INVISIBLE_PK_F, RowsEvent, STMT_END_F, TableMapEvent};
 use crate::{
-    CdcImageMode, Change, ColumnMeta, Error, Operation, PrimaryKey, Result, TableMeta,
+    CdcImageMode, Change, ColumnMeta, Error, FieldImage, Operation, PrimaryKey, Result,
+    RowOperation, TableMeta,
     error::invalid,
     model::schema::{KeyDecoder, key_decoder},
     protocol::mysql::wire::{Cursor, bit, set_bits},
@@ -28,12 +29,13 @@ impl ReadOp {
     }
 }
 
-struct TablePlan {
+struct TablePlan<M: CdcImageMode> {
     meta: Arc<TableMeta>,
     pk_index: usize,
     decode_pk: KeyDecoder,
     columns: Vec<ReadOp>,
     signature: Vec<u8>,
+    fields: mysql_replication::events::RowsDecoder<M>,
 }
 
 struct ReadColumn {
@@ -45,7 +47,7 @@ struct ImagePlan {
     columns: Vec<ReadColumn>,
 }
 impl ImagePlan {
-    fn new(table: &TablePlan, present: &[u8]) -> Self {
+    fn new<M: CdcImageMode>(table: &TablePlan<M>, present: &[u8]) -> Self {
         Self {
             columns: set_bits(present)
                 .take_while(|&i| i < table.columns.len())
@@ -57,10 +59,10 @@ impl ImagePlan {
                 .collect(),
         }
     }
-    fn read<'a>(
+    fn read<'a, M: CdcImageMode>(
         &self,
         input: &mut Cursor<'a>,
-        table: &TablePlan,
+        table: &TablePlan<M>,
     ) -> Result<Option<PrimaryKey<'a>>> {
         let nulls = input.bitmap(self.columns.len())?;
         let mut pk = None;
@@ -91,8 +93,8 @@ impl ImagePlan {
 pub struct Decoder<M: CdcImageMode> {
     mode: std::marker::PhantomData<M>,
     tables: BTreeMap<String, BTreeMap<String, Arc<TableMeta>>>,
-    compiled: BTreeMap<String, BTreeMap<String, Arc<TablePlan>>>,
-    index: Vec<(u64, Option<Arc<TablePlan>>)>,
+    compiled: BTreeMap<String, BTreeMap<String, Arc<TablePlan<M>>>>,
+    index: Vec<(u64, Option<Arc<TablePlan<M>>>)>,
 }
 
 impl<M: CdcImageMode> Decoder<M> {
@@ -145,7 +147,7 @@ impl<M: CdcImageMode> Decoder<M> {
             {
                 Some(Arc::clone(existing))
             } else {
-                let plan = Arc::new(compile(Arc::clone(meta), signature)?);
+                let plan = Arc::new(compile::<M>(Arc::clone(meta), signature)?);
                 self.compiled
                     .entry(schema.into())
                     .or_default()
@@ -231,6 +233,21 @@ impl<M: CdcImageMode> Decoder<M> {
         if input.remaining().is_empty() {
             return Err(invalid("ROWS event contains no rows"));
         }
+        let kind = match operation {
+            Operation::Insert => mysql_replication::events::RowsKind::Write,
+            Operation::Update => mysql_replication::events::RowsKind::Update,
+            Operation::Delete => mysql_replication::events::RowsKind::Delete,
+        };
+        let mut field_rows = table.fields.rows_from_images(
+            kind,
+            mysql_replication::events::RowImages {
+                extra_data: &[],
+                column_count: count,
+                before_columns: first,
+                after_columns: second,
+                rows: images.rows,
+            },
+        )?;
         while !input.remaining().is_empty() {
             let old = before
                 .read(&mut input, table)?
@@ -244,13 +261,33 @@ impl<M: CdcImageMode> Decoder<M> {
             } else {
                 (old, None)
             };
+            let row = field_rows
+                .next()
+                .ok_or_else(|| invalid("field rows ended before key rows"))??;
+            let fields = match row.operation {
+                RowOperation::Insert { after } => RowOperation::Insert {
+                    after: FieldImage::new(&table.meta, after.as_ref().clone()),
+                },
+                RowOperation::Update { before, after } => RowOperation::Update {
+                    before: FieldImage::new(&table.meta, before.as_ref().clone()),
+                    after: FieldImage::new(&table.meta, after.as_ref().clone()),
+                },
+                RowOperation::Delete { before } => RowOperation::Delete {
+                    before: FieldImage::new(&table.meta, before.as_ref().clone()),
+                },
+            };
             emit(Change {
                 table: &table.meta,
                 operation,
                 pk,
                 previous_pk,
                 changed: &changed,
+                fields,
             })?;
+        }
+        if let Some(extra) = field_rows.next() {
+            extra?;
+            return Err(invalid("field row count differs"));
         }
         if flags & STMT_END_F != 0 {
             self.clear_table_maps();
@@ -259,7 +296,7 @@ impl<M: CdcImageMode> Decoder<M> {
     }
 }
 
-fn compile(meta: Arc<TableMeta>, data: &[u8]) -> Result<TablePlan> {
+fn compile<M: CdcImageMode>(meta: Arc<TableMeta>, data: &[u8]) -> Result<TablePlan<M>> {
     let pk_index = meta.validate()?;
     let decode_pk = key_decoder(&meta.columns[pk_index])?;
     let mut input = Cursor::new(data);
@@ -311,7 +348,14 @@ fn compile(meta: Arc<TableMeta>, data: &[u8]) -> Result<TablePlan> {
             }
         }
     }
+    // Only normalized column data is used; no transport body is reconstructed.
+    let mut mapping = mysql_replication::events::TableMapEvent::with_post_header(8);
+    mapping.schema = meta.schema.as_bytes();
+    mapping.table = meta.table.as_bytes();
+    mapping.column_data = data;
+    let fields = mysql_replication::events::RowsDecoder::<M>::new(&mapping)?;
     Ok(TablePlan {
+        fields,
         meta,
         pk_index,
         decode_pk,

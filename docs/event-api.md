@@ -226,7 +226,7 @@ For that MINIMAL update, after name is present, age is SQL NULL and after status
 
 `file::FrameReader<R>::new(reader)` exposes validated `next_frame()` results without a field policy. `stream::ReplicationConnection` exposes raw network `next_frame()` / borrowed `next_view()`. Custom adapters use these transport interfaces and own their structural parser. Typed `BinlogFile<R, M>` and `ReplicationStream<M>` expose only `next_event()`, and require an explicit `M`.
 
-For a standalone layout already validated by the caller, `RowsEvent::<M>::with_layout(kind, post_header, v2)` plus `Event::decode(body)` parses the ROWS envelope. `RowsDecoder::<M>::new(table_map)?.rows(&event)` decodes it using an explicitly supplied TABLE_MAP. This uses the same `Row<M>`, `Rows<M>`, `Field` and image types as automatic parser binding, without alternate event representations or cross-mode conversion. Raw protocol decoding requires no primary key. Canal keeps its own adapters, saved schema and selective key decoder.
+For a standalone layout already validated by the caller, `RowsEvent::<M>::with_layout(kind, post_header, v2)` plus `Event::decode(body)` parses the ROWS envelope. `RowsDecoder::<M>::new(table_map)?.rows(&event)` decodes it using an explicitly supplied TABLE_MAP. This uses the same `Row<M>`, `Rows<M>`, `Field` and image types as automatic parser binding, without alternate event representations or cross-mode conversion. Raw protocol decoding requires no primary key. Canal keeps its own adapters and historical SQL schema, reusing borrowed field decoding for normalized images.
 
 ```sh
 cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001 --row-image full
@@ -246,6 +246,7 @@ The single row example chooses a generic instantiation once at its command-line 
 | `pk` | `PrimaryKey<'a>` | `PrimaryKey<'static>` | Exact key; the new key when an UPDATE changes it |
 | `previous_pk` | `Option<PrimaryKey<'a>>` | `Option<PrimaryKey<'static>>` | Old key when the key changes |
 | `changed` | `&'a Arc<[u16]>` | `Arc<[u16]>` | Shared absolute column indices, in table order |
+| `fields` | `RowOperation<FieldImage<'a>>` | `RowOperation<OwnedFieldImage>` | Logged before/after values and historical column definitions |
 
 `PrimaryKey` variants are `Signed(i64)`, `Unsigned(u64)`, `Text(Cow<'a, str>)` and `Decimal(String)`. Decimal keys never pass through floating point. `OwnedChange::changed_names()` resolves indices using `table`.
 
@@ -259,9 +260,41 @@ The single row example chooses a generic instantiation once at its command-line 
 
 `State` carries the historical schema, file/position and source UUID/ID/plugin. Transaction data is borrowed for the callback; clone only what must outlive it. `EventConverter` callbacks can run before COMMIT. Use `Canal` or `Processor` for committed delivery.
 
-MINIMAL and FULL use these same normalized types and fields. Their difference is the after-image indices recorded in `changed`, described below; neither mode adds full row values.
+MINIMAL and FULL use these same normalized types and fields. MINIMAL exposes only logged fields; FULL exposes every column in each applicable image. The generic decoder validates policy before row callbacks; the normalized multi-source callback needs no runtime mode test.
 
 See the [event guide](events.md) for JSON output, supported data types, commit delivery and failure behavior.
+
+### Inspect canal fields
+
+`FieldImage` and `OwnedFieldImage` provide `table()`, `columns()`, `column_indices()`, `fields()` and `field(index)`. `Field` has `index: u16`, `column: &ColumnMeta` and `value: RowValue`. Indices are absolute historical ordinals; `field(index)` returns `Result<Option<Field>>`, with `None` only for unlogged columns and an error outside the table. SQL NULL is `RowValue::Null`. INSERT carries only after, UPDATE both and DELETE only before, encoded by `RowOperation` variants.
+
+Conversion `Change` borrows event values. `into_owned()` copies only each image's compact NULL bitmap and encoded values, sharing immutable layouts and historical columns. Committed callbacks receive `OwnedChange` and access values borrowing that change; clone only when retaining it beyond the callback. Images remain correct after input buffers are reused.
+
+Raw `RowsDecoder<M>::rows_from_images(kind, images)` accepts already normalized `RowImages` from a structural adapter with the same mode checks and typed operations as `rows(&event)`. Raw `RowImage::into_owned()` returns an `OwnedRowImage`; `view()` and `fields()` read retained bytes without rebuilding full event buffers. `retained_bytes()` estimates image bytes plus shared layout cost, excluding shared table definitions.
+
+See [Canal / CLI JSON](events.md#canal--cli-json) for the serialization contract and both image policies.
+
+```rust,no_run
+use mysql_canal::{OwnedChange, Result};
+
+fn inspect(change: &OwnedChange) -> Result<()> {
+    for (side, image) in [
+        ("before", change.fields.before()),
+        ("after", change.fields.after()),
+    ] {
+        if let Some(image) = image {
+            for field in image.fields() {
+                let field = field?;
+                println!(
+                    "{} [{}] {} {}: {:?}",
+                    side, field.index, field.column.name, field.column.column_type, field.value
+                );
+            }
+        }
+    }
+    Ok(())
+}
+```
 
 ### Embed canal in another product
 
@@ -348,4 +381,4 @@ Errors stop consumption; unacknowledged transactions must not advance disk check
 
 ## Non-key column support
 
-Non-key columns can be skipped for integers, FLOAT/DOUBLE, DECIMAL, BIT, date/time types with fractional seconds, CHAR/VARCHAR/BINARY/VARBINARY, ENUM/SET, BLOB/TEXT, JSON, spatial types, and VECTOR. Their values are not decoded, so JSON, string, and BLOB contents do not allocate value objects. NULL bits are still checked against the saved schema: NULL in a NOT NULL column fails before transaction delivery or checkpoint persistence. Generated columns, invisible columns, the old DECIMAL wire type, and typed arrays produce explicit errors instead of guessed layouts.
+Non-key field images support integers, FLOAT/DOUBLE, DECIMAL, BIT, date/time types with fractional seconds, CHAR/VARCHAR/BINARY/VARBINARY, ENUM/SET, BLOB/TEXT, JSON, spatial types, and VECTOR. Their values are exposed as borrowed `RowValue` views; binary JSON, temporal, geometry and vector contents remain encoded bytes without application object allocation. NULL bits are still checked against the saved schema: NULL in a NOT NULL column fails before transaction delivery or checkpoint persistence. Generated columns, invisible columns, the old DECIMAL wire type, and typed arrays produce explicit errors instead of guessed layouts.

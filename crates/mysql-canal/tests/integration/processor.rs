@@ -477,7 +477,16 @@ fn full_transactions_commit_and_resume_but_mismatches_do_not_advance_disk_state(
     feed(&mut processor, XID_EVENT, 240, &[0; 8], &mut output).unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
-        serde_json::json!({"source":"test", "schema":"app", "table":"users", "operation":"insert", "pk":{"type":"signed", "value":42}, "changed":["id","name","age"]})
+        with_fields(
+            serde_json::json!({"source":"test", "schema":"app", "table":"users", "operation":"insert", "pk":{"type":"signed", "value":42}, "changed":["id","name","age"]}),
+            &basic(),
+            None,
+            Some(&[
+                (0, serde_json::json!(42)),
+                (1, serde_json::Value::Null),
+                (2, serde_json::json!(20))
+            ])
+        )
     );
     let mut resumed = Processor::new(
         State::read(&path).unwrap(),
@@ -547,4 +556,123 @@ fn full_transactions_commit_and_resume_but_mismatches_do_not_advance_disk_state(
     assert!(output.is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), saved);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn retained_field_values_count_toward_budget_without_output_or_checkpoint_advance() {
+    let path = temporary("field-budget");
+    let mut snapshot = state();
+    snapshot.tables[0].columns[1].octet_length = Some(4096);
+    snapshot.save(&path).unwrap();
+    let saved = fs::read(&path).unwrap();
+    let mut processor = Processor::new(
+        snapshot.clone(),
+        Some(path.clone()),
+        1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    feed(
+        &mut processor,
+        FORMAT_DESCRIPTION_EVENT,
+        100,
+        &format(),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut processor,
+        QUERY_EVENT,
+        150,
+        &query("BEGIN"),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut processor,
+        TABLE_MAP_EVENT,
+        200,
+        &table_map(7, &snapshot.tables[0], &[3, 15, 3], &[0, 16]),
+        &mut output,
+    )
+    .unwrap();
+    let mut data = vec![0];
+    data.extend(42i32.to_le_bytes());
+    data.extend(1536u16.to_le_bytes());
+    data.extend(vec![b'x'; 1536]);
+    let result = feed(
+        &mut processor,
+        WRITE_ROWS_EVENT,
+        250,
+        &rows(7, WRITE_ROWS_EVENT, 3, &[3], &[], &data),
+        &mut output,
+    );
+    assert!(matches!(result, Err(Error::TransactionLimit(1024))));
+    assert!(output.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn invalid_field_json_does_not_acknowledge_the_transaction() {
+    let path = temporary("field-json-error");
+    let mut snapshot = state();
+    snapshot.tables[0].columns[2].data_type = "double".into();
+    snapshot.tables[0].columns[2].column_type = "double".into();
+    snapshot.save(&path).unwrap();
+    let saved = fs::read(&path).unwrap();
+    let mut processor = Processor::new(
+        snapshot.clone(),
+        Some(path.clone()),
+        100_000,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    feed(
+        &mut processor,
+        FORMAT_DESCRIPTION_EVENT,
+        100,
+        &format(),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut processor,
+        QUERY_EVENT,
+        150,
+        &query("BEGIN"),
+        &mut output,
+    )
+    .unwrap();
+    feed(
+        &mut processor,
+        TABLE_MAP_EVENT,
+        200,
+        &table_map(7, &snapshot.tables[0], &[3, 15, 5], &[100, 0, 8]),
+        &mut output,
+    )
+    .unwrap();
+    let mut data = vec![0];
+    data.extend(42i32.to_le_bytes());
+    data.extend(f64::NAN.to_le_bytes());
+    feed(
+        &mut processor,
+        WRITE_ROWS_EVENT,
+        250,
+        &rows(7, WRITE_ROWS_EVENT, 3, &[5], &[], &data),
+        &mut output,
+    )
+    .unwrap();
+    assert!(output.is_empty());
+    assert!(
+        matches!(feed(&mut processor,XID_EVENT,300,&[0;8],&mut output), Err(Error::Json(error)) if error.to_string().contains("non-finite field value"))
+    );
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    fs::remove_file(path).unwrap();
 }

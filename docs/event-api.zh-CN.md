@@ -226,7 +226,7 @@ fn read_full(event: &BinlogEvent<'_, Full>) -> Result<()> {
 
 `file::FrameReader<R>::new(reader)` 通过 `next_frame()` 返回已校验帧，不携带字段模式。`stream::ReplicationConnection` 提供原始网络 `next_frame()` / 借用的 `next_view()`；自定义适配器使用这些传输接口并自行解析结构。类型化 `BinlogFile<R, M>` 和 `ReplicationStream<M>` 只提供 `next_event()`，构造时必须显式指定 `M`。
 
-对于调用方已经校验的独立布局，可使用 `RowsEvent::<M>::with_layout(kind, post_header, v2)` 加 `Event::decode(body)` 解析 ROWS 包络，再调用 `RowsDecoder::<M>::new(table_map)?.rows(&event)`，显式提供 TABLE_MAP。该路径与自动绑定使用同一组 `Row<M>`、`Rows<M>`、`Field` 和镜像类型，不提供另一套事件表示或跨模式转换。原始解码不要求主键；Canal 保留自身适配器、历史 schema 和仅解码主键的路径。
+对于调用方已经校验的独立布局，可使用 `RowsEvent::<M>::with_layout(kind, post_header, v2)` 加 `Event::decode(body)` 解析 ROWS 包络，再调用 `RowsDecoder::<M>::new(table_map)?.rows(&event)`，显式提供 TABLE_MAP。该路径与自动绑定使用同一组 `Row<M>`、`Rows<M>`、`Field` 和镜像类型，不提供另一套事件表示或跨模式转换。原始解码不要求主键；Canal 保留自身适配器和历史 SQL schema，并为统一镜像复用借用字段解码。
 
 ```sh
 cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001 --row-image full
@@ -246,6 +246,7 @@ cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001 -
 | `pk` | `PrimaryKey<'a>` | `PrimaryKey<'static>` | 精确主键；主键变更时为新值 |
 | `previous_pk` | `Option<PrimaryKey<'a>>` | `Option<PrimaryKey<'static>>` | 主键变更时的旧值 |
 | `changed` | `&'a Arc<[u16]>` | `Arc<[u16]>` | 按表顺序排列、共享的绝对列索引 |
+| `fields` | `RowOperation<FieldImage<'a>>` | `RowOperation<OwnedFieldImage>` | 日志 before/after 值及历史列定义 |
 
 `PrimaryKey` 变体为 `Signed(i64)`、`Unsigned(u64)`、`Text(Cow<'a, str>)` 和 `Decimal(String)`。DECIMAL 不经过浮点转换。`OwnedChange::changed_names()` 通过 `table` 将索引映射为字段名。
 
@@ -259,9 +260,41 @@ cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001 -
 
 `State` 携带历史 schema、文件/位点及来源 UUID、ID、插件。事务数据只在回调期间借用，需要跨回调持有时才克隆。`EventConverter` 的回调可能发生在 COMMIT 之前；提交交付应使用 `Canal` 或 `Processor`。
 
-MINIMAL 与 FULL 使用相同的通用类型和字段。区别在于下文所述的 `changed` 中 after-image 索引，两者都不增加完整行值。
+MINIMAL 与 FULL 使用相同的通用类型和字段。MINIMAL 仅提供已记录字段，FULL 的每份适用镜像提供全部列。泛型解码器在行回调前校验模式策略，多来源通用回调无需运行时模式判断。
 
 JSON 输出、数据类型支持及提交和失败行为见[事件说明](events.zh-CN.md)。
+
+### 读取 Canal 字段
+
+`FieldImage` 和 `OwnedFieldImage` 提供 `table()`、`columns()`、`column_indices()`、`fields()` 和 `field(index)`。`Field` 包含 `index: u16`、`column: &ColumnMeta` 及 `value: RowValue`。索引为历史表的绝对列序号；`field(index)` 返回 `Result<Option<Field>>`，仅未记录列为 `None`，越界报错。SQL NULL 为 `RowValue::Null`。INSERT 只有 after，UPDATE 两者都有，DELETE 只有 before，由 `RowOperation` 变体表达。
+
+转换 `Change` 借用事件值；`into_owned()` 仅复制每份镜像的紧凑 NULL 位图和编码值，共享不可变布局及历史列定义。提交回调接收 `OwnedChange`，读取值时借用该变更，需要跨回调保留时才克隆。输入缓冲区复用后镜像仍然有效。
+
+原始 `RowsDecoder<M>::rows_from_images(kind, images)` 接收结构适配器已归一化的 `RowImages`，使用与 `rows(&event)` 相同的模式校验和操作类型。原始 `RowImage::into_owned()` 返回 `OwnedRowImage`，通过 `view()` 和 `fields()` 读取持有字节，无需重建完整事件缓冲区。`retained_bytes()` 估算镜像字节及共享布局成本，不含共享表定义。
+
+序列化契约和两种模式见 [Canal / CLI JSON](events.zh-CN.md#canal--cli-json)。
+
+```rust,no_run
+use mysql_canal::{OwnedChange, Result};
+
+fn inspect(change: &OwnedChange) -> Result<()> {
+    for (side, image) in [
+        ("before", change.fields.before()),
+        ("after", change.fields.after()),
+    ] {
+        if let Some(image) = image {
+            for field in image.fields() {
+                let field = field?;
+                println!(
+                    "{} [{}] {} {}: {:?}",
+                    side, field.index, field.column.name, field.column.column_type, field.value
+                );
+            }
+        }
+    }
+    Ok(())
+}
+```
 
 ### 嵌入其他产品
 
@@ -348,4 +381,4 @@ fn main() -> Result<()> {
 
 ## 非主键字段支持
 
-非主键字段支持跳过整数、FLOAT/DOUBLE、DECIMAL、BIT、日期时间及其小数秒、CHAR/VARCHAR/BINARY/VARBINARY、ENUM/SET、BLOB/TEXT、JSON、空间类型、VECTOR。非主键值不解码，因此不会为 JSON/字符串/BLOB 内容分配对象。NULL 位图仍按保存的 schema 校验：NOT NULL 列出现 NULL 时明确报错，不交付事务或持久化检查点。生成列、不可见列、旧 DECIMAL wire 类型和 typed array 明确报错，不推测布局。
+非主键字段镜像支持整数、FLOAT/DOUBLE、DECIMAL、BIT、日期时间及其小数秒、CHAR/VARCHAR/BINARY/VARBINARY、ENUM/SET、BLOB/TEXT、JSON、空间类型、VECTOR。非主键值以借用 `RowValue` 视图提供；二进制 JSON、时间、空间和向量内容保持编码字节，不构造应用对象。NULL 位图仍按保存的 schema 校验：NOT NULL 列出现 NULL 时明确报错，不交付事务或持久化检查点。生成列、不可见列、旧 DECIMAL wire 类型和 typed array 明确报错，不推测布局。

@@ -66,10 +66,15 @@ fn offline_cli_replays_from_snapshot_boundary_and_rejects_truncation() {
     let change: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(
         change,
-        serde_json::json!({
-            "source": "east", "schema": "app", "table": "users",
-            "operation": "delete", "pk": {"type": "signed", "value": 1}, "changed": []
-        })
+        with_fields(
+            serde_json::json!({
+                "source": "east", "schema": "app", "table": "users",
+                "operation": "delete", "pk": {"type": "signed", "value": 1}, "changed": []
+            }),
+            &basic(),
+            Some(&[(0, serde_json::json!(1))]),
+            None
+        )
     );
     assert_eq!(
         mysql_canal::engine::checkpoint::State::read(&state_path)
@@ -157,7 +162,20 @@ fn offline_cli_full_mode_preserves_all_changed_fields_and_state() {
     );
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
-        serde_json::json!({"source":"test", "schema":"app", "table":"users", "operation":"update", "pk":{"type":"signed","value":43}, "previous_pk":{"type":"signed","value":42}, "changed":["id","name","age"]})
+        with_fields(
+            serde_json::json!({"source":"test", "schema":"app", "table":"users", "operation":"update", "pk":{"type":"signed","value":43}, "previous_pk":{"type":"signed","value":42}, "changed":["id","name","age"]}),
+            &basic(),
+            Some(&[
+                (0, serde_json::json!(42)),
+                (1, serde_json::json!("x")),
+                (2, serde_json::json!(20))
+            ]),
+            Some(&[
+                (0, serde_json::json!(43)),
+                (1, serde_json::Value::Null),
+                (2, serde_json::json!(20))
+            ])
+        )
     );
     assert_eq!(fs::read(&state_path).unwrap(), before);
     for options in [

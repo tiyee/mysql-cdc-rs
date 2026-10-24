@@ -122,7 +122,12 @@ fn typed_binlog_input_is_delivered_only_after_cdc_commit() {
     let actual: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(
         actual,
-        serde_json::json!({"source":"test","schema":"app","table":"users","operation":"delete","pk":{"type":"signed","value":42},"changed":[]})
+        with_fields(
+            serde_json::json!({"source":"test","schema":"app","table":"users","operation":"delete","pk":{"type":"signed","value":42},"changed":[]}),
+            &basic(),
+            Some(&[(0, serde_json::json!(42))]),
+            None
+        )
     );
     assert_eq!(processor.state().position, 300);
 }

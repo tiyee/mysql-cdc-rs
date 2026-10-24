@@ -37,8 +37,7 @@ impl TransactionBuffer {
                 "row outside BEGIN; start at a transaction boundary",
             ));
         }
-        let owned = change.into_owned();
-        let bytes = owned.memory_bytes();
+        let bytes = change.memory_bytes();
         let total = self
             .bytes
             .checked_add(bytes)
@@ -59,6 +58,8 @@ impl TransactionBuffer {
         if capacity > self.changes.capacity() {
             self.changes.reserve_exact(capacity - self.changes.len());
         }
+        let owned = change.into_owned();
+        debug_assert!(owned.memory_bytes() <= bytes);
         self.changes.push(owned);
         self.bytes = total;
         Ok(())

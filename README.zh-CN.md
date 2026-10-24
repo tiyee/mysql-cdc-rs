@@ -4,7 +4,7 @@
 
 mysql-cdc 是 Rust MySQL CDC 系统，监听 binlog，按精确的库表白名单输出已提交事务中的行变更。支持多个独立来源、MINIMAL / FULL 行镜像及检查点恢复。
 
-CDC 事件包含来源、库表、操作、精确主键和字段名；完整原始行镜像通过复制库按需读取。普通 SELECT 不产生 CDC 变更。
+CDC 事件包含来源、库表、操作、精确主键、变动字段名，以及携带历史列元数据和日志值的 before/after 字段。普通 SELECT 不产生 CDC 变更。
 
 ## 系统组成
 
@@ -88,11 +88,32 @@ MINIMAL 模式下，这条变更通知表示“哪条记录被修改、日志记
   "changed": [
     "name",
     "age"
-  ]
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 21
+      }
+    ]
+  }
 }
 ```
 
-通知中的 `pk` 是用来定位记录的主键，`changed` 是日志记录的字段名。它不会输出 Bob、21 等非主键值。FULL 下，`changed` 还会包含值未改变但被完整记录的字段。完整对比见[事件说明](docs/events.zh-CN.md)。
+通知中的 `pk` 是用来定位记录的主键，`changed` 是日志记录的字段名。`fields.before` 包含日志记录的主键，`fields.after` 包含 Bob、21 及对应列元数据。FULL 下，`changed` 还会包含值未改变但被完整记录的字段。完整对比见[事件说明](docs/events.zh-CN.md)。
 
 ## 库使用示例
 
@@ -136,7 +157,7 @@ fn main() -> Result<()> {
 | MINIMAL | `BinlogEvent<Minimal>` / `RowOperation<SparseImage>` | 实际记录的列及其定义和值 | `Result<Option<Field>>`，合法列未记录为 `None` |
 | FULL | `BinlogEvent<Full>` / `RowOperation<CompleteImage>` | 每份存在的镜像包含全部列及其定义和值 | `Result<Field>`，拒绝不完整镜像 |
 
-查看 [MINIMAL JSON 示例](docs/events.zh-CN.md#minimal-json)、[FULL JSON 示例](docs/events.zh-CN.md#full-json)，可对照同一条 UPDATE 的JSON 数据、事件结构、before/after 字段和实际访问结果；[Rust 示例](docs/event-api.zh-CN.md#按模式读取具体行操作)展示两种静态类型的读取方式。原始事件包含字段值；Canal 的提交变更仍只携带主键和变动字段索引。
+查看 [MINIMAL JSON 示例](docs/events.zh-CN.md#minimal-json)、[FULL JSON 示例](docs/events.zh-CN.md#full-json)，可对照同一条 UPDATE 的JSON 数据、事件结构、before/after 字段和实际访问结果；[Rust 示例](docs/event-api.zh-CN.md#按模式读取具体行操作)展示两种静态类型的读取方式。Canal 通过 `Change.fields` / `OwnedChange.fields` 同时提供日志字段值、历史 SQL 列元数据及适用的 before/after 镜像。
 
 ## 使用边界
 

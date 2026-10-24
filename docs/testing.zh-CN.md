@@ -22,6 +22,8 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 
 携带字段的泛型事件回归独立构造 TABLE_MAP 可选 TLV 和 ROWS 字节，覆盖列名、MSB 优先符号位图、紧凑字符列 collation 索引、主键前缀、未知/畸形元数据、未记录/NULL 字段、owned 视图保留历史定义、重映射和来源隔离。原始实库行场景还会将泛型 `next_event()` 的自动绑定结果与现有手动解码器逐项比较。
 
+Canal 字段回归比较完整借用/owned JSON、历史列元数据、稀疏缺列与 SQL NULL、无符号整数及精确 DECIMAL、文本/字节和编码值、输入缓冲区复用、混合来源模式、镜像内存预算，以及序列化失败不推进检查点。实库预期同时比较 before/after 字段、主键和变动字段名；二进制 JSON 仅在专门的语义断言中解码。
+
 ## 专用 MySQL 测试
 
 真实 MySQL 集成测试（显式执行，在独立测试服务上创建并删除唯一命名的测试库）：
@@ -54,7 +56,7 @@ cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test
 | `mysql-canal` | 12 | CDC 转换、提交事务、来源启动校验与检查点恢复 |
 | `pikachu` | 3 | 在线 `check`/`init`/`run --once`、完整 JSON Lines、过滤、回滚、恢复不重复、DDL 及预检失败位点 |
 
-这 19 个场景消费服务器实际生成的 binlog 或查询真实元数据。默认 workspace 测试只编译它们，保持忽略；不使用合成事件替代实库变更。Canal 的 12 个场景通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径运行。CDC 输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk 与 changed，缺失、额外或重复的事件都会失败。
+这 19 个场景消费服务器实际生成的 binlog 或查询真实元数据。默认 workspace 测试只编译它们，保持忽略；不使用合成事件替代实库变更。Canal 的 12 个场景通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径运行。CDC 输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk、changed 与 fields，缺失、额外或重复的事件都会失败。
 
 | 场景 | 校验内容 |
 | --- | --- |

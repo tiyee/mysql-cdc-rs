@@ -237,6 +237,8 @@ pub fn expected(
     operation: &str,
     pk: Value,
     changed: &[&str],
+    before: Option<Value>,
+    after: Option<Value>,
 ) -> Value {
     let changed =
         if fixture.config.replication.row_image == RowImageMode::Full && operation != "delete" {
@@ -253,7 +255,43 @@ pub fn expected(
         } else {
             changed.to_vec()
         };
-    json!({"source": SOURCE_ID, "schema": fixture.schema, "table": table, "operation": operation, "pk": pk, "changed": changed})
+    let meta = fixture
+        .initial
+        .tables
+        .iter()
+        .find(|meta| meta.table == table)
+        .unwrap();
+    let image = |row: Value, before: bool| {
+        Value::Array(
+            meta.columns
+                .iter()
+                .enumerate()
+                .filter(|(_, col)| {
+                    if fixture.config.replication.row_image == RowImageMode::Full {
+                        true
+                    } else if before {
+                        col.primary_key
+                    } else {
+                        changed.contains(&col.name.as_str())
+                    }
+                })
+                .map(|(index, col)| {
+                    let value = row
+                        .get(&col.name)
+                        .unwrap_or_else(|| panic!("missing expected field {}", col.name));
+                    json!({"index": index, "column": col, "value": value})
+                })
+                .collect(),
+        )
+    };
+    let mut fields = serde_json::Map::new();
+    if let Some(before) = before {
+        fields.insert("before".into(), image(before, true));
+    }
+    if let Some(after) = after {
+        fields.insert("after".into(), image(after, false));
+    }
+    json!({"source": SOURCE_ID, "schema": fixture.schema, "table": table, "operation": operation, "pk": pk, "changed": changed, "fields": fields})
 }
 
 pub fn assert_unordered(actual: Vec<Value>, expected: Vec<Value>) {

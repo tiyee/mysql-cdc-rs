@@ -34,7 +34,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 每次在线连接 MySQL 都检查选中表的当前主键，包括检查点恢复；无主键或不支持的主键会阻止启动。恢复仍用检查点保存的 schema 解码历史事件。本地回放使用该历史 schema，不连接 MySQL。
 
-[配置示例](examples/config/multi-source.toml) 使用具名来源，各自维护凭据、白名单和检查点。变更包含来源、库名、表名、操作、精确主键和变动字段名。仅在事务提交后输出，回滚丢弃缓冲。输出失败会停止消费；检查点持久化前发生崩溃可能导致重放。
+[配置示例](examples/config/multi-source.toml) 使用具名来源，各自维护凭据、白名单和检查点。变更包含来源、库名、表名、操作、精确主键、变动字段名以及携带列元数据和日志值的 `fields.before` / `fields.after`。仅在事务提交后输出，回滚丢弃缓冲。输出失败会停止消费；检查点持久化前发生崩溃可能导致重放。
 
 使用检查点保存的历史 schema 回放本地 binlog：
 
@@ -57,7 +57,7 @@ pikachu-cdc run cdc.toml --once --row-image east=full --row-image west=minimal
 pikachu-cdc replay east-state.json /path/to/binlog.000001 --row-image full
 ```
 
-回放默认 MINIMAL，不修改检查点。FULL 的 INSERT/UPDATE 在 `changed` 中列出 after image 的全部列，包括值未变化的列，不输出完整行值。模式参数检查上游设置与实际镜像结构，不修改 MySQL；写入会话和历史日志须符合所选策略，切换前须消费完旧模式事务并协调配置。未知来源、不支持的模式及重复覆盖在连接前报错。
+回放默认 MINIMAL，不修改检查点。FULL 的 INSERT/UPDATE 在 `changed` 中列出 after image 的全部列，包括值未变化的列，`fields` 同时输出每份适用 FULL 镜像的全部值及列元数据。MINIMAL 仅输出已记录字段，未记录列省略，SQL NULL 为 `null`。见 [JSON 示例](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.zh-CN.md#canal--cli-json)。模式参数检查上游设置与实际镜像结构，不修改 MySQL；写入会话和历史日志须符合所选策略，切换前须消费完旧模式事务并协调配置。未知来源、不支持的模式及重复覆盖在连接前报错。
 
 ## 参考
 

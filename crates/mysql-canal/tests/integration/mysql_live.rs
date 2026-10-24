@@ -117,12 +117,37 @@ fn mysql_insert_update_delete_assert_complete_changes() {
         "users",
         "id BIGINT UNSIGNED PRIMARY KEY, name VARCHAR(100) CHARACTER SET utf8mb4, amount DECIMAL(12,4), flags BIT(9), kind ENUM('a','b'), tags SET('a','b'), body JSON, created_at DATETIME(6), raw_data BLOB",
     )]);
-    fixture.sql("INSERT INTO users VALUES (18446744073709551615,'Alice',12345678.9000,b'100000001','b','a,b',JSON_OBJECT('v',1),NOW(6),X'010203')");
+    fixture.sql("INSERT INTO users VALUES (18446744073709551615,'Alice',12345678.9000,b'100000001','b','a,b',JSON_OBJECT('v',1),'2000-01-02 03:04:05.123456',X'010203')");
     fixture
         .sql("UPDATE users SET name=NULL, body=JSON_OBJECT('v',2) WHERE id=18446744073709551615");
     fixture.sql("DELETE FROM users WHERE id=18446744073709551615");
+    let integer =
+        0x80_0000_0000u64 + ((((2000u64 * 13 + 1) << 5 | 2) << 17) | (3 << 12) | (4 << 6) | 5);
+    let mut datetime = integer.to_be_bytes()[3..].to_vec();
+    datetime.extend_from_slice(&123456u32.to_be_bytes()[1..]);
+    let inserted = json!({"id": u64::MAX, "name": "Alice", "amount": "12345678.9000", "flags": 257, "kind": 2, "tags": 3, "body": {"v":1}, "created_at": datetime, "raw_data": [1,2,3]});
+    let mut updated = inserted.clone();
+    updated["name"] = Value::Null;
+    updated["body"] = json!({"v":2});
     let pk = json!({"type": "unsigned", "value": u64::MAX});
-    let (changes, _) = fixture.collect(&fixture.initial);
+    let (mut changes, _) = fixture.collect(&fixture.initial);
+    // Compare binary JSON semantically while preserving every other field exactly.
+    for change in &mut changes {
+        for key in ["before", "after"] {
+            if let Some(fields) = change["fields"].get_mut(key).and_then(Value::as_array_mut) {
+                for field in fields {
+                    if field["column"]["data_type"] == "json" && !field["value"].is_null() {
+                        let bytes: Vec<u8> =
+                            serde_json::from_value(field["value"].clone()).unwrap();
+                        let mut input = mysql_common::io::ParseBuf(&bytes);
+                        let json: mysql_common::binlog::jsonb::Value<'_> = input.parse(()).unwrap();
+                        field["value"] = Value::try_from(json).unwrap();
+                        assert!(input.is_empty());
+                    }
+                }
+            }
+        }
+    }
     assert_eq!(
         changes,
         [
@@ -141,10 +166,20 @@ fn mysql_insert_update_delete_assert_complete_changes() {
                     "body",
                     "created_at",
                     "raw_data"
-                ]
+                ],
+                None,
+                Some(inserted.clone())
             ),
-            expected(&fixture, "users", "update", pk.clone(), &["name", "body"]),
-            expected(&fixture, "users", "delete", pk, &[]),
+            expected(
+                &fixture,
+                "users",
+                "update",
+                pk.clone(),
+                &["name", "body"],
+                Some(inserted),
+                Some(updated.clone())
+            ),
+            expected(&fixture, "users", "delete", pk, &[], Some(updated), None),
         ]
     );
 }
@@ -158,7 +193,17 @@ fn mysql_multi_row_insert_update_delete_and_zero_matches() {
     live::assert_unordered(
         changes,
         (1..=3)
-            .map(|id| expected(&fixture, "items", "insert", key(id), &["id", "note"]))
+            .map(|id| {
+                expected(
+                    &fixture,
+                    "items",
+                    "insert",
+                    key(id),
+                    &["id", "note"],
+                    None,
+                    Some(json!({"id": id, "note": (["a", "b", "c"][(id - 1) as usize])})),
+                )
+            })
             .collect(),
     );
     fixture.sql("UPDATE items SET note=NULL WHERE id IN (1,3)");
@@ -166,7 +211,17 @@ fn mysql_multi_row_insert_update_delete_and_zero_matches() {
     live::assert_unordered(
         changes,
         [1, 3]
-            .map(|id| expected(&fixture, "items", "update", key(id), &["note"]))
+            .map(|id| {
+                expected(
+                    &fixture,
+                    "items",
+                    "update",
+                    key(id),
+                    &["note"],
+                    Some(json!({"id": id, "note": (["a", "b", "c"][(id - 1) as usize])})),
+                    Some(json!({"id": id, "note": Value::Null})),
+                )
+            })
             .to_vec(),
     );
     fixture.sql("DELETE FROM items WHERE id IN (1,2,3)");
@@ -174,7 +229,17 @@ fn mysql_multi_row_insert_update_delete_and_zero_matches() {
     live::assert_unordered(
         changes,
         (1..=3)
-            .map(|id| expected(&fixture, "items", "delete", key(id), &[]))
+            .map(|id| {
+                expected(
+                    &fixture,
+                    "items",
+                    "delete",
+                    key(id),
+                    &[],
+                    Some(json!({"id": id, "note": if id == 2 { json!("b") } else { Value::Null }})),
+                    None,
+                )
+            })
             .collect(),
     );
     fixture.sql("UPDATE items SET note='absent' WHERE id=999");
@@ -241,10 +306,42 @@ fn mysql_all_integer_key_widths_and_signed_unsigned_boundaries() {
         let min_pk = json!({"type": kind, "value": minimum});
         let max_pk = json!({"type": kind, "value": maximum});
         wanted.extend([
-            expected(&fixture, table, "insert", min_pk.clone(), &["note", "id"]),
-            expected(&fixture, table, "insert", max_pk.clone(), &["note", "id"]),
-            expected(&fixture, table, "update", min_pk, &["note"]),
-            expected(&fixture, table, "delete", max_pk, &[]),
+            expected(
+                &fixture,
+                table,
+                "insert",
+                min_pk.clone(),
+                &["note", "id"],
+                None,
+                Some(json!({"id": minimum.clone(), "note": "minimum"})),
+            ),
+            expected(
+                &fixture,
+                table,
+                "insert",
+                max_pk.clone(),
+                &["note", "id"],
+                None,
+                Some(json!({"id": maximum.clone(), "note": "maximum"})),
+            ),
+            expected(
+                &fixture,
+                table,
+                "update",
+                min_pk,
+                &["note"],
+                Some(json!({"id": minimum.clone(), "note": "minimum"})),
+                Some(json!({"id": minimum.clone(), "note": Value::Null})),
+            ),
+            expected(
+                &fixture,
+                table,
+                "delete",
+                max_pk,
+                &[],
+                Some(json!({"id": maximum.clone(), "note": "maximum"})),
+                None,
+            ),
         ]);
     }
     live::assert_unordered(fixture.collect(&fixture.initial).0, wanted);
@@ -323,15 +420,52 @@ fn mysql_text_decimal_and_numeric_primary_key_changes() {
         fixture.sql(&format!("DELETE FROM {table} WHERE id='{new_sql}'"));
         let old_pk = json!({"type": kind, "value": old});
         let new_pk = json!({"type": kind, "value": new});
-        let mut updated = expected(&fixture, table, "update", new_pk.clone(), &["id", "note"]);
+        let mut updated = expected(
+            &fixture,
+            table,
+            "update",
+            new_pk.clone(),
+            &["id", "note"],
+            Some(json!({"id": old.clone(), "note": "old"})),
+            Some(json!({"id": new.clone(), "note": Value::Null})),
+        );
         updated["previous_pk"] = old_pk.clone();
         wanted.extend([
-            expected(&fixture, table, "insert", old_pk, &["id", "note"]),
+            expected(
+                &fixture,
+                table,
+                "insert",
+                old_pk,
+                &["id", "note"],
+                None,
+                Some(json!({"id": old.clone(), "note": "old"})),
+            ),
             updated,
-            expected(&fixture, table, "delete", new_pk, &[]),
+            expected(
+                &fixture,
+                table,
+                "delete",
+                new_pk,
+                &[],
+                Some(json!({"id": new.clone(), "note": Value::Null})),
+                None,
+            ),
         ]);
     }
-    assert_eq!(fixture.collect(&fixture.initial).0, wanted);
+    let (mut actual, _) = fixture.collect(&fixture.initial);
+    for change in &mut actual {
+        for key in ["before", "after"] {
+            if let Some(fields) = change["fields"].get_mut(key).and_then(Value::as_array_mut) {
+                for field in fields {
+                    if field["column"]["data_type"] == "char" {
+                        let text = field["value"].as_str().unwrap().trim_end_matches(' ');
+                        field["value"] = json!(text);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(actual, wanted);
 }
 
 #[test]
@@ -357,6 +491,19 @@ fn mysql_wide_sparse_null_images_with_key_after_column_64() {
         })
         .collect::<Vec<_>>()
         .join(",");
+    let mut inserted = Value::Object(
+        names
+            .iter()
+            .map(|name| (name.clone(), Value::Null))
+            .collect(),
+    );
+    inserted["id"] = json!(-42);
+    inserted["c0"] = json!(11);
+    inserted["c79"] = json!(79);
+    let mut updated = inserted.clone();
+    updated["c0"] = Value::Null;
+    updated["c65"] = json!(65);
+    updated["c79"] = Value::Null;
     let mut fixture = Fixture::new(&[("wide", &ddl)]);
     fixture.sql("INSERT INTO wide (id,c0,c79) VALUES (-42,11,79)");
     fixture.sql("UPDATE wide SET c0=NULL, c65=65, c79=NULL WHERE id=-42");
@@ -364,9 +511,33 @@ fn mysql_wide_sparse_null_images_with_key_after_column_64() {
     assert_eq!(
         fixture.collect(&fixture.initial).0,
         [
-            expected(&fixture, "wide", "insert", key(-42), &["c0", "id", "c79"]),
-            expected(&fixture, "wide", "update", key(-42), &["c0", "c65", "c79"]),
-            expected(&fixture, "wide", "delete", key(-42), &[]),
+            expected(
+                &fixture,
+                "wide",
+                "insert",
+                key(-42),
+                &["c0", "id", "c79"],
+                None,
+                Some(inserted.clone())
+            ),
+            expected(
+                &fixture,
+                "wide",
+                "update",
+                key(-42),
+                &["c0", "c65", "c79"],
+                Some(inserted),
+                Some(updated.clone())
+            ),
+            expected(
+                &fixture,
+                "wide",
+                "delete",
+                key(-42),
+                &[],
+                Some(updated),
+                None
+            ),
         ]
     );
 }
@@ -391,9 +562,33 @@ fn mysql_whitelist_filters_tables_and_same_named_tables_in_other_schema() {
     assert_eq!(
         changes,
         [
-            expected(&fixture, "items", "insert", key(1), &["id", "note"]),
-            expected(&fixture, "items", "update", key(1), &["note"]),
-            expected(&fixture, "items", "delete", key(1), &[]),
+            expected(
+                &fixture,
+                "items",
+                "insert",
+                key(1),
+                &["id", "note"],
+                None,
+                Some(json!({"id": 1, "note": "a"}))
+            ),
+            expected(
+                &fixture,
+                "items",
+                "update",
+                key(1),
+                &["note"],
+                Some(json!({"id": 1, "note": "a"})),
+                Some(json!({"id": 1, "note": Value::Null}))
+            ),
+            expected(
+                &fixture,
+                "items",
+                "delete",
+                key(1),
+                &[],
+                Some(json!({"id": 1, "note": Value::Null})),
+                None
+            ),
         ]
     );
     fixture.sql("INSERT INTO excluded VALUES (2,'filtered transaction')");
@@ -467,10 +662,42 @@ fn mysql_live_monitor_buffers_rows_until_transaction_commit() {
     assert_eq!(
         observed.changes(),
         [
-            expected(&fixture, "items", "insert", key(1), &["id", "note"]),
-            expected(&fixture, "items", "insert", key(2), &["id", "note"]),
-            expected(&fixture, "items", "update", key(1), &["note"]),
-            expected(&fixture, "items", "delete", key(2), &[]),
+            expected(
+                &fixture,
+                "items",
+                "insert",
+                key(1),
+                &["id", "note"],
+                None,
+                Some(json!({"id": 1, "note": "a"}))
+            ),
+            expected(
+                &fixture,
+                "items",
+                "insert",
+                key(2),
+                &["id", "note"],
+                None,
+                Some(json!({"id": 2, "note": "b"}))
+            ),
+            expected(
+                &fixture,
+                "items",
+                "update",
+                key(1),
+                &["note"],
+                Some(json!({"id": 1, "note": "a"})),
+                Some(json!({"id": 1, "note": Value::Null}))
+            ),
+            expected(
+                &fixture,
+                "items",
+                "delete",
+                key(2),
+                &[],
+                Some(json!({"id": 2, "note": "b"})),
+                None
+            ),
         ]
     );
     assert!(fixture.saved().position > fixture.initial.position);
@@ -500,7 +727,15 @@ fn mysql_rollback_discards_insert_update_delete() {
     fixture.sql("UPDATE items SET note='committed' WHERE id=1");
     assert_eq!(
         fixture.collect(&checkpoint).0,
-        [expected(&fixture, "items", "update", key(1), &["note"])]
+        [expected(
+            &fixture,
+            "items",
+            "update",
+            key(1),
+            &["note"],
+            Some(json!({"id": 1, "note": "original"})),
+            Some(json!({"id": 1, "note": "committed"}))
+        )]
     );
 }
 
@@ -517,7 +752,9 @@ fn mysql_restart_from_persisted_checkpoint_only_emits_new_changes() {
             "items",
             "insert",
             key(1),
-            &["id", "note"]
+            &["id", "note"],
+            None,
+            Some(json!({"id": 1, "note": "first"}))
         )]
     );
     let saved = fixture.saved();
@@ -531,8 +768,24 @@ fn mysql_restart_from_persisted_checkpoint_only_emits_new_changes() {
     assert_eq!(
         fixture.collect(&saved).0,
         [
-            expected(&fixture, "items", "update", key(1), &["note"]),
-            expected(&fixture, "items", "insert", key(2), &["id", "note"]),
+            expected(
+                &fixture,
+                "items",
+                "update",
+                key(1),
+                &["note"],
+                Some(json!({"id": 1, "note": "first"})),
+                Some(json!({"id": 1, "note": Value::Null}))
+            ),
+            expected(
+                &fixture,
+                "items",
+                "insert",
+                key(2),
+                &["id", "note"],
+                None,
+                Some(json!({"id": 2, "note": "second"}))
+            ),
         ]
     );
     assert!(fixture.collect(&fixture.saved()).0.is_empty());
@@ -569,7 +822,9 @@ fn mysql_sink_failure_preserves_checkpoint_and_allows_replay() {
             "items",
             "insert",
             key(1),
-            &["id", "note"]
+            &["id", "note"],
+            None,
+            Some(json!({"id": 1, "note": "retry"}))
         )]
     );
 }

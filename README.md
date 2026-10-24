@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 mysql-cdc is a Rust MySQL CDC system. It consumes binlogs and delivers committed row changes for an exact database/table whitelist, with independent sources, MINIMAL / FULL image policies and checkpoint recovery.
 
-CDC records contain source, database/table, operation, exact primary key and column names. Raw row images can be inspected separately through the replication library. Ordinary SELECT reads produce no CDC changes.
+CDC records contain source, database/table, operation, exact primary key, changed column names and before/after fields with historical column metadata and logged values. Ordinary SELECT reads produce no CDC changes.
 
 ## System components
 
@@ -88,11 +88,32 @@ In MINIMAL mode, the notification identifies the record and fields recorded in t
   "changed": [
     "name",
     "age"
-  ]
+  ],
+  "fields": {
+    "before": [
+      {
+        "index": 0,
+        "column": {"name": "id", "data_type": "bigint", "column_type": "bigint unsigned", "nullable": false, "primary_key": true, "charset": null, "octet_length": null, "numeric_precision": 20, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 42
+      }
+    ],
+    "after": [
+      {
+        "index": 1,
+        "column": {"name": "name", "data_type": "varchar", "column_type": "varchar(32)", "nullable": false, "primary_key": false, "charset": "utf8mb4", "octet_length": 128, "numeric_precision": null, "numeric_scale": null, "datetime_precision": null, "extra": ""},
+        "value": "Bob"
+      },
+      {
+        "index": 2,
+        "column": {"name": "age", "data_type": "int", "column_type": "int", "nullable": true, "primary_key": false, "charset": null, "octet_length": null, "numeric_precision": 10, "numeric_scale": 0, "datetime_precision": null, "extra": ""},
+        "value": 21
+      }
+    ]
+  }
 }
 ```
 
-`pk` identifies the record and `changed` lists the recorded column names. Values such as Bob and 21 are not included. In FULL, `changed` also includes unchanged fields present in the complete image. See the [event guide](docs/events.md) for the full comparison.
+`pk` identifies the record and `changed` lists the recorded column names. `fields.before` contains the logged key; `fields.after` contains Bob and 21 with their column metadata. In FULL, `changed` also includes unchanged fields present in the complete image. See the [event guide](docs/events.md) for the full comparison.
 
 ## Library example
 
@@ -136,7 +157,7 @@ Raw replication supports statically selected images through `BinlogFile<_, Full>
 | MINIMAL | `BinlogEvent<Minimal>` / `RowOperation<SparseImage>` | Logged columns, definitions and values | `Result<Option<Field>>`; a valid unlogged column is `None` |
 | FULL | `BinlogEvent<Full>` / `RowOperation<CompleteImage>` | All columns, definitions and values in each existing image | `Result<Field>`; incomplete images are rejected |
 
-Compare the [MINIMAL JSON example](docs/events.md#minimal-json) and [FULL JSON example](docs/events.md#full-json) for one UPDATE, including JSON data, structure, before/after fields and access results. The [Rust example](docs/event-api.md#read-concrete-operations-for-each-mode) reads both static types. Raw events expose field values; canal's committed changes retain only keys and changed column indices.
+Compare the [MINIMAL JSON example](docs/events.md#minimal-json) and [FULL JSON example](docs/events.md#full-json) for one UPDATE, including JSON data, structure, before/after fields and access results. The [Rust example](docs/event-api.md#read-concrete-operations-for-each-mode) reads both static types. Canal also exposes logged values through `Change.fields` / `OwnedChange.fields`, with historical SQL column metadata and applicable before/after images.
 
 ## Usage boundaries
 
