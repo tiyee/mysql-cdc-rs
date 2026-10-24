@@ -13,12 +13,14 @@ mysql-cdc-rs = "2.0.0"
 
 The Rust import path is `mysql_cdc_rs`. CDC types and modules are available directly at the crate root and through `canal`; raw binlog events and replication transport are available through `replication`. Root `Error` and `Result` are the CDC types; raw protocol operations use `replication::Error` and `replication::Result`.
 
+`canal.toml` uses the [standalone canal configuration](https://github.com/tiyee/mysql-cdc-rs/blob/master/crates/mysql-canal/examples/config/multi-source.toml), beginning at `[[sources]]`, with `[sources.mysql-replication]` under each source.
+
 ```rust,no_run
 use mysql_cdc_rs::{Cdc, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let mut cdc = Cdc::new(AppConfig::read(Path::new("cdc.toml"))?)?;
+    let mut cdc = Cdc::new(AppConfig::read(Path::new("canal.toml"))?)?;
     cdc.add_handle(|transaction: CommittedTransaction<'_>| {
         for change in transaction.changes {
             println!("{} {:?} {:?}", transaction.source_id, change.operation, change.pk);
@@ -52,10 +54,12 @@ fn convert(converter: &mut EventConverter, event: &BinlogEvent<'_>) -> Result<()
 For offline raw events, import `mysql_cdc_rs::replication::file::BinlogFile`. For network replication, import `mysql_cdc_rs::replication::stream::ReplicationStream`. See [listen.rs](examples/listen.rs) and [dump_file.rs](examples/dump_file.rs) for complete examples. From the workspace root:
 
 ```sh
-cargo run -p mysql-cdc-rs --example cdc_listen -- cdc.toml
+cargo run -p mysql-cdc-rs --example cdc_listen -- canal.toml
 cargo run -p mysql-cdc-rs --example replication_dump_file -- /path/to/binlog.000001
 ```
 
 CDC uses named sources with independent schemas, whitelists and checkpoints. It delivers only committed changes containing the source, database/table, operation, exact primary key and changed column names. Rollback discards buffered changes; failures stop consumption, and a crash before checkpoint persistence may cause replay. There is no default output handler in the library. The `pikachu` package provides the `pikachu-cdc` CLI.
 
 The lower-level crates remain available as separate dependencies. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme), [CDC library](https://docs.rs/mysql-canal) and [replication library](https://docs.rs/mysql-replication) for configuration, output contracts, version support and limitations.
+
+[Event reference](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.md) · [Development](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/development.md) · [Testing](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/testing.md)

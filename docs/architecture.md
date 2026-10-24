@@ -2,7 +2,7 @@
 
 English | [简体中文](architecture.zh-CN.md)
 
-The system is named **mysql-cdc**; `mysql-cdc-rs` is its facade package, not a fourth implementation layer. This guide describes the current implementation. See the [project README](../README.md) for configuration, output semantics and compatibility, and the [release guide](releasing.md) for CI and publishing.
+The system is named **mysql-cdc**; `mysql-cdc-rs` is its facade package, not a fourth implementation layer. This guide describes the current implementation. See the [documentation index](README.md) for configuration, event fields, development, testing and publishing.
 
 ## Package layers
 
@@ -27,33 +27,11 @@ mysql-cdc-rs ──────────────────────�
 
 Replication owns `config::Config` and `RowImageMode`, including connection/TLS settings, consumer server ID, timeouts and MINIMAL/FULL selection. Canal includes that type as its mandatory `Config::replication` field, re-exported as `config::ReplicationConfig`. It does not duplicate those fields in `SourceConfig`; source plugin/adapter selection, table filters, transaction budget and checkpoint paths remain canal settings.
 
-Pikachu composes a required `mysql-canal: AppConfig` child, whose named sources each compose a required `mysql-replication` child. Product settings contain only product additions (currently none are required); no layer redefines its child settings. Product file example:
+Pikachu composes a required `mysql-canal: AppConfig` child, whose named sources each compose a required `mysql-replication` child. Product settings contain only product additions (currently none are required); no layer redefines its child settings. See the [configuration guide](configuration.md) for complete product and standalone formats.
 
-```toml
-[mysql-canal]
+A standalone canal file starts at `[[sources]]`, with `[sources.mysql-replication]` under each source; Pikachu embeds this tree under `mysql-canal` under that parent. Product and standalone examples live in `crates/pikachu/examples/config/` and `crates/mysql-canal/examples/config/`. Missing child configurations, unknown fields and fields in the wrong layer are rejected. `AppConfig::resolve_paths` supports embedding relative to the outer TOML file; `AppConfig::read` reads the standalone format. The selected replication mode also reaches canal's adapter and selective decoder, giving the transport and CDC path one source of truth. File/position come from the checkpoint. Raw typed `Minimal`/`Full` decoders remain separate, checking sparse versus complete images without CDC key policy.
 
-[[mysql-canal.sources]]
-id = "east"
-state_file = "east-state.json"
-
-[mysql-canal.sources.source]
-plugin = "mysql"
-
-[mysql-canal.sources.mysql-replication]
-url_env = "MYSQL_EAST_URL"
-server_id = 901001
-row_image = "full"
-connect_timeout_secs = 10
-read_timeout_secs = 90
-
-[[mysql-canal.sources.tables]]
-schema = "app"
-table = "users"
-```
-
-A standalone canal file starts at `[[sources]]`, with `[sources.mysql-replication]` under each source; Pikachu embeds this tree under `mysql-canal` as above. Product and standalone examples live in `crates/pikachu/examples/config/` and `crates/mysql-canal/examples/config/`. Missing child configurations, unknown fields and fields in the wrong layer are rejected. `AppConfig::resolve_paths` supports embedding relative to the outer TOML file; `AppConfig::read` reads the standalone format. The selected replication mode also reaches canal's adapter and selective decoder, giving the transport and CDC path one source of truth. File/position come from the checkpoint. Raw typed `Minimal`/`Full` decoders remain separate, checking sparse versus complete images without CDC key policy.
-
-The [public event-field reference](../crates/mysql-replication/README.md#public-event-fields-and-image-modes) distinguishes the `BinlogEvent` envelope, field-free `Event` trait and `EventData` bodies. It includes shared header/body fields, MINIMAL/FULL image types, accessor return types and absent-image/absent-column/SQL-NULL semantics.
+The [public event-field reference](events.md#public-event-fields-and-image-modes) distinguishes the `BinlogEvent` envelope, field-free `Event` trait and `EventData` bodies. It includes shared header/body fields, MINIMAL/FULL image types, accessor return types and absent-image/absent-column/SQL-NULL semantics.
 
 ## Replication: bytes to protocol events and raw rows
 

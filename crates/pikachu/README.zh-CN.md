@@ -4,9 +4,9 @@
 
 基于 `mysql-canal` 的 MySQL CDC 命令行工具。`pikachu` 包提供 `pikachu-cdc` 可执行文件及默认 JSON Lines 事务处理器。
 
-本包位于 `pikachu → mysql-canal → mysql-replication` 的最上层。复制库负责订阅、协议解析及可选原始行解码，canal 负责表匹配、选择性行转换、事务缓冲与检查点；CLI 将命令映射到 `Cdc` 或离线 `engine::Replay`，通过 `PrintHandle` 委托 canal 的 `JsonLinesSink` 输出。详见[架构说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/architecture.zh-CN.md)。
-
 产品配置必须包含 `mysql-canal` 子配置，直接使用 Canal 的 `AppConfig`；每个具名来源再包含 `mysql-replication` 子配置，直接使用复制库配置。根层仅填写产品增量配置，目前没有额外必填项。CLI 使用 `[[mysql-canal.sources]]`，不能直接读取独立 Canal 文件。缺失层级、摊平的下层字段和未知字段均报错；state 与 TLS 路径相对产品 TOML 文件解析。
+
+## 运行 CLI
 
 从 workspace 根目录构建和运行：
 
@@ -48,10 +48,6 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 2.0.0 在 crates.io 可用后，可使用 `cargo install pikachu --version 2.0.0 --locked` 安装，安装后的命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
 
-运行 CLI 回归测试：`cargo test --locked -p pikachu`。
-
-三个默认忽略的 `mysql_live` 测试通过构建后的可执行文件访问专用可销毁 MySQL，覆盖 check/init/run、完整 JSON Lines、过滤、回滚、位点恢复、DDL 停止，以及首次/已有 state 的主键预检失败。共享 MySQL 矩阵串行执行复制库、CDC 和 CLI 测试。夹具创建/删除数据库并清理临时 state，环境配置与容器清理见[项目验证说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md#验证)。
-
 ## 行镜像模式
 
 每个 `[mysql-canal.sources.mysql-replication]` 支持 `row_image = "minimal"`（默认）或 `"full"`。check/init/run 可重复传入 `--row-image SOURCE_ID=minimal|full` 覆盖指定来源；`--once` 仅用于 run。例如：
@@ -62,3 +58,10 @@ pikachu-cdc replay east-state.json /path/to/binlog.000001 --row-image full
 ```
 
 回放默认 MINIMAL，不修改 v1 检查点。FULL 的 INSERT/UPDATE 在 `changed` 中列出 after image 的全部列，包括值未变化的列，不输出完整行值。模式参数检查上游设置与实际镜像结构，不修改 MySQL；写入会话和历史日志须符合所选策略，切换前须消费完旧模式事务并协调配置。未知来源、不支持的模式及重复覆盖在连接前报错。
+
+## 参考
+
+- [完整配置与服务器准备](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/configuration.zh-CN.md)
+- [事件字段与输出语义](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.zh-CN.md)
+- [开发指南](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/development.zh-CN.md)
+- [CLI 与实库测试](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/testing.zh-CN.md)

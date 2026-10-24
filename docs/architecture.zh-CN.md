@@ -2,7 +2,7 @@
 
 [English](architecture.md) | 简体中文
 
-整套系统名称为 **mysql-cdc**；`mysql-cdc-rs` 是聚合包名称，不是第四个实现层。本文按当前代码梳理职责与数据流。配置、输出语义及兼容性见[项目说明](../README.zh-CN.md)，CI 与发布见[发布指南](releasing.md)。
+整套系统名称为 **mysql-cdc**；`mysql-cdc-rs` 是聚合包名称，不是第四个实现层。本文按当前代码梳理职责与数据流。配置、事件字段、开发、测试和发布说明见[文档目录](README.zh-CN.md)。
 
 ## 包的分层
 
@@ -27,33 +27,11 @@ mysql-cdc-rs ──────────────────────�
 
 复制库定义 `config::Config` 和 `RowImageMode`，包含连接/TLS 参数、复制 server ID、超时以及 MINIMAL/FULL 选择。Canal 的 `Config::replication` 必须包含该类型，并重导出为 `config::ReplicationConfig`；`SourceConfig` 不重复定义这些字段。来源插件/适配器选择、表白名单、事务预算和检查点路径由 Canal 配置负责。
 
-Pikachu 配置直接包含必填的 `mysql-canal: AppConfig` 子配置；Canal 的每个来源再包含必填的 `mysql-replication` 子配置。Pikachu 根层只定义产品增量项，目前没有额外必填项；各层不重定义下层参数。产品配置示例：
+Pikachu 配置直接包含必填的 `mysql-canal: AppConfig` 子配置；Canal 的每个来源再包含必填的 `mysql-replication` 子配置。Pikachu 根层只定义产品增量项，目前没有额外必填项；各层不重定义下层参数。完整产品与独立配置格式见[配置指南](configuration.zh-CN.md)。
 
-```toml
-[mysql-canal]
+直接使用 Canal 时，独立文件从 `[[sources]]` 开始，每个来源使用 `[sources.mysql-replication]`；Pikachu 文件则在外层嵌入 `mysql-canal`，使用该父层级。产品和 Canal 的配置示例分别位于 `crates/pikachu/examples/config/` 与 `crates/mysql-canal/examples/config/`。缺失任何子配置、未知字段或将连接字段放在错误层级均报错。`AppConfig::resolve_paths` 支持嵌入配置，相对路径按最外层 TOML 文件解析；`AppConfig::read` 读取独立 Canal 文件。复制模式同时传入 Canal 的适配器与选择性解码器，使传输和 CDC 使用同一个设置。文件/位点从检查点提供。原始泛型 `Minimal`/`Full` 解码器继续独立校验稀疏/完整镜像，不引入 CDC 主键策略。
 
-[[mysql-canal.sources]]
-id = "east"
-state_file = "east-state.json"
-
-[mysql-canal.sources.source]
-plugin = "mysql"
-
-[mysql-canal.sources.mysql-replication]
-url_env = "MYSQL_EAST_URL"
-server_id = 901001
-row_image = "full"
-connect_timeout_secs = 10
-read_timeout_secs = 90
-
-[[mysql-canal.sources.tables]]
-schema = "app"
-table = "users"
-```
-
-直接使用 Canal 时，独立文件从 `[[sources]]` 开始，每个来源使用 `[sources.mysql-replication]`；Pikachu 文件则在外层嵌入 `mysql-canal`，如上例所示。产品和 Canal 的配置示例分别位于 `crates/pikachu/examples/config/` 与 `crates/mysql-canal/examples/config/`。缺失任何子配置、未知字段或将连接字段放在错误层级均报错。`AppConfig::resolve_paths` 支持嵌入配置，相对路径按最外层 TOML 文件解析；`AppConfig::read` 读取独立 Canal 文件。复制模式同时传入 Canal 的适配器与选择性解码器，使传输和 CDC 使用同一个设置。文件/位点从检查点提供。原始泛型 `Minimal`/`Full` 解码器继续独立校验稀疏/完整镜像，不引入 CDC 主键策略。
-
-[事件字段参考](../crates/mysql-replication/README.zh-CN.md#事件公共字段与模式差异) 区分 `BinlogEvent` 包络、不含字段的 `Event` trait 和 `EventData` body，列出共用头/body 字段、MINIMAL/FULL 镜像类型及访问返回类型，并说明缺少镜像、列未记录和 SQL NULL 的区别。
+[事件字段参考](events.zh-CN.md#事件公共字段与模式差异) 区分 `BinlogEvent` 包络、不含字段的 `Event` trait 和 `EventData` body，列出共用头/body 字段、MINIMAL/FULL 镜像类型及访问返回类型，并说明缺少镜像、列未记录和 SQL NULL 的区别。
 
 ## Replication：字节到协议事件及原始行
 

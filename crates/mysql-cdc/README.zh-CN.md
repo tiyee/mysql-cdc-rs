@@ -13,12 +13,14 @@ mysql-cdc-rs = "2.0.0"
 
 Rust 导入路径为 `mysql_cdc_rs`。CDC 类型和模块可直接从包根路径导入，也可通过 `canal` 访问；原始 binlog 事件和复制传输通过 `replication` 访问。根路径的 `Error`、`Result` 属于 CDC 层；原始协议操作使用 `replication::Error`、`replication::Result`。
 
+`canal.toml` 使用[独立 Canal 配置](https://github.com/tiyee/mysql-cdc-rs/blob/master/crates/mysql-canal/examples/config/multi-source.toml)，从 `[[sources]]` 开始，各来源必须包含 `[sources.mysql-replication]`。
+
 ```rust,no_run
 use mysql_cdc_rs::{Cdc, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let mut cdc = Cdc::new(AppConfig::read(Path::new("cdc.toml"))?)?;
+    let mut cdc = Cdc::new(AppConfig::read(Path::new("canal.toml"))?)?;
     cdc.add_handle(|transaction: CommittedTransaction<'_>| {
         for change in transaction.changes {
             println!("{} {:?} {:?}", transaction.source_id, change.operation, change.pk);
@@ -52,10 +54,12 @@ fn convert(converter: &mut EventConverter, event: &BinlogEvent<'_>) -> Result<()
 离线原始事件入口为 `mysql_cdc_rs::replication::file::BinlogFile`，在线复制入口为 `mysql_cdc_rs::replication::stream::ReplicationStream`。完整示例见 [listen.rs](examples/listen.rs) 和 [dump_file.rs](examples/dump_file.rs)。从 workspace 根目录运行：
 
 ```sh
-cargo run -p mysql-cdc-rs --example cdc_listen -- cdc.toml
+cargo run -p mysql-cdc-rs --example cdc_listen -- canal.toml
 cargo run -p mysql-cdc-rs --example replication_dump_file -- /path/to/binlog.000001
 ```
 
 CDC 使用具名来源，各自维护 schema、白名单和检查点。仅交付已提交变更，包含来源、库表、操作、精确主键和变动字段名。回滚丢弃缓冲；失败停止消费，检查点持久化前崩溃可能导致重放。库不注册默认输出处理器；`pikachu` 包提供 `pikachu-cdc` CLI。
 
 底层两个库仍可单独依赖。配置、输出契约、版本支持和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)、[CDC 库](https://docs.rs/mysql-canal)和[复制库](https://docs.rs/mysql-replication)。
+
+[事件参考](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.zh-CN.md) · [开发指南](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/development.zh-CN.md) · [测试指南](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/testing.zh-CN.md)
