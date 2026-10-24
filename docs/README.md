@@ -9,6 +9,7 @@ Start with the [system overview and examples](../README.md). Understand the noti
 | I want to understand | Read |
 | --- | --- |
 | What a data change produces and how MINIMAL/FULL differ | [Understanding events](events.md) |
+| What the new `BinlogEvent<Minimal>` / `BinlogEvent<Full>` contain | [MINIMAL event](events.md#minimal) / [FULL event](events.md#full) |
 | What the three layers do and why delivery waits for commit | [How the system works](architecture.md) |
 | How to connect MySQL, select tables, consume and recover | [Configuration and operation](configuration.md) |
 

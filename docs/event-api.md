@@ -170,6 +170,58 @@ fn minimal(image: &SparseImage<'_>) -> Result<()> {
 
 Each ROWS iterator compiles its sparse image plans once and shares column indices across rows, including tables wider than 64 columns. `field(index)` scans present fields up to the requested index; prefer `fields()` for sequential access. Row boundaries, lengths, NULL constraints and packed DECIMAL groups are validated before yielding each operation. A late error is yielded once and terminates the iterator; previously yielded rows remain visible. There is no transaction buffering in replication.
 
+### Read concrete operations for each mode
+
+This code reads the four-column table (`0:id`, `1:name`, `2:age`, `3:status`) from the [event contents example](events.md#minimal), explicitly accepting different `BinlogEvent` types. MINIMAL field access returns `Option<Field>`; FULL returns `Field`. Function parameters fix the mode without per-row mode checks.
+
+```rust,no_run
+use mysql_replication::{
+    BinlogEvent, EventData, Full, Minimal, Result,
+    events::{Field, RowOperation, RowValue},
+};
+
+fn read_minimal(event: &BinlogEvent<'_, Minimal>) -> Result<()> {
+    if let EventData::Rows(rows) = &event.event {
+        for row in rows.rows()? {
+            if let RowOperation::Update { before, after } = row?.operation {
+                let name: Option<Field<'_, '_>> = after.field(1)?;
+                println!("before id: {:?}, after name: {:?}", before.field(0)?, name);
+                match after.field(2)? {
+                    None => println!("age was not logged"),
+                    Some(Field {
+                        value: RowValue::Null,
+                        ..
+                    }) => println!("age is SQL NULL"),
+                    Some(field) => println!("age: {:?}", field.value),
+                }
+                println!("after status: {:?}", after.field(3)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_full(event: &BinlogEvent<'_, Full>) -> Result<()> {
+    if let EventData::Rows(rows) = &event.event {
+        for row in rows.rows()? {
+            if let RowOperation::Update { before, after } = row?.operation {
+                let name: Field<'_, '_> = after.field(1)?;
+                println!(
+                    "before name: {:?}, after name: {:?}",
+                    before.field(1)?,
+                    name
+                );
+                println!("after age: {:?}", after.field(2)?.value);
+                println!("after status: {:?}", after.field(3)?.value);
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+For that MINIMAL update, after name is present, age is SQL NULL and after status is `None`. In FULL, after name, age and status are all present fields, with `RowValue::Null` for age. Only UPDATE contains both `before` and `after`; see the [operation comparison](events.md#operations-and-image-types) for INSERT and DELETE.
+
 ## Raw transport and explicit protocol layouts
 
 `file::FrameReader<R>::new(reader)` exposes validated `next_frame()` results without a field policy. `stream::ReplicationConnection` exposes raw network `next_frame()` / borrowed `next_view()`. Custom adapters use these transport interfaces and own their structural parser. Typed `BinlogFile<R, M>` and `ReplicationStream<M>` expose only `next_event()`, and require an explicit `M`.

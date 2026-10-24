@@ -173,7 +173,123 @@ Common event kinds have these roles:
 
 MINIMAL/FULL differences are in row-image contents. They do not change the common header or add/remove these event kinds. Replication can return DDL in a statement event; canal stops on unsupported statements.
 
-Generic `BinlogEvent<Full>` / `BinlogEvent<Minimal>` row events automatically bind TABLE_MAP definitions. Each row uses an Insert/Update/Delete operation enum; fields carry column information and borrowed values. FULL exposes complete images, while MINIMAL preserves only logged fields and distinguishes absent fields from NULL. Optional metadata such as names is independent of image mode and stays unknown when absent. A statement-end sentinel has its own `RowsStatementEnd` variant. These raw field values are not added to canal CDC output.
+## Raw event contents in MINIMAL and FULL
+
+This section expands the generic row events provided by replication. `BinlogEvent<'a, Minimal>` and `BinlogEvent<'a, Full>` are distinct compile-time types. The mode propagates through `EventData::Rows`, `RowsEvent<M>` and `Row<M>` to the image type; it is not a runtime mode field attached to one event type.
+
+### Contents shared by row events
+
+| Content | Access | Meaning in both modes |
+| --- | --- | --- |
+| Complete log bytes | `event.raw_data` | Original header, body and actual checksum |
+| Common header | `event.header` | Time, event code, server ID, size, position and flags listed above |
+| Row payload | `EventData::Rows(rows)` in `event.event` | `RowsEvent<'a, M>`, retaining the same mode |
+| Temporary table ID | `rows.table_id` | Associates the preceding source-local TABLE_MAP |
+| Row flags and operation | `rows.flags`, `rows.kind` | `RowsKind::Write`, `Update` or `Delete` |
+| Encoded images | `rows.encoded_images` | Borrowed extra-data, column bitmaps and value bytes, before row iteration |
+| Historical table definition | `rows.table()?`, `rows.columns()?` | Database, table and all column definitions, bound automatically by the parser |
+| Decoded operations | `rows.rows()?` | Iterates `Result<Row<'a, M>>`; each `Row.operation` holds its applicable images |
+
+The examples use the same `UPDATE app.users SET name = 'Bob', age = NULL WHERE id = 42`. Column indices are `0:id`, `1:name`, `2:age`, `3:status`; name and status are VARCHAR and age is nullable INT. Assume TABLE_MAP includes column-name metadata so names can be shown. Values in the trees are displayed for readability; these trees are neither `dump()` output nor another JSON format.
+
+### MINIMAL
+
+The event is `BinlogEvent<'_, Minimal>`. Each decoded row has an operation of type `RowOperation<SparseImage<'_>>`:
+
+```text
+BinlogEvent<Minimal>
+└── event: EventData::Rows(RowsEvent<Minimal>)
+    ├── table(): app.users
+    ├── columns(): [id, name, age, status]
+    └── rows(): Row<Minimal>
+        └── operation: RowOperation::Update
+            ├── before: SparseImage
+            │   ├── column_indices(): [0]
+            │   └── fields(): id=42
+            └── after: SparseImage
+                ├── column_indices(): [1, 2]
+                └── fields(): name=Bob, age=NULL
+```
+
+`SparseImage` preserves the logged fields. `columns()` still describes all four columns and `column_count()` remains 4, even when only two fields are present. `column_indices()` contains absolute table ordinals, not compacted field positions.
+
+| Access for this update | Result |
+| --- | --- |
+| `before.field(0)?` | `Some(Field)` with integer value 42 |
+| `before.field(1)?` | `None`; the old name was not logged |
+| `after.field(0)?` | `None`; the new id was not logged |
+| `after.field(1)?` | `Some(Field)` with `RowValue::Bytes(b"Bob")` |
+| `after.field(2)?` | `Some(Field)` with `RowValue::Null` |
+| `after.field(3)?` | `None`; the new status was not logged |
+| `after.field(4)` | `Err(Error::Invalid(_))`; outside the table's columns |
+
+`None` means a valid column is absent from this image. Its definition remains available through `columns()[index]`; no NULL value is filled in. The raw MINIMAL reader also accepts complete images, so the table describes this particular log entry rather than a fixed set of missing columns for every MINIMAL event.
+
+### FULL
+
+The event is `BinlogEvent<'_, Full>`. Each decoded row has an operation of type `RowOperation<CompleteImage<'_>>`:
+
+```text
+BinlogEvent<Full>
+└── event: EventData::Rows(RowsEvent<Full>)
+    ├── table(): app.users
+    ├── columns(): [id, name, age, status]
+    └── rows(): Row<Full>
+        └── operation: RowOperation::Update
+            ├── before: CompleteImage
+            │   └── fields(): id=42, name=Alice, age=20, status=active
+            └── after: CompleteImage
+                └── fields(): id=42, name=Bob, age=NULL, status=active
+```
+
+Every existing `CompleteImage` must contain all four columns. `field(index)` returns `Result<Field>`; an in-range field cannot return `None` because it was not logged:
+
+| Access for this update | Result |
+| --- | --- |
+| `before.field(1)?` | `Field` with `RowValue::Bytes(b"Alice")` |
+| `after.field(0)?` | `Field` with integer value 42 |
+| `after.field(1)?` | `Field` with `RowValue::Bytes(b"Bob")` |
+| `after.field(2)?` | `Field` with `RowValue::Null` |
+| `after.field(3)?` | `Field` with `RowValue::Bytes(b"active")`, even though unchanged |
+| `after.field(4)` | `Err(Error::Invalid(_))`; outside the table's columns |
+
+FULL rejects an incomplete image with `Error::Unsupported`. SQL NULL remains the value of a present field, rather than a missing field.
+
+### Operations and image types
+
+| Operation | `Row<Minimal>.operation` | `Row<Full>.operation` |
+| --- | --- | --- |
+| INSERT | `Insert { after: SparseImage }` | `Insert { after: CompleteImage }` |
+| UPDATE | `Update { before: SparseImage, after: SparseImage }` | `Update { before: CompleteImage, after: CompleteImage }` |
+| DELETE | `Delete { before: SparseImage }` | `Delete { before: CompleteImage }` |
+
+The table omits the `RowOperation::` prefix. INSERT has no before image, DELETE has no after image, and UPDATE requires both. Enum variants express these shapes directly. MINIMAL INSERT follows the actual column bitmap; do not assume it always carries a complete row.
+
+### What each present field contains
+
+Both modes return `Field { column: &ColumnInfo, value: RowValue }`:
+
+| Content | Field or method | Meaning |
+| --- | --- | --- |
+| Column ordinal | `column.index` | Zero-based absolute table index |
+| Name | `column.name` | `Option<Box<str>>`; `None` when not logged |
+| Type and layout | `column.definition` | `wire_type()`, `column_type()`, `nullable()`, `metadata()` |
+| Numeric signedness | `column.unsigned` | Optional metadata; absent signedness is not guessed |
+| Character collation | `column.collation_id` | Optional collation ID |
+| Key metadata | `column.primary_key`, `primary_key_prefix` | Optional membership and prefix length; raw reading still requires no key |
+| Logged value | `value` | `RowValue::Null`, `Integer`, `Bytes`, `Decimal` and other variants |
+
+For example, the after-image name field provides ordinal 1, its available name and type definition, and borrowed `RowValue::Bytes(b"Bob")`. `RowValue::Integer` retains the wire width; use `signed()` / `unsigned()` according to known signedness. Text stays as borrowed bytes, and DECIMAL preserves precision and scale.
+
+**FULL means complete images, not complete metadata.** Names, signedness, collations and key attributes come from the log in both modes. Missing optional attributes stay `None`; no current-schema queries fill them in. Events share historical column definitions and values borrow the original buffer. `into_owned()` / `view()` retain the mode, definitions and actual checksum.
+
+`EventData::RowsStatementEnd` is a separate statement-end sentinel with no columns or images. Control events such as FDE, QUERY, XID and ROTATE keep the same contents in both modes.
+
+### What canal delivers after conversion
+
+Replication exposes the raw values above, such as `name=Bob` and `age=NULL`. Canal's `Change` / `OwnedChange` still deliver only the table, operation, exact key, optional old key and `changed` column indices. They do not carry `SparseImage`, `CompleteImage` or full row values. For this update, MINIMAL `changed` is `[1, 2]` and FULL is `[0, 1, 2, 3]`; the CLI maps these indices to column names.
+
+See the [Rust event API](event-api.md#read-concrete-operations-for-each-mode) for code matching `EventData::Rows`, reading fields and handling borrowing lifetimes.
 
 ## When delivery happens, and what failure means
 

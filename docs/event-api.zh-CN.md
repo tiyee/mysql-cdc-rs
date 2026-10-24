@@ -170,6 +170,58 @@ fn minimal(image: &SparseImage<'_>) -> Result<()> {
 
 每个 ROWS 迭代器只编译一次稀疏镜像计划，各行共享字段索引，支持超过 64 列的表。`field(index)` 顺序扫描到指定列，连续访问优先使用 `fields()`。每个操作在交付前校验完整行边界、字段长度、NULL 约束及压缩 DECIMAL 数字组。后部错误只返回一次，随后结束迭代；此前的行可能已被消费。replication 不缓冲事务。
 
+### 按模式读取具体行操作
+
+以下代码读取[两种事件内容示例](events.zh-CN.md#minimal)中的四列表（`0:id`、`1:name`、`2:age`、`3:status`），显式接收不同的 `BinlogEvent` 类型。MINIMAL 的字段访问返回 `Option<Field>`，FULL 返回 `Field`；模式由函数参数确定，不在行循环中判断。
+
+```rust,no_run
+use mysql_replication::{
+    BinlogEvent, EventData, Full, Minimal, Result,
+    events::{Field, RowOperation, RowValue},
+};
+
+fn read_minimal(event: &BinlogEvent<'_, Minimal>) -> Result<()> {
+    if let EventData::Rows(rows) = &event.event {
+        for row in rows.rows()? {
+            if let RowOperation::Update { before, after } = row?.operation {
+                let name: Option<Field<'_, '_>> = after.field(1)?;
+                println!("before id: {:?}, after name: {:?}", before.field(0)?, name);
+                match after.field(2)? {
+                    None => println!("age was not logged"),
+                    Some(Field {
+                        value: RowValue::Null,
+                        ..
+                    }) => println!("age is SQL NULL"),
+                    Some(field) => println!("age: {:?}", field.value),
+                }
+                println!("after status: {:?}", after.field(3)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_full(event: &BinlogEvent<'_, Full>) -> Result<()> {
+    if let EventData::Rows(rows) = &event.event {
+        for row in rows.rows()? {
+            if let RowOperation::Update { before, after } = row?.operation {
+                let name: Field<'_, '_> = after.field(1)?;
+                println!(
+                    "before name: {:?}, after name: {:?}",
+                    before.field(1)?,
+                    name
+                );
+                println!("after age: {:?}", after.field(2)?.value);
+                println!("after status: {:?}", after.field(3)?.value);
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+上例 MINIMAL 的 `after name` 有值、`age is SQL NULL`、`after status` 为 `None`；FULL 的 after name、age 和 status 都是已记录字段，age 的值为 `RowValue::Null`。`before` / `after` 仅在 UPDATE 变体中成对出现，INSERT 和 DELETE 的字段形状见[行操作对照](events.zh-CN.md#三种行操作与两种镜像类型)。
+
 ## 原始传输与显式协议布局
 
 `file::FrameReader<R>::new(reader)` 通过 `next_frame()` 返回已校验帧，不携带字段模式。`stream::ReplicationConnection` 提供原始网络 `next_frame()` / 借用的 `next_view()`；自定义适配器使用这些传输接口并自行解析结构。类型化 `BinlogFile<R, M>` 和 `ReplicationStream<M>` 只提供 `next_event()`，构造时必须显式指定 `M`。

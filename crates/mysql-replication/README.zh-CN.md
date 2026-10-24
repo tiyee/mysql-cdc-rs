@@ -95,6 +95,8 @@ fn main() -> Result<()> {
 
 ## 解码行镜像
 
+两种新事件的逐项内容见 [MINIMAL](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.zh-CN.md#minimal) / [FULL](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.zh-CN.md#full)：同一条 UPDATE 分别展开事件类型、before/after 镜像、字段定义和值、缺列及 NULL 的访问结果。
+
 `BinlogFile<_, M>` / `ReplicationStream<M>` 在读取 TABLE_MAP 时自动绑定共享列定义，`RowsEvent<M>::rows()` 无需外部解码器。模式沿用同一组 `Full` / `Minimal` 标记并静态分派，行循环没有运行时模式判断。`Row.operation` 使用 `RowOperation::Insert { after }`、`Update { before, after }`、`Delete { before }`，必需镜像不会缺失。
 
 `Minimal` 产生 `SparseImage`，`field(index)` 返回 `Result<Option<Field>>`，合法但未记录的列为 `None`；`Full` 产生 `CompleteImage`，返回 `Result<Field>` 并拒绝不完整镜像。两者越界都报错。`Field` 同时提供 `column: &ColumnInfo` 和借用的 `value: RowValue`，SQL NULL 表示为 `Field.value = RowValue::Null`。`fields()` 依次遍历实际存在的字段，`columns()` 提供全部表列定义。

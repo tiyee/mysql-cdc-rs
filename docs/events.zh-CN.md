@@ -173,7 +173,123 @@ mysql-cdc 会经过三个步骤：
 
 MINIMAL/FULL 的内容差异发生在行修改的前后数据中；公共头和这些事件种类不会因此增加或减少。复制库可以读取包含 DDL 的语句事件，Canal 遇到不支持的语句会停止。
 
-泛型 `BinlogEvent<Full>` / `BinlogEvent<Minimal>` 的行事件会自动关联 TABLE_MAP 列定义。每行使用 Insert/Update/Delete 操作枚举，字段同时携带列信息与借用值：FULL 提供完整镜像，MINIMAL 仅提供实际记录字段，并明确区分未记录与 NULL。列名等可选元数据不由行镜像模式决定，日志未提供时保持未知。语句结束哨兵单独表示为 `RowsStatementEnd`。这些原始字段值不会进入 Canal 的轻量 CDC 输出。
+## MINIMAL 与 FULL 的原始事件内容
+
+这里展开复制库新增的泛型行事件。`BinlogEvent<'a, Minimal>` 和 `BinlogEvent<'a, Full>` 是编译期区分的类型；差异沿 `EventData::Rows`、`RowsEvent<M>`、`Row<M>` 一直传到镜像类型。它们不是在同一事件上设置一个运行时模式字段。
+
+### 行事件共用的内容
+
+| 内容 | 访问方式 | 两种模式的含义 |
+| --- | --- | --- |
+| 完整日志字节 | `event.raw_data` | 原始头、body 和实际 checksum |
+| 公共事件头 | `event.header` | 前文列出的时间、事件码、服务器 ID、大小、位点和标志 |
+| 行事件载荷 | `event.event` 中的 `EventData::Rows(rows)` | `RowsEvent<'a, M>`，保留相同的模式参数 |
+| 临时表编号 | `rows.table_id` | 关联该来源之前的 TABLE_MAP |
+| 行事件标志和操作 | `rows.flags`、`rows.kind` | `RowsKind::Write`、`Update` 或 `Delete` |
+| 编码中的镜像数据 | `rows.encoded_images` | 借用的 extra-data、列位图及字段值字节，尚不是逐行对象 |
+| 历史表定义 | `rows.table()?`、`rows.columns()?` | 库名、表名和全部列定义；由 parser 自动绑定 TABLE_MAP |
+| 解码后的行操作 | `rows.rows()?` | 迭代 `Result<Row<'a, M>>`；每个 `Row.operation` 持有适用的前后镜像 |
+
+以下仍使用 `UPDATE app.users SET name = 'Bob', age = NULL WHERE id = 42`。表列索引依次为 `0:id`、`1:name`、`2:age`、`3:status`，其中 name 和 status 为 VARCHAR，age 为可空 INT。为展示列名，假设 TABLE_MAP 已携带列名元数据；树中的值按可读形式展示，不是 `dump()` 输出或额外的 JSON 格式。
+
+### MINIMAL
+
+类型为 `BinlogEvent<'_, Minimal>`，每个已解码行的操作类型为 `RowOperation<SparseImage<'_>>`：
+
+```text
+BinlogEvent<Minimal>
+└── event: EventData::Rows(RowsEvent<Minimal>)
+    ├── table(): app.users
+    ├── columns(): [id, name, age, status]
+    └── rows(): Row<Minimal>
+        └── operation: RowOperation::Update
+            ├── before: SparseImage
+            │   ├── column_indices(): [0]
+            │   └── fields(): id=42
+            └── after: SparseImage
+                ├── column_indices(): [1, 2]
+                └── fields(): name=Bob, age=NULL
+```
+
+`SparseImage` 保存日志实际记录的字段；`columns()` 仍包含四列定义，`column_count()` 仍为 4，不会因为只记录了两列而变成 2。`column_indices()` 是表列的绝对索引，不是压缩后的字段序号。
+
+| 对这次更新的访问 | 返回内容 |
+| --- | --- |
+| `before.field(0)?` | `Some(Field)`，值为整数 42 |
+| `before.field(1)?` | `None`，修改前的 name 未记录 |
+| `after.field(0)?` | `None`，修改后的 id 未记录 |
+| `after.field(1)?` | `Some(Field)`，值为 `RowValue::Bytes(b"Bob")` |
+| `after.field(2)?` | `Some(Field)`，值为 `RowValue::Null` |
+| `after.field(3)?` | `None`，修改后的 status 未记录 |
+| `after.field(4)` | `Err(Error::Invalid(_))`，索引超出表列范围 |
+
+`None` 只表示这份镜像没有记录该合法列；列定义仍能从 `columns()[index]` 查询，值不会被填为 NULL。原始 MINIMAL 读取器也接受完整镜像，因此上表描述的是这条具体日志，不是所有 MINIMAL 事件都固定缺少这些列。
+
+### FULL
+
+类型为 `BinlogEvent<'_, Full>`，每个已解码行的操作类型为 `RowOperation<CompleteImage<'_>>`：
+
+```text
+BinlogEvent<Full>
+└── event: EventData::Rows(RowsEvent<Full>)
+    ├── table(): app.users
+    ├── columns(): [id, name, age, status]
+    └── rows(): Row<Full>
+        └── operation: RowOperation::Update
+            ├── before: CompleteImage
+            │   └── fields(): id=42, name=Alice, age=20, status=active
+            └── after: CompleteImage
+                └── fields(): id=42, name=Bob, age=NULL, status=active
+```
+
+每份实际存在的 `CompleteImage` 必须包含全部四列。`field(index)` 返回 `Result<Field>`，范围内字段不会因为未记录而返回 `None`：
+
+| 对这次更新的访问 | 返回内容 |
+| --- | --- |
+| `before.field(1)?` | `Field`，值为 `RowValue::Bytes(b"Alice")` |
+| `after.field(0)?` | `Field`，值为整数 42 |
+| `after.field(1)?` | `Field`，值为 `RowValue::Bytes(b"Bob")` |
+| `after.field(2)?` | `Field`，值为 `RowValue::Null` |
+| `after.field(3)?` | `Field`，值为 `RowValue::Bytes(b"active")`，即使值未变 |
+| `after.field(4)` | `Err(Error::Invalid(_))`，索引超出表列范围 |
+
+FULL 遇到缺列的镜像会返回 `Error::Unsupported`，不会把稀疏数据伪装成完整行。SQL NULL 仍然是一个已记录字段的值，不是字段缺失。
+
+### 三种行操作与两种镜像类型
+
+| 操作 | `Row<Minimal>.operation` | `Row<Full>.operation` |
+| --- | --- | --- |
+| INSERT | `Insert { after: SparseImage }` | `Insert { after: CompleteImage }` |
+| UPDATE | `Update { before: SparseImage, after: SparseImage }` | `Update { before: CompleteImage, after: CompleteImage }` |
+| DELETE | `Delete { before: SparseImage }` | `Delete { before: CompleteImage }` |
+
+表中省略 `RowOperation::` 前缀。INSERT 没有 before，DELETE 没有 after；UPDATE 必须同时包含两份镜像。这些差异由枚举变体表达，不通过一对可能同时为空的字段表示。MINIMAL INSERT 按实际列位图读取，不能假定它总是完整行。
+
+### 每个已记录字段包含什么
+
+两种模式都返回 `Field { column: &ColumnInfo, value: RowValue }`：
+
+| 内容 | 字段或方法 | 说明 |
+| --- | --- | --- |
+| 列索引 | `column.index` | 从零开始的表列绝对索引 |
+| 列名 | `column.name` | `Option<Box<str>>`，未记录时为 `None` |
+| 列类型与布局 | `column.definition` | `wire_type()`、`column_type()`、`nullable()`、`metadata()` |
+| 数字符号 | `column.unsigned` | 可选元数据；缺失时不猜测 signed/unsigned |
+| 字符排序规则 | `column.collation_id` | 可选 collation ID |
+| 主键元数据 | `column.primary_key`、`primary_key_prefix` | 可选成员关系及前缀长度；不增加原始读取的主键要求 |
+| 此次记录的值 | `value` | `RowValue::Null`、`Integer`、`Bytes`、`Decimal` 等 |
+
+例如 after 中的 name 字段同时提供索引 1、可用的列名及类型定义，以及借用的 `RowValue::Bytes(b"Bob")`。整数通过 `RowValue::Integer` 保留原始宽度，按已知符号属性使用 `signed()` / `unsigned()`；文本是借用字节，DECIMAL 保留精度与 scale。
+
+**FULL 表示镜像完整，不表示元数据齐全。** 两种模式的列名、符号、collation 和主键属性都只来自日志；可选属性缺失时保持 `None`，不会查询当前数据库来补齐。不同事件共享历史列定义，字段值借用原始事件缓冲区。`into_owned()` / `view()` 保留模式、列定义和实际 checksum。
+
+`EventData::RowsStatementEnd` 是单独的语句结束哨兵，没有表列和行镜像。FDE、QUERY、XID、ROTATE 等控制事件在两种模式下保持相同的内容。
+
+### 转换到 Canal 后交付什么
+
+上述原始事件中的 `name=Bob`、`age=NULL` 等字段值可以由复制库读取。Canal 的 `Change` / `OwnedChange` 仍只交付表、操作、精确主键、可选旧主键及 `changed` 列索引，不附带 `SparseImage`、`CompleteImage` 或完整行值。上例 MINIMAL 的 `changed` 是 `[1, 2]`，FULL 为 `[0, 1, 2, 3]`；CLI 再将其映射为字段名。
+
+按类型匹配 `EventData::Rows`、读取字段以及处理借用生命周期的代码见 [Rust 事件 API 参考](event-api.zh-CN.md#按模式读取具体行操作)。
 
 ## 什么时候收到事件，失败后会怎样
 

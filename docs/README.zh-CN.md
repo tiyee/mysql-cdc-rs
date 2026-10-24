@@ -9,6 +9,7 @@
 | 我想了解 | 阅读 |
 | --- | --- |
 | 修改一条数据会收到什么，MINIMAL/FULL 有什么区别 | [事件说明](events.zh-CN.md) |
+| 新增的 `BinlogEvent<Minimal>` / `BinlogEvent<Full>` 具体包含哪些字段和值 | [MINIMAL 事件](events.zh-CN.md#minimal) / [FULL 事件](events.zh-CN.md#full) |
 | 三层各做什么，为什么提交后才收到通知 | [系统如何工作](architecture.zh-CN.md) |
 | 怎样连接 MySQL、选择表、消费和恢复 | [配置与运行](configuration.zh-CN.md) |
 

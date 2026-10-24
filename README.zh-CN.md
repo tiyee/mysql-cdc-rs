@@ -129,6 +129,15 @@ fn main() -> Result<()> {
 
 原始复制可用 `BinlogFile<_, Full>` / `BinlogFile<_, Minimal>` 或 `ReplicationStream<M>` 静态选择镜像类型。行事件自动关联 TABLE_MAP，`rows.rows()` 产生类型化操作，字段提供列定义与借用值；MINIMAL 区分未记录字段和 SQL NULL。列名等可选元数据缺失时保留未知，具体契约见 [Rust API 参考](docs/event-api.zh-CN.md)。
 
+## MINIMAL / FULL 事件内容
+
+| 模式 | 原始行事件类型 | 镜像内容 | 字段访问 |
+| --- | --- | --- | --- |
+| MINIMAL | `BinlogEvent<Minimal>` / `RowOperation<SparseImage>` | 实际记录的列及其定义和值 | `Result<Option<Field>>`，合法列未记录为 `None` |
+| FULL | `BinlogEvent<Full>` / `RowOperation<CompleteImage>` | 每份存在的镜像包含全部列及其定义和值 | `Result<Field>`，拒绝不完整镜像 |
+
+查看 [MINIMAL 事件展开](docs/events.zh-CN.md#minimal)、[FULL 事件展开](docs/events.zh-CN.md#full)，可对照同一条 UPDATE 的完整事件结构、before/after 字段和实际访问结果；[Rust 示例](docs/event-api.zh-CN.md#按模式读取具体行操作)展示两种静态类型的读取方式。原始事件包含字段值；Canal 的提交变更仍只携带主键和变动字段索引。
+
 ## 使用边界
 
 - 首次启动从当前提交位点开始，不做全量快照；后续使用检查点保存的历史 schema 恢复。

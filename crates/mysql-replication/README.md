@@ -95,6 +95,8 @@ fn main() -> Result<()> {
 
 ## Decode row images
 
+See the concrete [MINIMAL](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.md#minimal) / [FULL](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.md#full) contents for the new events: the same UPDATE expanded into event types, before/after images, column definitions, values, and absent/NULL access results.
+
 `BinlogFile<_, M>` / `ReplicationStream<M>` automatically bind shared column definitions from TABLE_MAP, so `RowsEvent<M>::rows()` needs no external decoder. The same `Full` / `Minimal` markers select types through static dispatch, without runtime mode checks in row loops. `Row.operation` uses `RowOperation::Insert { after }`, `Update { before, after }`, or `Delete { before }`, preventing missing required images.
 
 `Minimal` yields `SparseImage`, whose `field(index)` returns `Result<Option<Field>>`; a valid but unlogged column is `None`. `Full` yields `CompleteImage`, returns `Result<Field>` and rejects incomplete images. Both reject out-of-range indices. Each `Field` provides `column: &ColumnInfo` and a borrowed `value: RowValue`; SQL NULL is `Field.value = RowValue::Null`. `fields()` iterates present fields, while `columns()` exposes every table column definition.

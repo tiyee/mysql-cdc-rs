@@ -129,6 +129,15 @@ See the [Rust API reference](docs/event-api.md) for fixing mode-specific types a
 
 Raw replication supports statically selected images through `BinlogFile<_, Full>` / `BinlogFile<_, Minimal>` or `ReplicationStream<M>`. Row events bind TABLE_MAP automatically; `rows.rows()` yields typed operations whose fields provide column definitions and borrowed values. MINIMAL distinguishes absent fields from SQL NULL. Missing optional metadata such as column names remains unknown; see the [Rust API reference](docs/event-api.md).
 
+## MINIMAL / FULL event contents
+
+| Mode | Raw row event types | Image contents | Field access |
+| --- | --- | --- | --- |
+| MINIMAL | `BinlogEvent<Minimal>` / `RowOperation<SparseImage>` | Logged columns, definitions and values | `Result<Option<Field>>`; a valid unlogged column is `None` |
+| FULL | `BinlogEvent<Full>` / `RowOperation<CompleteImage>` | All columns, definitions and values in each existing image | `Result<Field>`; incomplete images are rejected |
+
+Compare the [MINIMAL event](docs/events.md#minimal) and [FULL event](docs/events.md#full) for one UPDATE, including the full structure, before/after fields and access results. The [Rust example](docs/event-api.md#read-concrete-operations-for-each-mode) reads both static types. Raw events expose field values; canal's committed changes retain only keys and changed column indices.
+
 ## Usage boundaries
 
 - Initial consumption starts at the current committed position without a full snapshot. Recovery uses historical schema from the checkpoint.
