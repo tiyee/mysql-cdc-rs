@@ -10,12 +10,25 @@ class ReleaseTagTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
+        self.workspace = Path(self.directory.name) / "Cargo.toml"
         self.manifest = Path(self.directory.name) / "crates/pikachu/Cargo.toml"
         self.manifest.parent.mkdir(parents=True)
         self.write_package("0.0.1")
 
     def write_package(self, version, name="pikachu", library_version=None):
         library_version = library_version or version
+        self.workspace.write_text(
+            '[workspace]\nmembers = ["crates/mysql-replication", "crates/mysql-canal", "crates/mysql-cdc", "crates/pikachu"]\n', encoding="utf-8"
+        )
+        self.workspace.with_name("Cargo.lock").write_text(
+            "version = 4\n" + "".join(
+                f'[[package]]\nname = "{package}"\nversion = "{package_version}"\n'
+                for package, package_version in [
+                    ("mysql-replication", library_version), ("mysql-canal", library_version),
+                    ("mysql-cdc-rs", library_version), ("pikachu", version)
+                ]
+            ), encoding="utf-8"
+        )
         self.manifest.write_text(
             f'[package]\nname = "{name}"\nversion = "{version}"\n'
             '[dependencies]\nmysql-canal = { path = "../mysql-canal", '
@@ -44,25 +57,25 @@ class ReleaseTagTests(unittest.TestCase):
         )
 
     def test_matching_tag(self):
-        self.assertEqual(validate_tag(self.manifest, "v0.0.1"), "0.0.1")
+        self.assertEqual(validate_tag(self.workspace, "v0.0.1"), "0.0.1")
 
     def test_mismatches_and_non_version_refs(self):
         for tag in ["v0.0.2", "v0.1.0", "0.0.1", "main", "v0.0.1-rc.1", "v0.0.1\n"]:
             with self.subTest(tag=tag), self.assertRaises(ValueError):
-                validate_tag(self.manifest, tag)
+                validate_tag(self.workspace, tag)
 
     def test_prerelease_requires_exact_match(self):
         self.write_package("0.0.2-rc.1")
-        self.assertEqual(validate_tag(self.manifest, "v0.0.2-rc.1"), "0.0.2-rc.1")
+        self.assertEqual(validate_tag(self.workspace, "v0.0.2-rc.1"), "0.0.2-rc.1")
         with self.assertRaises(ValueError):
-            validate_tag(self.manifest, "v0.0.2")
+            validate_tag(self.workspace, "v0.0.2")
 
     def test_renamed_package_is_rejected(self):
         for name in ["another-crate", "pikachu-cdc", "pikachu-rs"]:
             with self.subTest(name=name):
                 self.write_package("0.0.1", name=name)
                 with self.assertRaises(ValueError):
-                    validate_tag(self.manifest, "v0.0.1")
+                    validate_tag(self.workspace, "v0.0.1")
 
     def test_library_name_and_dependency_version_must_match(self):
         for name, version in [("another-crate", "0.0.1"), ("mysql-replication", "0.0.2")]:
@@ -71,14 +84,14 @@ class ReleaseTagTests(unittest.TestCase):
                     f'[package]\nname = "{name}"\nversion = "{version}"\n', encoding="utf-8"
                 )
                 with self.assertRaises(ValueError):
-                    validate_tag(self.manifest, "v0.0.1")
+                    validate_tag(self.workspace, "v0.0.1")
 
     def test_cli_and_library_must_share_the_release_version(self):
         self.write_package("0.0.2", library_version="0.0.1")
         with self.assertRaises(ValueError):
-            validate_tag(self.manifest, "v0.0.2")
+            validate_tag(self.workspace, "v0.0.2")
         with self.assertRaises(ValueError):
-            validate_tag(self.manifest, "v0.0.1")
+            validate_tag(self.workspace, "v0.0.1")
 
     def test_cli_dependency_must_pin_the_workspace_library(self):
         for old, new in [('version = "=0.0.1"', 'version = "=0.0.2"'),
@@ -87,7 +100,7 @@ class ReleaseTagTests(unittest.TestCase):
                 self.write_package("0.0.1")
                 self.manifest.write_text(self.manifest.read_text().replace(old, new), encoding="utf-8")
                 with self.assertRaises(ValueError):
-                    validate_tag(self.manifest, "v0.0.1")
+                    validate_tag(self.workspace, "v0.0.1")
 
     def test_canal_identity_version_and_dependency_are_checked(self):
         for old, new in [
@@ -100,12 +113,12 @@ class ReleaseTagTests(unittest.TestCase):
                 self.write_package("0.0.1")
                 self.canal.write_text(self.canal.read_text().replace(old, new), encoding="utf-8")
                 with self.assertRaises(ValueError):
-                    validate_tag(self.manifest, "v0.0.1")
+                    validate_tag(self.workspace, "v0.0.1")
 
     def test_missing_library_is_rejected(self):
         self.library.unlink()
         with self.assertRaises(FileNotFoundError):
-            validate_tag(self.manifest, "v0.0.1")
+            validate_tag(self.workspace, "v0.0.1")
 
     def test_facade_identity_version_and_both_dependencies_are_checked(self):
         for old, new in [
@@ -122,12 +135,23 @@ class ReleaseTagTests(unittest.TestCase):
                 self.write_package("0.0.1")
                 self.facade.write_text(self.facade.read_text().replace(old, new), encoding="utf-8")
                 with self.assertRaises(ValueError):
-                    validate_tag(self.manifest, "v0.0.1")
+                    validate_tag(self.workspace, "v0.0.1")
 
     def test_missing_facade_is_rejected(self):
         self.facade.unlink()
         with self.assertRaises(FileNotFoundError):
-            validate_tag(self.manifest, "v0.0.1")
+            validate_tag(self.workspace, "v0.0.1")
+
+    def test_workspace_members_and_lockfile_are_checked(self):
+        self.workspace.write_text('[workspace]\nmembers = ["crates/pikachu"]\n', encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_tag(self.workspace, "v0.0.1")
+        self.write_package("0.0.1")
+        lock = self.workspace.with_name("Cargo.lock")
+        lock.write_text(lock.read_text().replace('version = "0.0.1"', 'version = "0.0.2"', 1), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_tag(self.workspace, "v0.0.1")
+
 
 
 class ReleaseWorkflowTests(unittest.TestCase):

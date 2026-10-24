@@ -173,6 +173,8 @@ Common event kinds have these roles:
 
 MINIMAL/FULL differences are in row-image contents. They do not change the common header or add/remove these event kinds. Replication can return DDL in a statement event; canal stops on unsupported statements.
 
+Generic `BinlogEvent<Full>` / `BinlogEvent<Minimal>` row events automatically bind TABLE_MAP definitions. Each row uses an Insert/Update/Delete operation enum; fields carry column information and borrowed values. FULL exposes complete images, while MINIMAL preserves only logged fields and distinguishes absent fields from NULL. Optional metadata such as names is independent of image mode and stays unknown when absent. A statement-end sentinel has its own `RowsStatementEnd` variant. These raw field values are not added to canal CDC output.
+
 ## When delivery happens, and what failure means
 
 With canal or Pikachu, applications receive changes after transaction commit. Rollback discards the transaction; excluded rows are not output. Library transaction handlers still receive fully filtered commits with an empty change list.

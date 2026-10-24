@@ -1,8 +1,11 @@
-use super::{ColumnType, DecimalValue, IntegerValue, RowValue, RowsEvent, RowsKind};
+use super::{
+    BinlogMode, ColumnInfo, ColumnType, DecimalValue, Field, IntegerValue, RowValue, Rows,
+    RowsEvent, RowsKind, TableDefinition,
+};
 use crate::{Error, Result, error::invalid, events::TableMapEvent, wire::Cursor};
 use std::{iter::FusedIterator, sync::Arc};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadOp {
     Fixed(usize),
     Prefixed { width: usize, maximum: u64 },
@@ -24,7 +27,7 @@ impl ReadOp {
 }
 
 /// A validated column layout. SQL names, signedness and character sets are not guessed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColumnDefinition {
     wire_type: ColumnType,
     column_type: ColumnType,
@@ -88,14 +91,16 @@ impl ColumnDefinition {
     }
 }
 
-/// Reusable TABLE_MAP plan for opt-in raw row decoding.
-/// This owns only column layouts, with no schema queries, filtering or CDC policy.
-#[derive(Debug)]
-pub struct RowsDecoder {
+/// Reusable TABLE_MAP plan with historical protocol column metadata.
+/// Typed parsers bind it automatically; manual adapters can also construct it.
+/// It performs no schema queries, filtering or CDC policy checks.
+#[derive(Debug, Clone)]
+pub struct RowsDecoder<M: BinlogMode> {
+    mode: std::marker::PhantomData<M>,
     table_id: u64,
-    columns: Vec<ColumnDefinition>,
+    table: Arc<TableDefinition>,
 }
-impl RowsDecoder {
+impl<M: BinlogMode> RowsDecoder<M> {
     pub fn new(table: &TableMapEvent<'_>) -> Result<Self> {
         let layout = table.columns()?;
         validate_bitmap(layout.nullable, layout.count)?;
@@ -109,63 +114,65 @@ impl RowsDecoder {
             )?);
         }
         metadata.finish()?;
-        // Unknown optional TLVs remain opaque, but their envelopes must be complete.
-        let mut optional = Cursor::new(layout.optional_metadata);
-        while !optional.remaining().is_empty() {
-            optional.byte()?;
-            let length = optional.lenenc()?;
-            optional.take(length)?;
-        }
         Ok(Self {
+            mode: std::marker::PhantomData,
             table_id: table.table_id,
-            columns,
+            table: Arc::new(TableDefinition::new(
+                table,
+                columns,
+                layout.optional_metadata,
+            )?),
         })
     }
     pub fn table_id(&self) -> u64 {
         self.table_id
     }
-    pub fn columns(&self) -> &[ColumnDefinition] {
-        &self.columns
+    pub fn table(&self) -> &TableDefinition {
+        &self.table
+    }
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.table.columns
     }
     /// The caller selects the current TABLE_MAP for this source and table ID.
     /// A remap requires a new decoder, even when the table ID is unchanged.
-    pub fn rows<'a>(&self, event: &RowsEvent<'a>) -> Result<Rows<'a>> {
+    pub fn rows<'a>(&self, event: &RowsEvent<'a, M>) -> Result<Rows<'a, M>> {
         if event.table_id != self.table_id {
             return Err(invalid("ROWS table ID differs from TABLE_MAP"));
         }
         let images = event.images()?;
-        if images.column_count != self.columns.len() {
+        if images.column_count != self.columns().len() {
             return Err(invalid("ROWS column count differs from TABLE_MAP"));
         }
-        let first = ImagePlan::new(&self.columns, images.before_columns)?;
+        let first = ImagePlan::new(&self.table, images.before_columns)?;
         let (before, after) = match event.kind {
             RowsKind::Write => (None, Some(first)),
             RowsKind::Delete => (Some(first), None),
             RowsKind::Update => (
                 Some(first),
-                Some(ImagePlan::new(&self.columns, images.after_columns)?),
+                Some(ImagePlan::new(&self.table, images.after_columns)?),
             ),
         };
         if images.rows.is_empty() {
             return Err(invalid("ROWS event contains no rows"));
         }
-        Ok(Rows {
+        Ok(Rows::new(DecodedRows {
             input: Cursor::new(images.rows),
             before,
             after,
             done: false,
-        })
+        }))
     }
 }
 
 #[derive(Debug)]
 struct ImagePlan {
-    column_count: usize,
+    table: Arc<TableDefinition>,
     indices: Arc<[u16]>,
     columns: Vec<ColumnDefinition>,
 }
 impl ImagePlan {
-    fn new(columns: &[ColumnDefinition], bitmap: &[u8]) -> Result<Arc<Self>> {
+    fn new(table: &Arc<TableDefinition>, bitmap: &[u8]) -> Result<Arc<Self>> {
+        let columns = &table.columns;
         validate_bitmap(bitmap, columns.len())?;
         let mut indices = Vec::new();
         let mut present = Vec::new();
@@ -177,7 +184,7 @@ impl ImagePlan {
                     break;
                 }
                 indices.push(index as u16);
-                present.push(columns[index]);
+                present.push(columns[index].definition);
                 bits &= bits - 1;
             }
         }
@@ -185,7 +192,7 @@ impl ImagePlan {
             return Err(invalid("empty row image"));
         }
         Ok(Arc::new(Self {
-            column_count: columns.len(),
+            table: Arc::clone(table),
             indices: indices.into(),
             columns: present,
         }))
@@ -212,7 +219,7 @@ impl ImagePlan {
 
 /// One row operation. Missing images and absent columns are distinct from SQL NULL.
 #[derive(Debug, Clone)]
-pub struct Row<'a> {
+pub(crate) struct DecodedRow<'a> {
     pub before: Option<RowImage<'a>>,
     pub after: Option<RowImage<'a>>,
 }
@@ -227,15 +234,21 @@ pub struct RowImage<'a> {
 impl<'a> RowImage<'a> {
     /// Total number of table columns, including columns absent from this image.
     pub fn column_count(&self) -> usize {
-        self.plan.column_count
+        self.plan.table.columns.len()
+    }
+    pub fn table(&self) -> &TableDefinition {
+        &self.plan.table
+    }
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.plan.table.columns
     }
     /// Absolute zero-based table column indices, in wire order.
     pub fn column_indices(&self) -> &[u16] {
         &self.plan.indices
     }
     /// Fields contain only columns present in this image; bytes remain borrowed.
-    pub fn fields(&self) -> RowFields<'_, 'a> {
-        RowFields {
+    pub fn fields(&self) -> Fields<'_, 'a> {
+        Fields {
             image: self,
             input: Cursor::new(self.data),
             index: 0,
@@ -244,21 +257,15 @@ impl<'a> RowImage<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RowField<'a> {
-    pub column_index: u16,
-    pub value: RowValue<'a>,
-}
-
 /// Streaming fields of a previously validated image.
-pub struct RowFields<'image, 'event> {
+pub struct Fields<'image, 'event> {
     image: &'image RowImage<'event>,
     input: Cursor<'event>,
     index: usize,
     done: bool,
 }
-impl<'event> Iterator for RowFields<'_, 'event> {
-    type Item = Result<RowField<'event>>;
+impl<'image, 'event> Iterator for Fields<'image, 'event> {
+    type Item = Result<Field<'image, 'event>>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
@@ -269,8 +276,9 @@ impl<'event> Iterator for RowFields<'_, 'event> {
         } else {
             column.value(&mut self.input)
         };
-        let result = value.map(|value| RowField {
-            column_index: self.image.plan.indices[self.index],
+        let result = value.map(|value| Field {
+            column: &self.image.plan.table.columns
+                [usize::from(self.image.plan.indices[self.index])],
             value,
         });
         self.index += 1;
@@ -278,24 +286,24 @@ impl<'event> Iterator for RowFields<'_, 'event> {
         Some(result)
     }
 }
-impl FusedIterator for RowFields<'_, '_> {}
+impl FusedIterator for Fields<'_, '_> {}
 
 /// Streaming row operations. An invalid image yields one error, then ends iteration.
 /// Each operation is validated completely before it becomes visible to the caller.
-pub struct Rows<'a> {
+pub(crate) struct DecodedRows<'a> {
     input: Cursor<'a>,
     before: Option<Arc<ImagePlan>>,
     after: Option<Arc<ImagePlan>>,
     done: bool,
 }
-impl<'a> Iterator for Rows<'a> {
-    type Item = Result<Row<'a>>;
+impl<'a> Iterator for DecodedRows<'a> {
+    type Item = Result<DecodedRow<'a>>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.done || self.input.remaining().is_empty() {
             return None;
         }
         let result = (|| {
-            Ok(Row {
+            Ok(DecodedRow {
                 before: self
                     .before
                     .as_ref()
@@ -312,20 +320,7 @@ impl<'a> Iterator for Rows<'a> {
         Some(result)
     }
 }
-impl FusedIterator for Rows<'_> {}
-
-impl Rows<'_> {
-    pub(super) fn require_complete(&self) -> Result<()> {
-        for plan in self.before.iter().chain(&self.after) {
-            if plan.indices.len() != plan.column_count {
-                return Err(Error::Unsupported(
-                    "FULL row images must contain every table column".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-}
+impl FusedIterator for DecodedRows<'_> {}
 
 fn bit(bitmap: &[u8], index: usize) -> bool {
     bitmap[index / 8] & (1 << (index % 8)) != 0

@@ -33,12 +33,12 @@ impl<'a> From<mysql_replication::EventView<'a>> for EventView<'a> {
 
 /// Uses frame-only reading so CDC adapters control parsing and can skip payloads.
 pub struct BinlogFile<R> {
-    inner: mysql_replication::file::BinlogFile<R>,
+    inner: mysql_replication::file::FrameReader<R>,
 }
 impl<R: Read> BinlogFile<R> {
     pub fn new(reader: R) -> Result<Self> {
         Ok(Self {
-            inner: mysql_replication::file::BinlogFile::new(reader)?,
+            inner: mysql_replication::file::FrameReader::new(reader)?,
         })
     }
     pub fn next_event(&mut self) -> Result<Option<EventView<'_>>> {

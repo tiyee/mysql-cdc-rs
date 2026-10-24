@@ -21,7 +21,7 @@ fn main() -> Result<()> {
         .transpose()?
         .unwrap_or(RowImageMode::Minimal);
     let sink = JsonLinesSink::new(BufWriter::new(std::io::stdout()));
-    Replay::with_row_image(
+    Replay::new(
         State::read(Path::new(&args[1]))?,
         64 * 1024 * 1024,
         VersionRegistry::default(),

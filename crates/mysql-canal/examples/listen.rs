@@ -1,5 +1,5 @@
 //! Register application listeners for normalized, committed changes.
-use mysql_canal::{Cdc, CommittedTransaction, Result, config::AppConfig};
+use mysql_canal::{Canal, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
@@ -7,8 +7,8 @@ fn main() -> Result<()> {
         eprintln!("usage: cargo run -p mysql-canal --example listen -- CONFIG.toml");
         return Ok(());
     };
-    let mut replication = Cdc::new(AppConfig::read(Path::new(&path))?)?;
-    replication.add_handle(|event: CommittedTransaction<'_>| {
+    let mut canal = Canal::new(AppConfig::read(Path::new(&path))?)?;
+    canal.add_handle(|event: CommittedTransaction<'_>| {
         for change in event.changes {
             println!(
                 "{} {}.{} {:?} {:?} {:?}",
@@ -22,5 +22,5 @@ fn main() -> Result<()> {
         }
         Ok(())
     });
-    replication.run()
+    canal.run()
 }

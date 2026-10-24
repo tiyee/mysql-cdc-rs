@@ -7,10 +7,9 @@ use crate::{
         event_type as event,
         events::{EventParser, ParsedEvent},
         file::EventView,
-        version::{EventAction, FormatDescription, RowDecoder, VersionAdapter, VersionRegistry},
+        version::{EventAction, FormatDescription, RowDecoder, VersionRegistry},
     },
 };
-use std::sync::Arc;
 
 /// Per-source conversion state. Transaction visibility and persistence belong to Processor.
 pub struct EventConverter {
@@ -18,20 +17,11 @@ pub struct EventConverter {
     tables: Vec<TableMeta>,
     decoder: Option<Box<dyn RowDecoder>>,
     parser: Option<Box<dyn EventParser>>,
-    adapter: Option<Arc<dyn VersionAdapter>>,
     registry: VersionRegistry,
     selected_adapter: Option<String>,
 }
 impl EventConverter {
     pub fn new(
-        tables: Vec<TableMeta>,
-        registry: VersionRegistry,
-        selected_adapter: Option<String>,
-    ) -> Self {
-        Self::with_row_image(tables, registry, selected_adapter, RowImageMode::Minimal)
-    }
-
-    pub fn with_row_image(
         tables: Vec<TableMeta>,
         registry: VersionRegistry,
         selected_adapter: Option<String>,
@@ -42,7 +32,6 @@ impl EventConverter {
             tables,
             decoder: None,
             parser: None,
-            adapter: None,
             registry,
             selected_adapter,
         }
@@ -76,14 +65,9 @@ impl EventConverter {
                 .resolve(&format.server, self.selected_adapter.as_deref())?;
             adapter.validate_format(&format)?;
             let parser = adapter.create_event_parser(&format)?;
-            let decoder = adapter.create_decoder_with_row_image(
-                self.tables.clone(),
-                &format,
-                self.row_image,
-            )?;
+            let decoder = adapter.create_decoder(self.tables.clone(), &format, self.row_image)?;
             self.parser = Some(parser);
             self.decoder = Some(decoder);
-            self.adapter = Some(adapter);
             return Ok(EventAction::Ignore);
         }
         let parsed = if let Some(parser) = &self.parser {
@@ -111,11 +95,6 @@ impl EventConverter {
                 Ok(EventAction::Ignore)
             }
             ParsedEvent::Control(action) => Ok(action),
-            ParsedEvent::Unclassified(raw) => self
-                .adapter
-                .as_ref()
-                .ok_or_else(|| invalid("event without adapter"))?
-                .classify(raw),
         }
     }
 }

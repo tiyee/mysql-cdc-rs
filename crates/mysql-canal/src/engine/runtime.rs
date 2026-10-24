@@ -155,7 +155,7 @@ impl Runtime {
                         _lock,
                     } = prepared;
                     let result = (|| {
-                        let mut processor = Processor::with_row_image(
+                        let mut processor = Processor::new(
                             state,
                             Some(entry.config.state_file.clone()),
                             entry.config.max_transaction_bytes,
@@ -171,7 +171,7 @@ impl Runtime {
                             if cancelled.load(Ordering::Acquire) {
                                 return Ok(());
                             }
-                            processor.process_to(event, sink.as_ref())?;
+                            processor.process(event, sink.as_ref())?;
                         }
                         Ok(())
                     })();

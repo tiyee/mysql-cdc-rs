@@ -30,5 +30,5 @@ name = "mysql_live"
 path = "tests/mysql_live.rs"
 
 [[example]]
-name = "decode_typed_rows"
+name = "decode_rows"
 test = true

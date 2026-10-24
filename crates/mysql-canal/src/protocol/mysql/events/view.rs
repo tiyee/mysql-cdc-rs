@@ -12,7 +12,6 @@ pub struct TableMapEvent<'a> {
     pub schema: &'a str,
     pub table: &'a str,
     pub column_data: &'a [u8],
-    pub(crate) standard_body: Option<&'a [u8]>,
 }
 impl<'a> TableMapEvent<'a> {
     pub fn new(
@@ -28,7 +27,6 @@ impl<'a> TableMapEvent<'a> {
             schema,
             table,
             column_data,
-            standard_body: None,
         }
     }
 }
@@ -51,7 +49,6 @@ pub struct RowsEvent<'a> {
     pub operation: Operation,
     encoded_images: &'a [u8],
     parse_images: RowImagesParser,
-    pub(crate) standard_body: Option<(u8, &'a [u8])>,
 }
 impl<'a> RowsEvent<'a> {
     pub fn new(
@@ -67,7 +64,6 @@ impl<'a> RowsEvent<'a> {
             operation,
             encoded_images,
             parse_images,
-            standard_body: None,
         }
     }
     pub fn images(self) -> Result<RowImages<'a>> {
@@ -80,9 +76,6 @@ pub enum ParsedEvent<'a> {
     TableMap(TableMapEvent<'a>),
     Rows(RowsEvent<'a>),
     Control(EventAction<'a>),
-    /// Lets existing adapters classify additional control event codes. New row
-    /// layouts must return a typed TableMap/Rows variant from their parser.
-    Unclassified(EventView<'a>),
 }
 pub trait EventParser: Send {
     fn parse<'a>(&self, event: EventView<'a>) -> Result<ParsedEvent<'a>>;

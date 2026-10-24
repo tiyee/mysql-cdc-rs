@@ -98,6 +98,9 @@ pub fn format() -> Vec<u8> {
         (WRITE_ROWS_EVENT, 10),
         (UPDATE_ROWS_EVENT, 10),
         (DELETE_ROWS_EVENT, 10),
+        (WRITE_ROWS_EVENT_V1, 8),
+        (UPDATE_ROWS_EVENT_V1, 8),
+        (DELETE_ROWS_EVENT_V1, 8),
     ] {
         lengths[usize::from(event) - 1] = len;
     }
@@ -141,4 +144,28 @@ pub fn framed(ty: u8, pos: u32, body: &[u8], crc: bool) -> Vec<u8> {
         out.extend(checksum.to_le_bytes());
     }
     out
+}
+
+/// Compile the independently constructed fixture FDE once per test process.
+pub fn parser() -> &'static mysql_canal::protocol::mysql::events::MysqlEventParser {
+    use mysql_canal::protocol::mysql::{events::MysqlEventParser, version::FormatDescription};
+    static PARSER: std::sync::OnceLock<MysqlEventParser> = std::sync::OnceLock::new();
+    PARSER.get_or_init(|| {
+        let bytes = format();
+        MysqlEventParser::from_format(&FormatDescription::parse(&bytes).unwrap()).unwrap()
+    })
+}
+pub fn decode_table<D: mysql_canal::protocol::mysql::version::RowDecoder + ?Sized>(
+    decoder: &mut D,
+    body: &[u8],
+) -> mysql_canal::Result<()> {
+    decoder.table_map_event(parser().table_map(body)?)
+}
+pub fn decode_rows<D: mysql_canal::protocol::mysql::version::RowDecoder + ?Sized>(
+    decoder: &mut D,
+    kind: u8,
+    body: &[u8],
+    mut emit: impl FnMut(mysql_canal::Change<'_>) -> mysql_canal::Result<()>,
+) -> mysql_canal::Result<()> {
+    decoder.rows_event(parser().rows(kind, body)?, &mut emit)
 }

@@ -1,27 +1,49 @@
-//! Inspect raw row images without CDC filtering or transaction delivery.
+//! Select a typed image policy once, then stream borrowed row operations.
 use mysql_replication::{
     Error, EventData, Result,
-    events::{RowImage, RowValue, RowsDecoder},
+    events::{BinlogMode, Full, Minimal, RowImage, RowValue},
     file::BinlogFile,
+    parser::ParserConfig,
 };
-use std::{collections::BTreeMap, fs::File, io::BufReader};
+use std::{
+    fs::File,
+    io::{BufReader, Write},
+};
 
-const STMT_END_F: u16 = 1;
-
-fn print_image(label: &str, image: Option<RowImage<'_>>) -> Result<()> {
-    let Some(image) = image else { return Ok(()) };
+fn print_image(output: &mut dyn Write, label: &str, image: &RowImage<'_>) -> Result<()> {
     for field in image.fields() {
         let field = field?;
         match field.value {
-            RowValue::Decimal(value) => println!("{label}[{}] = {value}", field.column_index),
-            // IntegerValue deliberately requires the caller to choose SQL signedness.
-            RowValue::Integer(value) => println!(
+            RowValue::Decimal(value) => {
+                writeln!(output, "{label}[{}] = {value}", field.column.index)?
+            }
+            // TABLE_MAP does not provide mandatory SQL signedness metadata.
+            RowValue::Integer(value) => writeln!(
+                output,
                 "{label}[{}] = signed:{} unsigned:{}",
-                field.column_index,
+                field.column.index,
                 value.signed(),
                 value.unsigned()
-            ),
-            value => println!("{label}[{}] = {value:?}", field.column_index),
+            )?,
+            value => writeln!(output, "{label}[{}] = {value:?}", field.column.index)?,
+        }
+    }
+    Ok(())
+}
+
+fn run<M: BinlogMode>(path: &str, output: &mut dyn Write) -> Result<()> {
+    let mut reader =
+        BinlogFile::<_, M>::new(BufReader::new(File::open(path)?), ParserConfig::default())?;
+    while let Some(event) = reader.next_event()? {
+        if let EventData::Rows(event) = event.event {
+            for row in event.rows()? {
+                let (before, after) = row?.operation.into_images();
+                for (label, image) in [("before", before), ("after", after)] {
+                    if let Some(image) = image {
+                        print_image(output, label, image.as_ref())?;
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -29,37 +51,26 @@ fn print_image(label: &str, image: Option<RowImage<'_>>) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 2 {
-        eprintln!("usage: cargo run -p mysql-replication --example decode_rows -- BINLOG_FILE");
-        return Ok(());
-    }
-    let mut reader = BinlogFile::new(BufReader::new(File::open(&args[1])?))?;
-    let mut tables = BTreeMap::new();
-    while let Some(event) = reader.next_event()? {
-        match event.event {
-            EventData::FormatDescription(_) | EventData::Rotate(_) => tables.clear(),
-            EventData::TableMap(table) => {
-                // Replace the plan on every remap; never reuse a table ID across files.
-                tables.insert(table.table_id, RowsDecoder::new(&table)?);
-            }
-            EventData::Rows(rows) => {
-                // MySQL may send a statement-end marker without row data.
-                if rows.table_id != 0x00ff_ffff || rows.flags & STMT_END_F == 0 {
-                    let decoder = tables.get(&rows.table_id).ok_or_else(|| {
-                        Error::Invalid(format!("missing TABLE_MAP for {}", rows.table_id))
-                    })?;
-                    for row in rows.rows(decoder)? {
-                        let row = row?;
-                        print_image("before", row.before)?;
-                        print_image("after", row.after)?;
-                    }
-                }
-                if rows.flags & STMT_END_F != 0 {
-                    tables.clear();
-                }
-            }
-            _ => {}
+    execute(&args, &mut std::io::stdout().lock())
+}
+
+fn execute(args: &[String], output: &mut dyn Write) -> Result<()> {
+    match args {
+        [_, path] => run::<Minimal>(path, output),
+        [_, path, flag, mode] if flag == "--row-image" => match mode.as_str() {
+            "minimal" => run::<Minimal>(path, output),
+            "full" => run::<Full>(path, output),
+            _ => Err(Error::Invalid("row image must be minimal or full".into())),
+        },
+        _ => {
+            eprintln!(
+                "usage: cargo run -p mysql-replication --example decode_rows -- BINLOG_FILE [--row-image minimal|full]"
+            );
+            Ok(())
         }
     }
-    Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/support/rows_example.rs"]
+mod tests;

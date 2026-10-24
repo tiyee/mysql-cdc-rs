@@ -1,71 +1,54 @@
 use crate::{BinlogFrame, Error, Result, error::invalid, event_type as code, events::*};
+use std::{collections::BTreeMap, sync::Arc};
 
-/// ROWS values are never materialized. Bitmaps can also be deferred until a table matches.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum RowsDecode {
-    #[default]
-    Deferred,
-    ValidateImages,
-}
 #[derive(Debug, Clone, Copy)]
 pub struct ParserConfig {
-    pub rows: RowsDecode,
     pub decode_gtids: bool,
     pub decode_previous_gtids: bool,
 }
 impl Default for ParserConfig {
     fn default() -> Self {
         Self {
-            rows: RowsDecode::Deferred,
             decode_gtids: true,
             decode_previous_gtids: true,
         }
     }
 }
-impl ParserConfig {
-    /// CDC needs group boundaries, not GTID metadata or previous GTID interval lists.
-    pub fn minimal() -> Self {
-        Self {
-            decode_gtids: false,
-            decode_previous_gtids: false,
-            ..Self::default()
-        }
-    }
-}
-
 /// FDE selects a file's layouts once; row loops never inspect server versions.
-pub struct BinlogParser<M: BinlogMode = Unspecified> {
+pub struct BinlogParser<M: BinlogMode> {
     mode: std::marker::PhantomData<M>,
     config: ParserConfig,
     headers: Option<[u8; 256]>,
+    tables: BTreeMap<u64, Arc<RowsDecoder<M>>>,
 }
-impl Default for BinlogParser {
+impl<M: BinlogMode> Default for BinlogParser<M> {
     fn default() -> Self {
         Self::new(ParserConfig::default())
     }
 }
-impl BinlogParser {
-    pub fn new(config: ParserConfig) -> Self {
-        Self::for_mode(config)
-    }
-}
 impl<M: BinlogMode> BinlogParser<M> {
-    pub fn for_mode(config: ParserConfig) -> Self {
+    pub fn new(config: ParserConfig) -> Self {
         Self {
             config,
             headers: None,
-            mode: std::marker::PhantomData,
-        }
-    }
-    pub fn with_mode<N: BinlogMode>(self) -> BinlogParser<N> {
-        BinlogParser {
-            config: self.config,
-            headers: self.headers,
+            tables: BTreeMap::new(),
             mode: std::marker::PhantomData,
         }
     }
     pub fn parse<'a>(&mut self, frame: BinlogFrame<'a>) -> Result<BinlogEvent<'a, M>> {
         let kind = frame.header.event_type;
+        if kind == code::PARTIAL_UPDATE_ROWS_EVENT {
+            return Err(Error::Unsupported("partial JSON row images".into()));
+        }
+        if matches!(
+            kind,
+            code::FORMAT_DESCRIPTION_EVENT
+                | code::ROTATE_EVENT
+                | code::QUERY_EVENT
+                | code::XID_EVENT
+        ) {
+            self.tables.clear();
+        }
         let mut event = if kind == code::FORMAT_DESCRIPTION_EVENT {
             let mut format = FormatDescriptionEvent::default();
             format.decode(frame.body)?;
@@ -111,7 +94,7 @@ impl<M: BinlogMode> BinlogParser<M> {
                     Some(0 | 8)
                 ) {
                     return Err(Error::Unsupported(format!(
-                        "unvalidated legacy ROWS post-header {kind}"
+                        "unvalidated ROWS v1 post-header {kind}"
                     )));
                 }
             }
@@ -157,7 +140,7 @@ impl<M: BinlogMode> BinlogParser<M> {
                         kind,
                         code::WRITE_ROWS_EVENT | code::UPDATE_ROWS_EVENT | code::DELETE_ROWS_EVENT
                     );
-                    EventData::Rows(RowsEvent::<M>::for_mode(operation, post_header, v2))
+                    EventData::Rows(RowsEvent::<M>::with_layout(operation, post_header, v2))
                 }
                 code::XID_EVENT => EventData::Xid(Default::default()),
                 code::GTID_EVENT if self.config.decode_gtids => EventData::Gtid(Default::default()),
@@ -177,10 +160,35 @@ impl<M: BinlogMode> BinlogParser<M> {
         if kind != code::FORMAT_DESCRIPTION_EVENT {
             event.decode(frame.body)?;
         }
-        if let EventData::Rows(rows) = &event
-            && self.config.rows == RowsDecode::ValidateImages
-        {
-            rows.images()?;
+        match &mut event {
+            EventData::TableMap(table) => {
+                self.tables.remove(&table.table_id);
+                let decoder = Arc::new(RowsDecoder::<M>::new(table)?);
+                self.tables.insert(table.table_id, decoder);
+            }
+            EventData::Rows(rows) if rows.is_statement_end() => {
+                self.tables.clear();
+                event = EventData::RowsStatementEnd(RowsStatementEndEvent::new({
+                    let mut sentinel =
+                        RowsEvent::<Minimal>::with_layout(rows.kind, rows.post_header, rows.v2);
+                    sentinel.decode(frame.body)?;
+                    sentinel
+                }));
+            }
+            EventData::Rows(rows) => {
+                let decoder = self
+                    .tables
+                    .get(&rows.table_id)
+                    .ok_or_else(|| invalid(format!("missing TABLE_MAP for {}", rows.table_id)))?;
+                if rows.images()?.column_count != decoder.columns().len() {
+                    return Err(invalid("ROWS column count differs from TABLE_MAP"));
+                }
+                rows.decoder = Some(Arc::clone(decoder));
+                if rows.flags & 1 != 0 {
+                    self.tables.clear();
+                }
+            }
+            _ => {}
         }
         if let EventData::Gtid(gtid) = &event
             && gtid.gno == 0

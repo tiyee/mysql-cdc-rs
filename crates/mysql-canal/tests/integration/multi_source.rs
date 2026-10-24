@@ -379,7 +379,7 @@ fn broken_stream_stops_and_keeps_all_checkpoints_at_last_commit() {
 #[test]
 fn config_requires_named_sources_and_rejects_duplicates_aliases_and_typos() {
     let temp = Temp::new();
-    let path = temp.0.join("cdc.toml");
+    let path = temp.0.join("canal.toml");
     let multi = include_str!("../../examples/config/multi-source.toml");
     std::fs::write(&path, multi).unwrap();
     let app = AppConfig::read(&path).unwrap();
@@ -431,44 +431,71 @@ impl VersionAdapter for Custom {
     fn status_query(&self) -> &str {
         "SHOW CUSTOM STATUS"
     }
-    fn classify<'a>(&self, event: EventView<'a>) -> Result<EventAction<'a>> {
-        if event.event_type == 200 {
-            Ok(EventAction::Ignore)
-        } else {
-            mysql_canal::protocol::mysql::version::classify_mysql_event(event)
-        }
+    fn create_event_parser(
+        &self,
+        format: &FormatDescription<'_>,
+    ) -> Result<Box<dyn mysql_canal::protocol::mysql::events::EventParser>> {
+        Ok(Box::new(CustomParser {
+            base: mysql_canal::protocol::mysql::events::MysqlEventParser::from_format(format)?,
+        }))
     }
     fn create_decoder(
         &self,
         tables: Vec<TableMeta>,
         _format: &FormatDescription<'_>,
+        row_image: mysql_canal::config::RowImageMode,
     ) -> Result<Box<dyn RowDecoder>> {
         self.created.fetch_add(1, Ordering::Relaxed);
-        Ok(Box::new(CountingDecoder {
-            inner: mysql_canal::Decoder::new(tables)?,
-            count: self.rows.clone(),
-        }))
+        Ok(match row_image {
+            mysql_canal::config::RowImageMode::Minimal => Box::new(CountingDecoder {
+                inner: mysql_canal::Decoder::<mysql_canal::Minimal>::new(tables)?,
+                count: self.rows.clone(),
+            }),
+            mysql_canal::config::RowImageMode::Full => Box::new(CountingDecoder {
+                inner: mysql_canal::Decoder::<mysql_canal::Full>::new(tables)?,
+                count: self.rows.clone(),
+            }),
+        })
     }
 }
-struct CountingDecoder {
-    inner: mysql_canal::Decoder,
+struct CustomParser {
+    base: mysql_canal::protocol::mysql::events::MysqlEventParser,
+}
+impl mysql_canal::protocol::mysql::events::EventParser for CustomParser {
+    fn parse<'a>(
+        &self,
+        event: EventView<'a>,
+    ) -> Result<mysql_canal::protocol::mysql::events::ParsedEvent<'a>> {
+        if event.event_type == 200 {
+            Ok(mysql_canal::protocol::mysql::events::ParsedEvent::Control(
+                EventAction::Ignore,
+            ))
+        } else {
+            self.base.parse(event)
+        }
+    }
+}
+struct CountingDecoder<M: mysql_canal::CdcImageMode> {
+    inner: mysql_canal::Decoder<M>,
     count: Arc<AtomicUsize>,
 }
-impl RowDecoder for CountingDecoder {
+impl<M: mysql_canal::CdcImageMode> RowDecoder for CountingDecoder<M> {
     fn clear_table_maps(&mut self) {
         self.inner.clear_table_maps();
     }
-    fn table_map(&mut self, body: &[u8]) -> Result<()> {
-        self.inner.table_map(body)
-    }
-    fn rows(
+    fn table_map_event(
         &mut self,
-        kind: u8,
-        body: &[u8],
+        event: mysql_canal::protocol::mysql::events::TableMapEvent<'_>,
+    ) -> Result<()> {
+        self.inner.table_map_event(event)
+    }
+    fn rows_event(
+        &mut self,
+        event: mysql_canal::protocol::mysql::events::RowsEvent<'_>,
         emit: &mut dyn FnMut(mysql_canal::Change<'_>) -> Result<()>,
     ) -> Result<()> {
         self.count.fetch_add(1, Ordering::Relaxed);
-        self.inner.rows(kind, body, emit)
+        self.inner.rows_event(event, emit)
     }
 }
 #[test]
@@ -519,7 +546,15 @@ fn version_profiles_validate_each_supported_series_and_reject_unknown_series() {
         assert_eq!(adapter.name(), name);
         assert_eq!(adapter.status_query(), query);
         adapter.validate_format(&f).unwrap();
-        let mut p = Processor::new(state(), None, 100_000).unwrap();
+        let mut p = Processor::new(
+            state(),
+            None,
+            100_000,
+            mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+            None,
+            mysql_canal::config::RowImageMode::Minimal,
+        )
+        .unwrap();
         let mut out = Vec::new();
         for packet in packets(version, 33, false) {
             p.process(
@@ -529,7 +564,7 @@ fn version_profiles_validate_each_supported_series_and_reject_unknown_series() {
                     log_pos: packet.position,
                     data: &packet.body,
                 },
-                &mut out,
+                &mysql_canal::sink::JsonLinesSink::new(&mut out),
             )
             .unwrap();
         }
@@ -579,7 +614,15 @@ fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes
             }))
             .is_err()
     );
-    let mut processor = Processor::with_registry(state(), None, 100_000, registry, None).unwrap();
+    let mut processor = Processor::new(
+        state(),
+        None,
+        100_000,
+        registry,
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut out = Vec::new();
     for packet in packets("9.1.0-test", 99, false) {
         processor
@@ -590,7 +633,7 @@ fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes
                     log_pos: packet.position,
                     data: &packet.body,
                 },
-                &mut out,
+                &mysql_canal::sink::JsonLinesSink::new(&mut out),
             )
             .unwrap();
     }
@@ -602,7 +645,7 @@ fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes
                 log_pos: 0,
                 data: &[],
             },
-            &mut out,
+            &mysql_canal::sink::JsonLinesSink::new(&mut out),
         )
         .unwrap();
     assert_eq!(created.load(Ordering::Relaxed), 1);
@@ -620,7 +663,7 @@ fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes
                 log_pos: 0,
                 data: &format_for("5.7.44"),
             },
-            &mut out,
+            &mysql_canal::sink::JsonLinesSink::new(&mut out),
         )
         .unwrap();
     assert_eq!(created.load(Ordering::Relaxed), 1);
@@ -633,7 +676,7 @@ fn custom_adapter_supplies_control_events_and_row_decoder_without_engine_changes
                     log_pos: 0,
                     data: &[]
                 },
-                &mut out
+                &mysql_canal::sink::JsonLinesSink::new(&mut out)
             )
             .is_err()
     );
@@ -689,10 +732,18 @@ fn transaction_sink_can_receive_checkpoint_and_all_changes_in_one_call() {
     let sink = Capture(Mutex::new(Vec::new()));
     let mut snapshot = state();
     snapshot.source_id = "tenant-a".into();
-    let mut processor = Processor::new(snapshot, None, 100_000).unwrap();
+    let mut processor = Processor::new(
+        snapshot,
+        None,
+        100_000,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     for packet in packets("8.0.44", 55, false) {
         processor
-            .process_to(
+            .process(
                 EventView {
                     event_type: packet.kind,
                     flags: 0,
@@ -722,8 +773,12 @@ fn capabilities_are_checked_per_source_with_absent_57_variables_allowed() {
     .into_iter()
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
-    old.validate_server(&vars, 100).unwrap();
-    assert!(old.validate_server(&vars, 1).is_err());
+    old.validate_server(&vars, 100, mysql_canal::config::RowImageMode::Minimal)
+        .unwrap();
+    assert!(
+        old.validate_server(&vars, 1, mysql_canal::config::RowImageMode::Minimal)
+            .is_err()
+    );
     for (key, value) in [
         ("binlog_format", "STATEMENT"),
         ("binlog_row_image", "FULL"),
@@ -733,14 +788,17 @@ fn capabilities_are_checked_per_source_with_absent_57_variables_allowed() {
     ] {
         let mut bad = vars.clone();
         bad.insert(key.into(), value.into());
-        assert!(old.validate_server(&bad, 100).is_err());
+        assert!(
+            old.validate_server(&bad, 100, mysql_canal::config::RowImageMode::Minimal)
+                .is_err()
+        );
     }
     vars.insert("binlog_transaction_compression".into(), "OFF".into());
     vars.insert("binlog_row_value_options".into(), "".into());
     registry
         .resolve(&ServerVersion::parse("9.0.1").unwrap(), None)
         .unwrap()
-        .validate_server(&vars, 100)
+        .validate_server(&vars, 100, mysql_canal::config::RowImageMode::Minimal)
         .unwrap();
     let mut overlap = VersionRegistry::default();
     struct Overlap;
@@ -782,14 +840,15 @@ fn trait_object_row_decoder_preserves_borrowed_utf8_key() {
         columns: vec![key],
     };
     let mut decoder: Box<dyn RowDecoder> =
-        Box::new(mysql_canal::Decoder::new(vec![meta.clone()]).unwrap());
-    decoder
-        .table_map(&table_map(7, &meta, &[15], &[100, 0]))
-        .unwrap();
+        Box::new(mysql_canal::Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap());
+    decode_table(decoder.as_mut(), &table_map(7, &meta, &[15], &[100, 0])).unwrap();
     let body = rows(7, WRITE_ROWS_EVENT, 1, &[1], &[], b"\0\x05hello");
     let mut seen = false;
-    decoder
-        .rows(WRITE_ROWS_EVENT, &body, &mut |change| {
+    decode_rows(
+        decoder.as_mut(),
+        WRITE_ROWS_EVENT,
+        &body,
+        &mut |change: mysql_canal::Change<'_>| {
             match change.pk {
                 mysql_canal::PrimaryKey::Text(std::borrow::Cow::Borrowed(text)) => {
                     assert_eq!(text, "hello");
@@ -799,14 +858,15 @@ fn trait_object_row_decoder_preserves_borrowed_utf8_key() {
             }
             seen = true;
             Ok(())
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert!(seen);
 }
 
 #[test]
-fn replication_delivers_converted_transactions_to_handles_before_checkpointing() {
-    use mysql_canal::{Cdc, CommittedTransaction, Operation, PrimaryKey};
+fn canal_delivers_converted_transactions_to_handles_before_checkpointing() {
+    use mysql_canal::{Canal, CommittedTransaction, Operation, PrimaryKey};
     let temp = Temp::new();
     let east = temp.config("east");
     let west = temp.config("west");
@@ -817,7 +877,7 @@ fn replication_delivers_converted_transactions_to_handles_before_checkpointing()
         same_uuid: false,
         broken: false,
     });
-    let mut replication = Cdc::with_runtime(
+    let mut replication = Canal::with_runtime(
         AppConfig {
             sources: vec![east, west],
         },
@@ -871,8 +931,8 @@ fn replication_delivers_converted_transactions_to_handles_before_checkpointing()
 }
 
 #[test]
-fn replication_handle_failure_stops_fanout_and_preserves_checkpoint() {
-    use mysql_canal::{Cdc, CommittedTransaction};
+fn canal_handle_failure_stops_fanout_and_preserves_checkpoint() {
+    use mysql_canal::{Canal, CommittedTransaction};
     let temp = Temp::new();
     let entry = temp.config("east");
     let path = entry.config.state_file.clone();
@@ -881,7 +941,7 @@ fn replication_handle_failure_stops_fanout_and_preserves_checkpoint() {
         same_uuid: false,
         broken: false,
     });
-    let mut replication = Cdc::with_runtime(
+    let mut replication = Canal::with_runtime(
         AppConfig {
             sources: vec![entry],
         },
@@ -912,12 +972,12 @@ fn replication_handle_failure_stops_fanout_and_preserves_checkpoint() {
 }
 
 #[test]
-fn replication_requires_a_handle_before_initializing_any_state() {
-    use mysql_canal::Cdc;
+fn canal_requires_a_handle_before_initializing_any_state() {
+    use mysql_canal::Canal;
     let temp = Temp::new();
     let entry = temp.config("east");
     let path = entry.config.state_file.clone();
-    let replication = Cdc::new(AppConfig {
+    let replication = Canal::new(AppConfig {
         sources: vec![entry],
     })
     .unwrap();
@@ -953,8 +1013,8 @@ impl SourcePlugin for ScriptedPlugin {
 }
 
 #[test]
-fn replication_handles_only_committed_events_and_rejects_incomplete_transactions() {
-    use mysql_canal::{Cdc, CommittedTransaction};
+fn canal_handles_only_committed_events_and_rejects_incomplete_transactions() {
+    use mysql_canal::{Canal, CommittedTransaction};
     for outcome in ["rollback", "truncated", "filtered"] {
         let temp = Temp::new();
         let entry = temp.config("east");
@@ -980,7 +1040,7 @@ fn replication_handles_only_committed_events_and_rejects_incomplete_transactions
         }
         let mut sources = SourceRegistry::empty();
         sources.register(Arc::new(ScriptedPlugin(script))).unwrap();
-        let mut replication = Cdc::with_runtime(
+        let mut replication = Canal::with_runtime(
             AppConfig {
                 sources: vec![entry],
             },
@@ -1021,8 +1081,8 @@ fn replication_handles_only_committed_events_and_rejects_incomplete_transactions
 }
 
 #[test]
-fn replication_handle_failure_or_panic_prevents_peer_callbacks_and_checkpoints() {
-    use mysql_canal::{Cdc, CommittedTransaction};
+fn canal_handle_failure_or_panic_prevents_peer_callbacks_and_checkpoints() {
+    use mysql_canal::{Canal, CommittedTransaction};
     for panic in [false, true] {
         let temp = Temp::new();
         let east = temp.config("east");
@@ -1036,7 +1096,7 @@ fn replication_handle_failure_or_panic_prevents_peer_callbacks_and_checkpoints()
             same_uuid: false,
             broken: false,
         });
-        let mut replication = Cdc::with_runtime(
+        let mut replication = Canal::with_runtime(
             AppConfig {
                 sources: vec![east, west],
             },
@@ -1096,7 +1156,7 @@ fn canal_requires_replication_config_and_resolves_its_paths_and_modes() {
     use mysql_replication::{config::Config as ReplicationConfig, stream::RowImage};
 
     let temp = Temp::new();
-    let path = temp.0.join("cdc.toml");
+    let path = temp.0.join("canal.toml");
     let text = include_str!("../../examples/config/multi-source.toml")
         .replacen("row_image = \"minimal\"", "row_image = \"full\"", 1)
         .replacen(
@@ -1165,13 +1225,13 @@ fn full_capabilities_are_opt_in_and_keep_other_safety_checks() {
             .resolve(&ServerVersion::parse(version).unwrap(), None)
             .unwrap();
         adapter
-            .validate_server_with_row_image(&variables, 100, RowImageMode::Full)
+            .validate_server(&variables, 100, RowImageMode::Full)
             .unwrap();
         assert!(
-            matches!(adapter.validate_server_with_row_image(&variables, 100, RowImageMode::Minimal), Err(Error::Unsupported(message)) if message == "requires binlog_row_image=MINIMAL")
+            matches!(adapter.validate_server(&variables, 100, RowImageMode::Minimal), Err(Error::Unsupported(message)) if message == "requires binlog_row_image=MINIMAL")
         );
         assert!(matches!(
-            adapter.validate_server_with_row_image(&variables, 1, RowImageMode::Full),
+            adapter.validate_server(&variables, 1, RowImageMode::Full),
             Err(Error::Schema(_))
         ));
         for (key, value) in [
@@ -1184,39 +1244,38 @@ fn full_capabilities_are_opt_in_and_keep_other_safety_checks() {
             let mut invalid = variables.clone();
             invalid.insert(key.into(), value.into());
             assert!(matches!(
-                adapter.validate_server_with_row_image(&invalid, 100, RowImageMode::Full),
+                adapter.validate_server(&invalid, 100, RowImageMode::Full),
                 Err(Error::Unsupported(_))
             ));
         }
     }
-    variables.insert("binlog_row_image".into(), "MINIMAL".into());
-    struct Legacy;
-    impl VersionAdapter for Legacy {
+    struct DefaultAdapter;
+    impl VersionAdapter for DefaultAdapter {
         fn name(&self) -> &str {
-            "legacy"
+            "default-v4"
         }
         fn supports(&self, _: &ServerVersion) -> bool {
             true
         }
         fn status_query(&self) -> &str {
-            "SHOW MASTER STATUS"
+            "SHOW BINARY LOG STATUS"
         }
     }
-    Legacy
-        .validate_server_with_row_image(&variables, 100, RowImageMode::Minimal)
-        .unwrap();
-    assert!(
-        matches!(Legacy.validate_server_with_row_image(&variables, 100, RowImageMode::Full), Err(Error::Unsupported(message)) if message.contains("legacy"))
-    );
     let fde = format();
     let format = FormatDescription::parse(&fde).unwrap();
-    assert!(
-        matches!(Legacy.create_decoder_with_row_image(vec![basic()], &format, RowImageMode::Full), Err(Error::Unsupported(message)) if message.contains("legacy"))
-    );
+    for mode in [RowImageMode::Minimal, RowImageMode::Full] {
+        variables.insert("binlog_row_image".into(), mode.server_value().into());
+        DefaultAdapter
+            .validate_server(&variables, 100, mode)
+            .unwrap();
+        DefaultAdapter
+            .create_decoder(vec![basic()], &format, mode)
+            .unwrap();
+    }
 }
 
 #[test]
-fn concurrent_sources_select_full_and_minimal_independently() {
+fn canal_consumes_full_and_minimal_sources_together() {
     use mysql_canal::config::RowImageMode;
     let temp = Temp::new();
     let mut east = temp.config("east");
@@ -1230,14 +1289,25 @@ fn concurrent_sources_select_full_and_minimal_independently() {
         same_uuid: false,
         broken: false,
     });
-    rt.run(
+    let mut canal = mysql_canal::Canal::with_runtime(
         AppConfig {
             sources: vec![east, west],
         },
-        true,
-        Arc::new(JsonLinesSink::new(output.clone())),
+        rt,
     )
     .unwrap();
+    assert!(!east_path.exists());
+    assert!(!west_path.exists());
+    let paths = std::collections::BTreeMap::from([
+        ("east", east_path.clone()),
+        ("west", west_path.clone()),
+    ]);
+    let sink = JsonLinesSink::new(output.clone());
+    canal.add_handle(move |event: mysql_canal::CommittedTransaction<'_>| {
+        assert_eq!(State::read(&paths[event.source_id])?.position, 4);
+        sink.commit(event.source_id, event.checkpoint, event.changes)
+    });
+    canal.run_once().unwrap();
     let mut changes: Vec<serde_json::Value> = String::from_utf8(output.0.lock().unwrap().clone())
         .unwrap()
         .lines()
@@ -1256,36 +1326,19 @@ fn concurrent_sources_select_full_and_minimal_independently() {
 }
 
 #[test]
-fn typed_cdc_rejects_configuration_conflicts_before_startup() {
-    use mysql_canal::{Cdc, Full, Minimal};
-    let temp = Temp::new();
-    assert!(
-        matches!(Cdc::<Full>::for_mode(AppConfig { sources: vec![temp.config("east")] }),
-        Err(Error::Schema(message)) if message == "source east row_image conflicts with generic full mode")
-    );
-    let mut east = temp.config("east");
-    east.config.replication.row_image = mysql_canal::config::RowImageMode::Full;
-    assert!(
-        matches!(Cdc::<Minimal>::for_mode(AppConfig { sources: vec![east] }),
-        Err(Error::Schema(message)) if message == "source east row_image conflicts with generic minimal mode")
-    );
-    assert!(!temp.0.join("east.json").exists());
-}
-
-#[test]
-fn typed_cdc_delivers_both_modes_with_commit_visibility_and_checkpointing() {
-    use mysql_canal::{Cdc, CommittedTransaction, Operation, PrimaryKey};
-    fn run<M: mysql_canal::CdcMode + mysql_replication::ImageMode>() {
+fn canal_delivers_both_modes_with_commit_visibility_and_checkpointing() {
+    use mysql_canal::{Canal, CommittedTransaction, Operation, PrimaryKey};
+    fn run(mode: mysql_canal::config::RowImageMode) {
         let temp = Temp::new();
         let mut east = temp.config("east");
-        east.config.replication.row_image = M::ROW_IMAGE;
+        east.config.replication.row_image = mode;
         let path = east.config.state_file.clone();
         let rt = runtime(FakePlugin {
             barrier: None,
             same_uuid: false,
             broken: false,
         });
-        let mut cdc = Cdc::<M>::with_runtime_for_mode(
+        let mut canal = Canal::with_runtime(
             AppConfig {
                 sources: vec![east],
             },
@@ -1295,26 +1348,26 @@ fn typed_cdc_delivers_both_modes_with_commit_visibility_and_checkpointing() {
         let changes = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&changes);
         let before_commit = path.clone();
-        cdc.add_handle(move |event: CommittedTransaction<'_>| {
+        canal.add_handle(move |event: CommittedTransaction<'_>| {
             assert_eq!(State::read(&before_commit)?.position, 4);
             assert_eq!(event.source_id, "east");
             assert_eq!(event.checkpoint.position, 240);
             captured.lock().unwrap().extend_from_slice(event.changes);
             Ok(())
         });
-        cdc.run_once().unwrap();
+        canal.run_once().unwrap();
         assert_eq!(State::read(&path).unwrap().position, 240);
         let changes = changes.lock().unwrap();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].operation, Operation::Update);
         assert_eq!(changes[0].pk, PrimaryKey::Signed(11));
         assert_eq!(changes[0].previous_pk, None);
-        let expected = match M::ROW_IMAGE {
+        let expected = match mode {
             mysql_canal::config::RowImageMode::Minimal => vec!["name"],
             mysql_canal::config::RowImageMode::Full => vec!["id", "name", "age"],
         };
         assert_eq!(changes[0].changed_names().collect::<Vec<_>>(), expected);
     }
-    run::<mysql_canal::Minimal>();
-    run::<mysql_canal::Full>();
+    run(mysql_canal::config::RowImageMode::Minimal);
+    run(mysql_canal::config::RowImageMode::Full);
 }

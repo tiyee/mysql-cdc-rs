@@ -24,7 +24,7 @@ jobs:
       - name: Require the tag to match Cargo.toml
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python scripts/release/check_version.py "$RELEASE_TAG"
+        run: python scripts/release/check_version.py --workspace Cargo.toml "$RELEASE_TAG"
 
   ci:
     name: Test release commit

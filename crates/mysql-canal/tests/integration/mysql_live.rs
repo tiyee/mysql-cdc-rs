@@ -6,7 +6,7 @@ mod live;
 use live::{CapturedOutput, Fixture, expected};
 use mysql::prelude::Queryable;
 use mysql_canal::{
-    Cdc, CommittedTransaction, Error, OwnedChange, Result,
+    Canal, CommittedTransaction, Error, OwnedChange, Result,
     config::{AppConfig, Config, SourceConfig, SourceEntry, WhitelistTable},
     engine::checkpoint::State,
     protocol::mysql::event_type as event,
@@ -54,8 +54,8 @@ fn mysql_primary_key_preflight_stops_fresh_and_resumed_consumption() {
             if !resume {
                 std::fs::remove_file(&fixture.config.state_file).unwrap();
             }
-            let new_cdc = || {
-                Cdc::new(AppConfig {
+            let new_canal = || {
+                Canal::new(AppConfig {
                     sources: vec![SourceEntry {
                         id: live::SOURCE_ID.into(),
                         config: Config {
@@ -76,21 +76,21 @@ fn mysql_primary_key_preflight_stops_fresh_and_resumed_consumption() {
                 .unwrap()
             };
             assert!(
-                matches!(new_cdc().check(), Err(Error::Sources(ref message))
+                matches!(new_canal().check(), Err(Error::Sources(ref message))
                 if message.contains(&schema) && message.contains(reason)),
                 "check: {alter}"
             );
             assert!(
-                matches!(new_cdc().initialize(), Err(Error::Sources(ref message))
+                matches!(new_canal().initialize(), Err(Error::Sources(ref message))
                 if message.contains(&schema) && message.contains(reason)),
                 "initialize: {alter}"
             );
-            let mut cdc = new_cdc();
-            cdc.add_handle(|_: CommittedTransaction<'_>| {
+            let mut canal = new_canal();
+            canal.add_handle(|_: CommittedTransaction<'_>| {
                 panic!("preflight failure must prevent all transaction callbacks");
             });
             assert!(
-                matches!(cdc.run_once(), Err(Error::Sources(ref message))
+                matches!(canal.run_once(), Err(Error::Sources(ref message))
                 if message.contains(&schema) && message.contains(reason)),
                 "{alter}"
             );
@@ -425,7 +425,7 @@ fn mysql_live_monitor_buffers_rows_until_transaction_commit() {
                 kind,
                 event::WRITE_ROWS_EVENT | event::UPDATE_ROWS_EVENT | event::DELETE_ROWS_EVENT
             );
-            processor.process_to(raw, &sink).unwrap();
+            processor.process(raw, &sink).unwrap();
             if kind == event::FORMAT_DESCRIPTION_EVENT && !ready {
                 ready_tx.send(()).unwrap();
                 ready = true;

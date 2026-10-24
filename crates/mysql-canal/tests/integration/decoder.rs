@@ -1,21 +1,22 @@
 #[path = "../support/mod.rs"]
 mod common;
 use common::*;
-use mysql_canal::{Decoder, Error, Operation, PrimaryKey};
+use mysql_canal::{Decoder, Error, Operation, PrimaryKey, protocol::mysql::version::RowDecoder};
 use std::{borrow::Cow, sync::Arc};
 
 fn collect(ty: u8, data: &[u8]) -> Vec<mysql_canal::OwnedChange> {
-    let mut decoder = Decoder::new(vec![basic()]).unwrap();
-    decoder
-        .table_map(&table_map(7, &basic(), &[3, 15, 3], &[100, 0]))
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
+    decode_table(
+        &mut decoder,
+        &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+    )
+    .unwrap();
     let mut out = Vec::new();
-    decoder
-        .rows(ty, data, |c| {
-            out.push(c.into_owned());
-            Ok(())
-        })
-        .unwrap();
+    decode_rows(&mut decoder, ty, data, |c| {
+        out.push(c.into_owned());
+        Ok(())
+    })
+    .unwrap();
     out
 }
 
@@ -66,10 +67,8 @@ fn not_null_columns_reject_null_in_sparse_insert_and_update_images() {
         if insert {
             present[8] = key_columns[8];
         }
-        let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-        decoder
-            .table_map(&table_map(1, &meta, &[3; 80], &[]))
-            .unwrap();
+        let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+        decode_table(&mut decoder, &table_map(1, &meta, &[3; 80], &[])).unwrap();
         for invalid in [true, false] {
             let mut data = Vec::new();
             if !insert {
@@ -97,7 +96,7 @@ fn not_null_columns_reject_null_in_sparse_insert_and_update_images() {
                 &data,
             );
             let mut changes = Vec::new();
-            let result = decoder.rows(ty, &body, |change| {
+            let result = decode_rows(&mut decoder, ty, &body, |change| {
                 changes.push(change.into_owned());
                 Ok(())
             });
@@ -216,10 +215,8 @@ fn sparse_insert_after_column_64_uses_present_columns_and_compact_null_bits() {
     };
     let mut types = vec![3; 80];
     types[69] = 8;
-    let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &meta, &types, &[]))
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    decode_table(&mut decoder, &table_map(1, &meta, &types, &[])).unwrap();
     let mut present = [0; 10];
     for index in [0, 69, 79] {
         present[index / 8] |= 1 << (index % 8);
@@ -233,16 +230,16 @@ fn sparse_insert_after_column_64_uses_present_columns_and_compact_null_bits() {
     data.push(0b101);
     data.extend((-43i64).to_le_bytes());
     let mut out = Vec::new();
-    decoder
-        .rows(
-            WRITE_ROWS_EVENT,
-            &rows(1, WRITE_ROWS_EVENT, 80, &present, &[], &data),
-            |change| {
-                out.push(change.into_owned());
-                Ok(())
-            },
-        )
-        .unwrap();
+    decode_rows(
+        &mut decoder,
+        WRITE_ROWS_EVENT,
+        &rows(1, WRITE_ROWS_EVENT, 80, &present, &[], &data),
+        |change| {
+            out.push(change.into_owned());
+            Ok(())
+        },
+    )
+    .unwrap();
     assert_eq!(out.len(), 2);
     for (change, pk) in out.iter().zip([-42, -43]) {
         assert_eq!(change.operation, Operation::Insert);
@@ -274,8 +271,8 @@ fn every_signed_and_unsigned_integer_width() {
                 table: "keys".into(),
                 columns: vec![col],
             };
-            let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-            decoder.table_map(&table_map(1, &meta, &[ty], &[])).unwrap();
+            let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+            decode_table(&mut decoder, &table_map(1, &meta, &[ty], &[])).unwrap();
             for bytes in [vec![0xff; n], {
                 let mut b = vec![0; n];
                 b[n - 1] = 0x80;
@@ -283,25 +280,25 @@ fn every_signed_and_unsigned_integer_width() {
             }] {
                 let mut data = vec![0];
                 data.extend(&bytes);
-                decoder
-                    .rows(
-                        WRITE_ROWS_EVENT,
-                        &rows(1, WRITE_ROWS_EVENT, 1, &[1], &[], &data),
-                        |c| {
-                            let mut raw = [0; 8];
-                            raw[..n].copy_from_slice(&bytes);
-                            let raw = u64::from_le_bytes(raw);
-                            let expected = if unsigned {
-                                PrimaryKey::Unsigned(raw)
-                            } else {
-                                let shift = (8 - n) * 8;
-                                PrimaryKey::Signed(((raw << shift) as i64) >> shift)
-                            };
-                            assert_eq!(c.pk, expected);
-                            Ok(())
-                        },
-                    )
-                    .unwrap();
+                decode_rows(
+                    &mut decoder,
+                    WRITE_ROWS_EVENT,
+                    &rows(1, WRITE_ROWS_EVENT, 1, &[1], &[], &data),
+                    |c| {
+                        let mut raw = [0; 8];
+                        raw[..n].copy_from_slice(&bytes);
+                        let raw = u64::from_le_bytes(raw);
+                        let expected = if unsigned {
+                            PrimaryKey::Unsigned(raw)
+                        } else {
+                            let shift = (8 - n) * 8;
+                            PrimaryKey::Signed(((raw << shift) as i64) >> shift)
+                        };
+                        assert_eq!(c.pk, expected);
+                        Ok(())
+                    },
+                )
+                .unwrap();
             }
         }
     }
@@ -314,29 +311,28 @@ fn utf8_pk_borrows_payload_and_invalid_utf8_fails() {
     meta.columns[0].nullable = true;
     meta.columns[1].primary_key = true;
     meta.columns[1].nullable = false;
-    let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &meta, &[3, 15, 3], &[100, 0]))
-        .unwrap();
-    decoder
-        .rows(
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    decode_table(&mut decoder, &table_map(1, &meta, &[3, 15, 3], &[100, 0])).unwrap();
+    decode_rows(
+        &mut decoder,
+        DELETE_ROWS_EVENT,
+        &rows(
+            1,
             DELETE_ROWS_EVENT,
-            &rows(
-                1,
-                DELETE_ROWS_EVENT,
-                3,
-                &[2],
-                &[],
-                &[0, 3, b'a', b'b', b'c'],
-            ),
-            |c| {
-                assert!(matches!(c.pk, PrimaryKey::Text(Cow::Borrowed("abc"))));
-                Ok(())
-            },
-        )
-        .unwrap();
+            3,
+            &[2],
+            &[],
+            &[0, 3, b'a', b'b', b'c'],
+        ),
+        |c| {
+            assert!(matches!(c.pk, PrimaryKey::Text(Cow::Borrowed("abc"))));
+            Ok(())
+        },
+    )
+    .unwrap();
     assert!(matches!(
-        decoder.rows(
+        decode_rows(
+            &mut decoder,
             DELETE_ROWS_EVENT,
             &rows(1, DELETE_ROWS_EVENT, 3, &[2], &[], &[0, 1, 0xff]),
             |_| Ok(())
@@ -355,10 +351,8 @@ fn decimal_key_is_exact() {
         table: "money".into(),
         columns: vec![col],
     };
-    let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &meta, &[246], &[10, 2]))
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    decode_table(&mut decoder, &table_map(1, &meta, &[246], &[10, 2])).unwrap();
     // DECIMAL(10,2): one 4-byte integral group + one 1-byte fractional group.
     for (bytes, expected) in [
         ([0x80, 0xbc, 0x61, 0x4e, 0x5a], "12345678.90"),
@@ -366,16 +360,16 @@ fn decimal_key_is_exact() {
     ] {
         let mut data = vec![0];
         data.extend(bytes);
-        decoder
-            .rows(
-                DELETE_ROWS_EVENT,
-                &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &data),
-                |c| {
-                    assert_eq!(c.pk, PrimaryKey::Decimal(expected.into()));
-                    Ok(())
-                },
-            )
-            .unwrap();
+        decode_rows(
+            &mut decoder,
+            DELETE_ROWS_EVENT,
+            &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &data),
+            |c| {
+                assert_eq!(c.pk, PrimaryKey::Decimal(expected.into()));
+                Ok(())
+            },
+        )
+        .unwrap();
     }
 }
 
@@ -389,26 +383,24 @@ fn more_than_64_columns_and_pk_after_nulls() {
         table: "wide".into(),
         columns,
     };
-    let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &meta, &vec![3; 300], &[]))
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    decode_table(&mut decoder, &table_map(1, &meta, &vec![3; 300], &[])).unwrap();
     let mut present = vec![0xff; 38];
     present[37] = 0x0f;
     let mut nulls = vec![0xff; 38];
     nulls[37] &= !(1 << 3);
     nulls.extend((-8i32).to_le_bytes());
-    decoder
-        .rows(
-            WRITE_ROWS_EVENT,
-            &rows(1, WRITE_ROWS_EVENT, 300, &present, &[], &nulls),
-            |c| {
-                assert_eq!(c.pk, PrimaryKey::Signed(-8));
-                assert_eq!(c.changed.len(), 300);
-                Ok(())
-            },
-        )
-        .unwrap();
+    decode_rows(
+        &mut decoder,
+        WRITE_ROWS_EVENT,
+        &rows(1, WRITE_ROWS_EVENT, 300, &present, &[], &nulls),
+        |c| {
+            assert_eq!(c.pk, PrimaryKey::Signed(-8));
+            assert_eq!(c.changed.len(), 300);
+            Ok(())
+        },
+    )
+    .unwrap();
 }
 
 #[test]
@@ -461,45 +453,48 @@ fn skip_mixed_types_before_key_without_decoding_values() {
         table: "mixed".into(),
         columns: cols,
     };
-    let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &meta, &types, &metadata))
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    decode_table(&mut decoder, &table_map(1, &meta, &types, &metadata)).unwrap();
     let mut data = vec![0; 2];
     data.extend(values);
-    decoder
-        .rows(
-            WRITE_ROWS_EVENT,
-            &rows(1, WRITE_ROWS_EVENT, 13, &[0xff, 0x1f], &[], &data),
-            |c| {
-                assert_eq!(c.pk, PrimaryKey::Signed(i64::MIN));
-                Ok(())
-            },
-        )
-        .unwrap();
+    decode_rows(
+        &mut decoder,
+        WRITE_ROWS_EVENT,
+        &rows(1, WRITE_ROWS_EVENT, 13, &[0xff, 0x1f], &[], &data),
+        |c| {
+            assert_eq!(c.pk, PrimaryKey::Signed(i64::MIN));
+            Ok(())
+        },
+    )
+    .unwrap();
 }
 
 #[test]
 fn excluded_table_remap_does_not_reuse_whitelist_handler() {
-    let mut decoder = Decoder::new(vec![basic()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &basic(), &[3, 15, 3], &[100, 0]))
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
+    decode_table(
+        &mut decoder,
+        &table_map(1, &basic(), &[3, 15, 3], &[100, 0]),
+    )
+    .unwrap();
     let mut excluded = basic();
     excluded.schema = "other".into();
-    decoder
-        .table_map(&table_map(1, &excluded, &[255, 255, 255], &[]))
-        .unwrap();
-    decoder
-        .rows(
-            WRITE_ROWS_EVENT,
-            &rows(1, WRITE_ROWS_EVENT, 0, &[], &[], &[0xff]),
-            |_| panic!("excluded table decoded"),
-        )
-        .unwrap();
+    decode_table(
+        &mut decoder,
+        &table_map(1, &excluded, &[255, 255, 255], &[]),
+    )
+    .unwrap();
+    decode_rows(
+        &mut decoder,
+        WRITE_ROWS_EVENT,
+        &rows(1, WRITE_ROWS_EVENT, 0, &[], &[], &[0xff]),
+        |_| panic!("excluded table decoded"),
+    )
+    .unwrap();
     decoder.clear_table_maps();
     assert!(matches!(
-        decoder.rows(
+        decode_rows(
+            &mut decoder,
             WRITE_ROWS_EVENT,
             &rows(1, WRITE_ROWS_EVENT, 0, &[], &[], &[]),
             |_| Ok(())
@@ -510,35 +505,40 @@ fn excluded_table_remap_does_not_reuse_whitelist_handler() {
 
 #[test]
 fn statement_end_clears_maps_and_sink_errors_propagate() {
-    let mut decoder = Decoder::new(vec![basic()]).unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
     let map = table_map(1, &basic(), &[3, 15, 3], &[100, 0]);
-    decoder.table_map(&map).unwrap();
+    decode_table(&mut decoder, &map).unwrap();
     let data = rows(1, DELETE_ROWS_EVENT, 3, &[1], &[], &[0, 1, 0, 0, 0]);
     assert!(matches!(
-        decoder.rows(DELETE_ROWS_EVENT, &data, |_| Err(Error::MissingPrimaryKey)),
+        decode_rows(&mut decoder, DELETE_ROWS_EVENT, &data, |_| Err(
+            Error::MissingPrimaryKey
+        )),
         Err(Error::MissingPrimaryKey)
     ));
     let mut ended = data.clone();
     ended[6] = 1;
-    decoder.rows(DELETE_ROWS_EVENT, &ended, |_| Ok(())).unwrap();
+    decode_rows(&mut decoder, DELETE_ROWS_EVENT, &ended, |_| Ok(())).unwrap();
     assert!(matches!(
-        decoder.rows(DELETE_ROWS_EVENT, &data, |_| Ok(())),
+        decode_rows(&mut decoder, DELETE_ROWS_EVENT, &data, |_| Ok(())),
         Err(Error::MissingTable(1))
     ));
 }
 
 #[test]
 fn missing_null_pk_and_full_images_fail() {
-    assert!(Decoder::new(vec![]).is_err());
+    assert!(Decoder::<mysql_canal::Minimal>::new(vec![]).is_err());
     let mut composite = basic();
     composite.columns[2].primary_key = true;
-    assert!(Decoder::new(vec![composite]).is_err());
-    let mut decoder = Decoder::new(vec![basic()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &basic(), &[3, 15, 3], &[100, 0]))
-        .unwrap();
+    assert!(Decoder::<mysql_canal::Minimal>::new(vec![composite]).is_err());
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
+    decode_table(
+        &mut decoder,
+        &table_map(1, &basic(), &[3, 15, 3], &[100, 0]),
+    )
+    .unwrap();
     assert!(matches!(
-        decoder.rows(
+        decode_rows(
+            &mut decoder,
             DELETE_ROWS_EVENT,
             &rows(1, DELETE_ROWS_EVENT, 3, &[1], &[], &[1]),
             |_| Ok(())
@@ -546,22 +546,22 @@ fn missing_null_pk_and_full_images_fail() {
         Err(Error::MissingPrimaryKey)
     ));
     assert!(
-        decoder
-            .rows(
-                DELETE_ROWS_EVENT,
-                &rows(1, DELETE_ROWS_EVENT, 3, &[2], &[], &[0, 0]),
-                |_| Ok(())
-            )
-            .is_err()
+        decode_rows(
+            &mut decoder,
+            DELETE_ROWS_EVENT,
+            &rows(1, DELETE_ROWS_EVENT, 3, &[2], &[], &[0, 0]),
+            |_| Ok(())
+        )
+        .is_err()
     );
     assert!(
-        decoder
-            .rows(
-                UPDATE_ROWS_EVENT,
-                &rows(1, UPDATE_ROWS_EVENT, 3, &[7], &[7], &[0]),
-                |_| Ok(())
-            )
-            .is_err()
+        decode_rows(
+            &mut decoder,
+            UPDATE_ROWS_EVENT,
+            &rows(1, UPDATE_ROWS_EVENT, 3, &[7], &[7], &[0]),
+            |_| Ok(())
+        )
+        .is_err()
     );
 }
 
@@ -569,28 +569,28 @@ fn missing_null_pk_and_full_images_fail() {
 fn truncated_data_and_schema_mismatch_are_errors() {
     let map = table_map(1, &basic(), &[3, 15, 3], &[100, 0]);
     for len in 0..map.len() {
-        let mut decoder = Decoder::new(vec![basic()]).unwrap();
-        assert!(decoder.table_map(&map[..len]).is_err());
+        let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
+        assert!(decode_table(&mut decoder, &map[..len]).is_err());
     }
-    let mut decoder = Decoder::new(vec![basic()]).unwrap();
-    decoder.table_map(&map).unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
+    decode_table(&mut decoder, &map).unwrap();
     let data = rows(1, DELETE_ROWS_EVENT, 3, &[1], &[], &[0, 1, 0, 0, 0]);
     for len in 0..data.len() {
-        assert!(
-            decoder
-                .rows(DELETE_ROWS_EVENT, &data[..len], |_| Ok(()))
-                .is_err()
-        );
+        assert!(decode_rows(&mut decoder, DELETE_ROWS_EVENT, &data[..len], |_| Ok(())).is_err());
     }
     assert!(
-        decoder
-            .table_map(&table_map(1, &basic(), &[8, 15, 3], &[100, 0]))
-            .is_err()
+        decode_table(
+            &mut decoder,
+            &table_map(1, &basic(), &[8, 15, 3], &[100, 0])
+        )
+        .is_err()
     );
     assert!(
-        decoder
-            .table_map(&table_map(1, &basic(), &[3, 15, 3], &[101, 0]))
-            .is_err()
+        decode_table(
+            &mut decoder,
+            &table_map(1, &basic(), &[3, 15, 3], &[101, 0])
+        )
+        .is_err()
     );
 }
 
@@ -607,9 +607,9 @@ fn malformed_inputs_do_not_panic() {
                     seed as u8
                 })
                 .collect();
-            let mut decoder = Decoder::new(vec![basic()]).unwrap();
-            let _ = decoder.table_map(&data);
-            let _ = decoder.rows(UPDATE_ROWS_EVENT, &data, |_| Ok(()));
+            let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
+            let _ = decode_table(&mut decoder, &data);
+            let _ = decode_rows(&mut decoder, UPDATE_ROWS_EVENT, &data, |_| Ok(()));
         }
     }
 }
@@ -629,28 +629,26 @@ fn char_latin1_ascii_and_two_byte_string_prefix() {
             table: "keys".into(),
             columns: vec![key],
         };
-        let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
+        let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
         let (wire, metadata) = if ty == "char" {
             (254, [0xee, 0x2c])
         } else {
             (15, [0x2c, 1])
         };
-        decoder
-            .table_map(&table_map(1, &meta, &[wire], &metadata))
-            .unwrap();
+        decode_table(&mut decoder, &table_map(1, &meta, &[wire], &metadata)).unwrap();
         let mut data = vec![0];
         data.extend((bytes.len() as u16).to_le_bytes());
         data.extend(bytes);
-        decoder
-            .rows(
-                DELETE_ROWS_EVENT,
-                &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &data),
-                |c| {
-                    assert_eq!(c.pk, PrimaryKey::Text(expected.into()));
-                    Ok(())
-                },
-            )
-            .unwrap();
+        decode_rows(
+            &mut decoder,
+            DELETE_ROWS_EVENT,
+            &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &data),
+            |c| {
+                assert_eq!(c.pk, PrimaryKey::Text(expected.into()));
+                Ok(())
+            },
+        )
+        .unwrap();
     }
 }
 
@@ -679,35 +677,37 @@ fn decimal_groups_fractional_only_large_values_and_invalid_groups() {
             .unwrap()
             .write_bin(&mut packed)
             .unwrap();
-        let mut decoder = Decoder::new(vec![meta.clone()]).unwrap();
-        decoder
-            .table_map(&table_map(
+        let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+        decode_table(
+            &mut decoder,
+            &table_map(
                 1,
                 &meta,
                 &[246],
                 &[(int.len() + frac.len()) as u8, frac.len() as u8],
-            ))
-            .unwrap();
-        decoder
-            .rows(
-                DELETE_ROWS_EVENT,
-                &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &packed),
-                |c| {
-                    assert_eq!(c.pk, PrimaryKey::Decimal(text.into()));
-                    Ok(())
-                },
-            )
-            .unwrap();
+            ),
+        )
+        .unwrap();
+        decode_rows(
+            &mut decoder,
+            DELETE_ROWS_EVENT,
+            &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &packed),
+            |c| {
+                assert_eq!(c.pk, PrimaryKey::Decimal(text.into()));
+                Ok(())
+            },
+        )
+        .unwrap();
         let mut invalid = vec![0xff; packed.len()];
         invalid[0] = 0;
         assert!(
-            decoder
-                .rows(
-                    DELETE_ROWS_EVENT,
-                    &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &invalid),
-                    |_| Ok(())
-                )
-                .is_err()
+            decode_rows(
+                &mut decoder,
+                DELETE_ROWS_EVENT,
+                &rows(1, DELETE_ROWS_EVENT, 1, &[1], &[], &invalid),
+                |_| Ok(())
+            )
+            .is_err()
         );
     }
 }
@@ -725,7 +725,6 @@ fn full_image(id: i32, name: Option<&str>, age: i32) -> Vec<u8> {
 
 #[test]
 fn full_v1_v2_images_preserve_operations_keys_nulls_and_shared_changed_fields() {
-    use mysql_canal::config::RowImageMode;
     for ty in [
         WRITE_ROWS_EVENT_V1,
         WRITE_ROWS_EVENT,
@@ -743,17 +742,23 @@ fn full_v1_v2_images_preserve_operations_keys_nulls_and_shared_changed_fields() 
                 data.extend(full_image(if id == 1 { 10 } else { id }, None, 20));
             }
         }
-        let mut decoder = Decoder::with_row_image(vec![basic()], RowImageMode::Full).unwrap();
-        decoder
-            .table_map(&table_map(7, &basic(), &[3, 15, 3], &[100, 0]))
-            .unwrap();
+        let mut decoder = Decoder::<mysql_canal::Full>::new(vec![basic()]).unwrap();
+        decode_table(
+            &mut decoder,
+            &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+        )
+        .unwrap();
         let mut out = Vec::new();
-        decoder
-            .rows(ty, &rows(7, ty, 3, &[0xff], &[0xff], &data), |c| {
+        decode_rows(
+            &mut decoder,
+            ty,
+            &rows(7, ty, 3, &[0xff], &[0xff], &data),
+            |c| {
                 out.push(c.into_owned());
                 Ok(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].pk, PrimaryKey::Signed(if update { 10 } else { 1 }));
         assert_eq!(out[0].previous_pk, update.then_some(PrimaryKey::Signed(1)));
@@ -794,12 +799,24 @@ fn image_policies_reject_mismatched_bitmaps_before_emitting() {
         (RowImageMode::Full, UPDATE_ROWS_EVENT, 1, 7),
         (RowImageMode::Full, UPDATE_ROWS_EVENT, 7, 2),
     ] {
-        let mut decoder = Decoder::with_row_image(vec![basic()], mode).unwrap();
-        decoder
-            .table_map(&table_map(7, &basic(), &[3, 15, 3], &[100, 0]))
-            .unwrap();
+        let mut decoder = match mode {
+            RowImageMode::Minimal => {
+                Box::new(Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap())
+                    as Box<dyn RowDecoder>
+            }
+            RowImageMode::Full => {
+                Box::new(Decoder::<mysql_canal::Full>::new(vec![basic()]).unwrap())
+                    as Box<dyn RowDecoder>
+            }
+        };
+        decode_table(
+            decoder.as_mut(),
+            &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+        )
+        .unwrap();
         let mut emitted = 0;
-        let result = decoder.rows(
+        let result = decode_rows(
+            decoder.as_mut(),
             ty,
             &rows(7, ty, 3, &[first], &[second], &full_image(1, None, 20)),
             |_| {
@@ -817,7 +834,6 @@ fn image_policies_reject_mismatched_bitmaps_before_emitting() {
 
 #[test]
 fn full_images_validate_null_constraints_in_both_images_and_truncated_values() {
-    use mysql_canal::config::RowImageMode;
     let mut meta = basic();
     meta.columns[2].nullable = false;
     for (before, after, missing_pk) in [
@@ -841,11 +857,10 @@ fn full_images_validate_null_constraints_in_both_images_and_truncated_values() {
             valid.clone()
         };
         values.extend(if after { invalid } else { valid });
-        let mut decoder = Decoder::with_row_image(vec![meta.clone()], RowImageMode::Full).unwrap();
-        decoder
-            .table_map(&table_map(7, &meta, &[3, 15, 3], &[100, 0]))
-            .unwrap();
-        let result = decoder.rows(
+        let mut decoder = Decoder::<mysql_canal::Full>::new(vec![meta.clone()]).unwrap();
+        decode_table(&mut decoder, &table_map(7, &meta, &[3, 15, 3], &[100, 0])).unwrap();
+        let result = decode_rows(
+            &mut decoder,
             UPDATE_ROWS_EVENT,
             &rows(7, UPDATE_ROWS_EVENT, 3, &[7], &[7], &values),
             |_| panic!("invalid row emitted"),
@@ -858,11 +873,10 @@ fn full_images_validate_null_constraints_in_both_images_and_truncated_values() {
     }
     let values = full_image(1, Some("abc"), 20);
     for len in 0..values.len() {
-        let mut decoder = Decoder::with_row_image(vec![meta.clone()], RowImageMode::Full).unwrap();
-        decoder
-            .table_map(&table_map(7, &meta, &[3, 15, 3], &[100, 0]))
-            .unwrap();
-        let result = decoder.rows(
+        let mut decoder = Decoder::<mysql_canal::Full>::new(vec![meta.clone()]).unwrap();
+        decode_table(&mut decoder, &table_map(7, &meta, &[3, 15, 3], &[100, 0])).unwrap();
+        let result = decode_rows(
+            &mut decoder,
             WRITE_ROWS_EVENT,
             &rows(7, WRITE_ROWS_EVENT, 3, &[7], &[], &values[..len]),
             |_| panic!("truncated row emitted"),
@@ -877,7 +891,6 @@ fn full_images_validate_null_constraints_in_both_images_and_truncated_values() {
 
 #[test]
 fn full_wide_images_keep_late_primary_keys_and_null_bitmap_ordinals() {
-    use mysql_canal::config::RowImageMode;
     let meta = mysql_canal::TableMeta {
         schema: "app".into(),
         table: "wide".into(),
@@ -892,32 +905,30 @@ fn full_wide_images_keep_late_primary_keys_and_null_bitmap_ordinals() {
         data.extend(nulls);
         data.extend(pk.to_le_bytes());
     }
-    let mut decoder = Decoder::with_row_image(vec![meta.clone()], RowImageMode::Full).unwrap();
-    decoder
-        .table_map(&table_map(7, &meta, &[3; 80], &[]))
-        .unwrap();
-    decoder
-        .rows(
-            UPDATE_ROWS_EVENT,
-            &rows(7, UPDATE_ROWS_EVENT, 80, &[0xff; 10], &[0xff; 10], &data),
-            |change| {
-                assert_eq!(change.pk, PrimaryKey::Signed(43));
-                assert_eq!(change.previous_pk, Some(PrimaryKey::Signed(42)));
-                assert_eq!(change.changed.as_ref(), &(0..80).collect::<Vec<u16>>());
-                Ok(())
-            },
-        )
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Full>::new(vec![meta.clone()]).unwrap();
+    decode_table(&mut decoder, &table_map(7, &meta, &[3; 80], &[])).unwrap();
+    decode_rows(
+        &mut decoder,
+        UPDATE_ROWS_EVENT,
+        &rows(7, UPDATE_ROWS_EVENT, 80, &[0xff; 10], &[0xff; 10], &data),
+        |change| {
+            assert_eq!(change.pk, PrimaryKey::Signed(43));
+            assert_eq!(change.previous_pk, Some(PrimaryKey::Signed(42)));
+            assert_eq!(change.changed.as_ref(), &(0..80).collect::<Vec<u16>>());
+            Ok(())
+        },
+    )
+    .unwrap();
 }
 
 #[test]
 fn statically_selected_decoders_validate_mode_before_emitting() {
     use mysql_canal::{Full, Minimal};
     let mapping = table_map(7, &basic(), &[3, 15, 3], &[100, 0]);
-    let mut full = Decoder::<Full>::for_mode(vec![basic()]).unwrap();
-    let mut minimal = Decoder::<Minimal>::for_mode(vec![basic()]).unwrap();
-    full.table_map(&mapping).unwrap();
-    minimal.table_map(&mapping).unwrap();
+    let mut full = Decoder::<Full>::new(vec![basic()]).unwrap();
+    let mut minimal = Decoder::<Minimal>::new(vec![basic()]).unwrap();
+    decode_table(&mut full, &mapping).unwrap();
+    decode_table(&mut minimal, &mapping).unwrap();
     let sparse = rows(
         7,
         UPDATE_ROWS_EVENT,
@@ -928,15 +939,14 @@ fn statically_selected_decoders_validate_mode_before_emitting() {
     );
     let mut emitted = Vec::new();
     assert!(
-        matches!(full.rows(UPDATE_ROWS_EVENT, &sparse, |_| panic!("invalid FULL cannot emit")),
+        matches!(decode_rows(&mut full, UPDATE_ROWS_EVENT, &sparse, |_| panic!("invalid FULL cannot emit")),
         Err(Error::Unsupported(message)) if message == "expected FULL row images containing every column")
     );
-    minimal
-        .rows(UPDATE_ROWS_EVENT, &sparse, |change| {
-            emitted.push(change.into_owned());
-            Ok(())
-        })
-        .unwrap();
+    decode_rows(&mut minimal, UPDATE_ROWS_EVENT, &sparse, |change| {
+        emitted.push(change.into_owned());
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(emitted.len(), 1);
     assert_eq!(emitted[0].pk, PrimaryKey::Signed(42));
     assert_eq!(emitted[0].changed_names().collect::<Vec<_>>(), ["age"]);
@@ -950,11 +960,11 @@ fn statically_selected_decoders_validate_mode_before_emitting() {
     values.extend(30i32.to_le_bytes());
     let complete = rows(7, UPDATE_ROWS_EVENT, 3, &[7], &[7], &values);
     assert!(
-        matches!(minimal.rows(UPDATE_ROWS_EVENT, &complete, |_| panic!("invalid MINIMAL cannot emit")),
+        matches!(decode_rows(&mut minimal, UPDATE_ROWS_EVENT, &complete, |_| panic!("invalid MINIMAL cannot emit")),
         Err(Error::Unsupported(message)) if message == "expected MINIMAL before image containing only the primary key")
     );
     emitted.clear();
-    full.rows(UPDATE_ROWS_EVENT, &complete, |change| {
+    decode_rows(&mut full, UPDATE_ROWS_EVENT, &complete, |change| {
         emitted.push(change.into_owned());
         Ok(())
     })

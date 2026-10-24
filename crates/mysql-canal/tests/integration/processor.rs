@@ -28,11 +28,19 @@ fn feed(
             log_pos: pos,
             data,
         },
-        out,
+        &mysql_canal::sink::JsonLinesSink::new(out),
     )
 }
 fn setup() -> Processor {
-    Processor::new(state(), None, 1024 * 1024).unwrap()
+    Processor::new(
+        state(),
+        None,
+        1024 * 1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap()
 }
 fn start(p: &mut Processor, out: &mut (impl Write + Send)) {
     feed(p, FORMAT_DESCRIPTION_EVENT, 100, &format(), out).unwrap();
@@ -110,7 +118,7 @@ fn incomplete_transaction_and_unsupported_events_stop() {
             log_pos: 300,
             data: &[],
         },
-        &mut out,
+        &mysql_canal::sink::JsonLinesSink::new(&mut out),
     )
     .unwrap();
 }
@@ -143,7 +151,15 @@ fn checkpoint_requires_complete_nonempty_source_identity() {
 fn ddl_reports_statement_without_advancing_saved_checkpoint() {
     let path = temporary("ddl");
     state().save(&path).unwrap();
-    let mut p = Processor::new(state(), Some(path.clone()), 1024 * 1024).unwrap();
+    let mut p = Processor::new(
+        state(),
+        Some(path.clone()),
+        1024 * 1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut out = Vec::new();
     start(&mut p, &mut out);
     feed(&mut p, XID_EVENT, 300, &[0; 8], &mut out).unwrap();
@@ -179,12 +195,28 @@ impl Write for FailFlush {
 fn checkpoint_only_after_successful_output_flush() {
     let path = temporary("flush");
     state().save(&path).unwrap();
-    let mut p = Processor::new(state(), Some(path.clone()), 1024 * 1024).unwrap();
+    let mut p = Processor::new(
+        state(),
+        Some(path.clone()),
+        1024 * 1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut out = Vec::new();
     start(&mut p, &mut out);
     assert!(feed(&mut p, XID_EVENT, 300, &[0; 8], &mut FailFlush).is_err());
     assert_eq!(State::read(&path).unwrap().position, 4);
-    let mut p = Processor::new(state(), Some(path.clone()), 1024 * 1024).unwrap();
+    let mut p = Processor::new(
+        state(),
+        Some(path.clone()),
+        1024 * 1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     start(&mut p, &mut out);
     feed(&mut p, XID_EVENT, 300, &[0; 8], &mut out).unwrap();
     assert_eq!(State::read(&path).unwrap().position, 300);
@@ -197,7 +229,15 @@ fn null_in_not_null_column_stops_without_output_or_checkpoint_advance() {
     let mut initial = state();
     initial.tables[0].columns[2].nullable = false;
     initial.save(&path).unwrap();
-    let mut p = Processor::new(initial.clone(), Some(path.clone()), 1024 * 1024).unwrap();
+    let mut p = Processor::new(
+        initial.clone(),
+        Some(path.clone()),
+        1024 * 1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut out = Vec::new();
     feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &format(), &mut out).unwrap();
     feed(&mut p, QUERY_EVENT, 150, &query("BEGIN"), &mut out).unwrap();
@@ -236,7 +276,15 @@ fn default_adapter_rejects_unvalidated_rotate_headers_without_saving_state() {
     for length in [0, 7, 9, 12, 255] {
         let mut fde = format();
         fde[57 + usize::from(ROTATE_EVENT) - 1] = length;
-        let mut p = Processor::new(initial.clone(), Some(path.clone()), 1024 * 1024).unwrap();
+        let mut p = Processor::new(
+            initial.clone(),
+            Some(path.clone()),
+            1024 * 1024,
+            mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+            None,
+            mysql_canal::config::RowImageMode::Minimal,
+        )
+        .unwrap();
         let mut out = Vec::new();
         let result = feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &fde, &mut out);
         assert!(
@@ -278,7 +326,15 @@ fn rotation_changes_file_and_invalidates_maps() {
 
 #[test]
 fn transaction_budget_is_enforced_before_output() {
-    let mut p = Processor::new(state(), None, 1).unwrap();
+    let mut p = Processor::new(
+        state(),
+        None,
+        1,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut out = Vec::new();
     feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &format(), &mut out).unwrap();
     feed(&mut p, QUERY_EVENT, 150, &query("BEGIN"), &mut out).unwrap();
@@ -372,7 +428,7 @@ fn full_transactions_commit_and_resume_but_mismatches_do_not_advance_disk_state(
     let initial = state();
     initial.save(&path).unwrap();
     let mut output = Vec::new();
-    let mut processor = Processor::with_row_image(
+    let mut processor = Processor::new(
         initial,
         Some(path.clone()),
         100_000,
@@ -423,7 +479,7 @@ fn full_transactions_commit_and_resume_but_mismatches_do_not_advance_disk_state(
         serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
         serde_json::json!({"source":"test", "schema":"app", "table":"users", "operation":"insert", "pk":{"type":"signed", "value":42}, "changed":["id","name","age"]})
     );
-    let mut resumed = Processor::with_row_image(
+    let mut resumed = Processor::new(
         State::read(&path).unwrap(),
         Some(path.clone()),
         100_000,

@@ -18,7 +18,13 @@ fn main() {
         .resolve(&format.server, None)
         .unwrap();
     let parser = adapter.create_event_parser(&format).unwrap();
-    let mut decoder = adapter.create_decoder(vec![basic()], &format).unwrap();
+    let mut decoder = adapter
+        .create_decoder(
+            vec![basic()],
+            &format,
+            mysql_canal::config::RowImageMode::Minimal,
+        )
+        .unwrap();
     let map = table_map(1, &basic(), &[3, 15, 3], &[100, 0]);
     let ParsedEvent::TableMap(table) = parser
         .parse(EventView {

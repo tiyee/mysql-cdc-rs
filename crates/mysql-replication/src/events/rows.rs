@@ -1,17 +1,16 @@
-use super::{BinlogMode, Event, Unspecified};
+use super::{BinlogMode, Event, Minimal};
 use crate::{Result, error::invalid, wire::Cursor};
 use std::{io::Write, marker::PhantomData};
 
 mod decoder;
+mod metadata;
 mod typed;
 mod value;
 
-pub use decoder::{ColumnDefinition, Row, RowField, RowFields, RowImage, Rows, RowsDecoder};
+pub use decoder::{ColumnDefinition, Fields, RowImage, RowsDecoder};
+pub use metadata::{ColumnInfo, TableDefinition};
 pub use mysql_common::constants::ColumnType;
-pub use typed::{
-    CompleteImage, Full, ImageMode, Minimal, SparseImage, TypedRow, TypedRows, TypedRowsDecoder,
-    TypedRowsEvent,
-};
+pub use typed::{CompleteImage, Field, Row, RowOperation, Rows, SparseImage};
 pub use value::{DecimalValue, IntegerValue, RowValue};
 
 /// Protocol operation, independent from a CDC change or table whitelist.
@@ -22,12 +21,12 @@ pub enum RowsKind {
     Delete,
 }
 
-/// A ROWS body with the same public wire fields for every mode.
-/// `Minimal` rows expose sparse images; `Full` rows expose complete images.
-/// These decoded image types are obtained through `rows`, not stored as
-/// additional public fields on this envelope.
-#[derive(Debug, Clone, Copy)]
-pub struct RowsEvent<'a, M: BinlogMode = Unspecified> {
+/// A borrowed ROWS body. Typed parsers bind its historical TABLE_MAP plan.
+/// `Minimal::Image` is sparse and `Full::Image` is complete; `rows()` selects
+/// these types statically without an external decoder registry. Raw
+/// frames and views remain available for custom adapters.
+#[derive(Debug, Clone)]
+pub struct RowsEvent<'a, M: BinlogMode> {
     /// TABLE_MAP identifier, independent from the common header's server ID.
     pub table_id: u64,
     /// ROWS-body flags, independent from the common header's flags.
@@ -37,23 +36,14 @@ pub struct RowsEvent<'a, M: BinlogMode = Unspecified> {
     pub encoded_images: &'a [u8],
     pub(crate) post_header: usize,
     pub(crate) v2: bool,
+    pub(crate) decoder: Option<std::sync::Arc<RowsDecoder<M>>>,
     mode: PhantomData<M>,
 }
-impl<'a> RowsEvent<'a> {
-    pub fn with_layout(kind: RowsKind, post_header: usize, v2: bool) -> Self {
-        Self::for_mode(kind, post_header, v2)
-    }
-    /// Decodes row boundaries using a previously compiled TABLE_MAP layout.
-    pub fn rows(&self, decoder: &RowsDecoder) -> Result<Rows<'a>> {
-        decoder.rows(self)
-    }
-    /// Selects an image policy explicitly for an unclassified wire event.
-    pub fn with_mode<M: ImageMode>(&self, decoder: &RowsDecoder) -> Result<TypedRowsEvent<'a, M>> {
-        TypedRowsEvent::new(*self, decoder)
-    }
-}
 impl<'a, M: BinlogMode> RowsEvent<'a, M> {
-    pub(crate) fn for_mode(kind: RowsKind, post_header: usize, v2: bool) -> Self {
+    pub(crate) fn is_statement_end(&self) -> bool {
+        self.table_id == 0x00ff_ffff && self.flags & 1 != 0
+    }
+    pub fn with_layout(kind: RowsKind, post_header: usize, v2: bool) -> Self {
         Self {
             table_id: 0,
             flags: 0,
@@ -61,6 +51,7 @@ impl<'a, M: BinlogMode> RowsEvent<'a, M> {
             encoded_images: &[],
             post_header,
             v2,
+            decoder: None,
             mode: PhantomData,
         }
     }
@@ -96,25 +87,62 @@ impl<'a, M: BinlogMode> RowsEvent<'a, M> {
         M::validate_images(&images)?;
         Ok(images)
     }
+}
 
-    pub(crate) fn unclassified(&self) -> RowsEvent<'a> {
-        RowsEvent {
-            table_id: self.table_id,
-            flags: self.flags,
-            kind: self.kind,
-            encoded_images: self.encoded_images,
-            post_header: self.post_header,
-            v2: self.v2,
-            mode: PhantomData,
-        }
+/// A statement-end sentinel with no TABLE_MAP or row images.
+#[derive(Debug, Clone)]
+pub struct RowsStatementEndEvent<'a> {
+    event: RowsEvent<'a, Minimal>,
+}
+impl<'a> RowsStatementEndEvent<'a> {
+    pub(crate) fn new(event: RowsEvent<'a, Minimal>) -> Self {
+        Self { event }
+    }
+    pub fn table_id(&self) -> u64 {
+        self.event.table_id
+    }
+    pub fn flags(&self) -> u16 {
+        self.event.flags
+    }
+    pub fn kind(&self) -> RowsKind {
+        self.event.kind
+    }
+    pub(crate) fn layout(&self) -> RowsStatementEndEvent<'static> {
+        RowsStatementEndEvent::new(RowsEvent::with_layout(
+            self.event.kind,
+            self.event.post_header,
+            self.event.v2,
+        ))
     }
 }
-impl<'a, M: ImageMode> RowsEvent<'a, M> {
-    /// Returns sparse or complete image types selected by the event's policy.
-    pub fn rows(&self, decoder: &RowsDecoder) -> Result<TypedRows<'a, M>> {
-        self.unclassified()
-            .with_mode::<M>(decoder)
-            .map(TypedRowsEvent::rows)
+impl<'a> Event<'a> for RowsStatementEndEvent<'a> {
+    fn decode(&mut self, data: &'a [u8]) -> Result<()> {
+        self.event.decode(data)?;
+        if !self.event.is_statement_end() {
+            return Err(invalid("invalid ROWS statement-end sentinel"));
+        }
+        Ok(())
+    }
+    fn dump(&self, writer: &mut dyn Write) -> Result<()> {
+        self.event.dump(writer)
+    }
+}
+impl<'a, M: BinlogMode> RowsEvent<'a, M> {
+    /// The TABLE_MAP definition bound by this mode's parser.
+    pub fn table(&self) -> Result<&TableDefinition> {
+        Ok(self.bound_decoder()?.table())
+    }
+    pub fn columns(&self) -> Result<&[ColumnInfo]> {
+        Ok(&self.table()?.columns)
+    }
+    fn bound_decoder(&self) -> Result<&RowsDecoder<M>> {
+        self.decoder
+            .as_deref()
+            .ok_or_else(|| invalid("ROWS without bound TABLE_MAP"))
+    }
+    /// Returns sparse or complete images without an external decoder registry.
+    pub fn rows(&self) -> Result<Rows<'a, M>> {
+        self.bound_decoder()?.rows(self)
     }
 }
 impl<'a, M: BinlogMode> Event<'a> for RowsEvent<'a, M> {

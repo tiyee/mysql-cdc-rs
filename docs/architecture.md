@@ -16,6 +16,8 @@ mysql-cdc turns changes recorded in MySQL logs into notifications an application
 
 Dependencies run from consumer to provider: **Pikachu → mysql-canal → mysql-replication**. `mysql-cdc-rs` is a unified Rust library entry point for both libraries; it adds no processing stage. The complete system is named **mysql-cdc**.
 
+The aggregate exposes only the `canal` and `replication` modules. `canal::Canal::new` owns configured consumption, handlers and checkpoints; replication readers and streams own raw event consumption. Configuration and errors stay with their owning module.
+
 ## How an update reaches an application
 
 Suppose an application changes record 42 in `app.users` to the name Bob:

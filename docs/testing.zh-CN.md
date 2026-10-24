@@ -18,7 +18,9 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 
 ## 合成测试
 
-默认测试包括事件结构适配与零拷贝、多来源线程隔离、相同 table_id 不同列序、来源身份绑定、独立位点、输出失败、版本系列选择、旧文件重选适配器、自定义事件/行解码器与注册冲突；并使用独立构造的协议字节覆盖符号扩展、稀疏 NULL、多行与主键变更、长 CHAR、多种跳读类型、超过 64 列、table_id 复用、截断、CRC32/NONE、事务可见性、位点保存顺序与文件锁。已注册的 `decode_typed_rows` 示例测试随每个 Rust CI 目标执行，校验默认/显式模式参数、完整操作输出、拒绝稀疏输入、表映射重用与边界清理、截断 UPDATE 及输出失败。编译失败文档测试验证模式类型隔离与镜像借用生命周期。它们不是 mysqlbinlog 导出的实库 fixture。
+默认测试包括事件结构适配与零拷贝、多来源线程隔离、相同 table_id 不同列序、来源身份绑定、独立位点、输出失败、版本系列选择、旧文件重选适配器、自定义事件/行解码器与注册冲突；并使用独立构造的协议字节覆盖符号扩展、稀疏 NULL、多行与主键变更、长 CHAR、多种跳读类型、超过 64 列、table_id 复用、截断、CRC32/NONE、事务可见性、位点保存顺序与文件锁。已注册的 `decode_rows` 示例测试随每个 Rust CI 目标执行，校验默认/显式模式参数、完整操作输出、拒绝稀疏输入、表映射重用与边界清理、截断 UPDATE 及输出失败。编译失败文档测试验证模式类型隔离与镜像借用生命周期。它们不是 mysqlbinlog 导出的实库 fixture。
+
+携带字段的泛型事件回归独立构造 TABLE_MAP 可选 TLV 和 ROWS 字节，覆盖列名、MSB 优先符号位图、紧凑字符列 collation 索引、主键前缀、未知/畸形元数据、未记录/NULL 字段、owned 视图保留历史定义、重映射和来源隔离。原始实库行场景还会将泛型 `next_event()` 的自动绑定结果与现有手动解码器逐项比较。
 
 ## 专用 MySQL 测试
 
@@ -71,7 +73,7 @@ cargo test -p pikachu --test mysql_live --locked -- --ignored --nocapture --test
 
 这些场景必须串行执行：fixture 创建/删除数据库会产生 DDL，而 CDC 对任何来源的 DDL 都会停止。每个 fixture 有独立 schema、复制 ID 和临时 state，结束或断言失败时尝试清理数据库与状态目录。
 
-替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql-compatibility.yml` 在每个版本上运行三包全部 19 个场景，分别使用 MINIMAL 和 FULL 模式，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选 CDC 适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
+替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql.yml` 在每个版本上运行三包全部 19 个场景，分别使用 MINIMAL 和 FULL 模式，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选 CDC 适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
 
 ## 按模块验证
 

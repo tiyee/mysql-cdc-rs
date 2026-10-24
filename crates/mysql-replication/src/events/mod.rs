@@ -15,11 +15,11 @@ pub use control::{
 };
 pub use gtid::{GtidEvent, TaggedGtidEvent};
 pub use header::EventHeader;
-pub use mode::{BinlogMode, Unspecified};
+pub use mode::{BinlogMode, Full, Minimal};
 pub use rows::{
-    ColumnDefinition, ColumnType, CompleteImage, DecimalValue, Full, ImageMode, IntegerValue,
-    Minimal, Row, RowField, RowFields, RowImage, RowImages, RowValue, Rows, RowsDecoder, RowsEvent,
-    RowsKind, SparseImage, TypedRow, TypedRows, TypedRowsDecoder, TypedRowsEvent,
+    ColumnDefinition, ColumnInfo, ColumnType, CompleteImage, DecimalValue, Field, Fields,
+    IntegerValue, Row, RowImage, RowImages, RowOperation, RowValue, Rows, RowsDecoder, RowsEvent,
+    RowsKind, RowsStatementEndEvent, SparseImage, TableDefinition,
 };
 use std::{fmt::Debug, io::Write};
 pub use table_map::{TableColumns, TableMapEvent};
@@ -57,12 +57,13 @@ impl<'a> Event<'a> for RawEvent<'a> {
 /// and exposes mode-specific decoded row-image types.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum EventData<'a, M: BinlogMode = Unspecified> {
+pub enum EventData<'a, M: BinlogMode> {
     FormatDescription(FormatDescriptionEvent<'a>),
     Rotate(RotateEvent<'a>),
     Query(QueryEvent<'a>),
     TableMap(TableMapEvent<'a>),
     Rows(RowsEvent<'a, M>),
+    RowsStatementEnd(RowsStatementEndEvent<'a>),
     Xid(XidEvent),
     Gtid(GtidEvent),
     AnonymousGtid(GtidEvent),
@@ -80,6 +81,7 @@ impl<'a, M: BinlogMode> Event<'a> for EventData<'a, M> {
             Self::Query(event) => event.dump(writer),
             Self::TableMap(event) => event.dump(writer),
             Self::Rows(event) => event.dump(writer),
+            Self::RowsStatementEnd(event) => event.dump(writer),
             Self::Xid(event) => event.dump(writer),
             Self::TaggedGtid(event) => event.dump(writer),
             Self::PreviousGtids(event) => event.dump(writer),
@@ -96,6 +98,7 @@ impl<'a, M: BinlogMode> Event<'a> for EventData<'a, M> {
             Self::Query(v) => v.decode(data),
             Self::TableMap(v) => v.decode(data),
             Self::Rows(v) => v.decode(data),
+            Self::RowsStatementEnd(v) => v.decode(data),
             Self::Xid(v) => v.decode(data),
             Self::Gtid(v) | Self::AnonymousGtid(v) => v.decode(data),
             Self::TaggedGtid(v) => v.decode(data),
@@ -118,7 +121,12 @@ impl<M: BinlogMode> EventData<'_, M> {
             Self::TableMap(v) => {
                 EventData::TableMap(TableMapEvent::with_post_header(v.post_header))
             }
-            Self::Rows(v) => EventData::Rows(RowsEvent::for_mode(v.kind, v.post_header, v.v2)),
+            Self::Rows(v) => {
+                let mut rows = RowsEvent::with_layout(v.kind, v.post_header, v.v2);
+                rows.decoder = v.decoder.clone();
+                EventData::Rows(rows)
+            }
+            Self::RowsStatementEnd(v) => EventData::RowsStatementEnd(v.layout()),
             Self::Xid(_) => EventData::Xid(Default::default()),
             Self::Gtid(_) => EventData::Gtid(Default::default()),
             Self::AnonymousGtid(_) => EventData::AnonymousGtid(Default::default()),

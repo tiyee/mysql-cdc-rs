@@ -14,11 +14,11 @@ mysql-canal = { path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
 ```
 
 ```rust,no_run
-use mysql_canal::{Cdc, CommittedTransaction, Result, config::AppConfig};
+use mysql_canal::{Canal, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let mut canal = Cdc::new(AppConfig::read(Path::new("canal.toml"))?)?;
+    let mut canal = Canal::new(AppConfig::read(Path::new("canal.toml"))?)?;
     canal.add_handle(|event: CommittedTransaction<'_>| {
         for change in event.changes {
             println!("{} {:?} {:?}", event.source_id, change.operation, change.pk);
@@ -41,25 +41,21 @@ Handlers run synchronously in registration order. All must succeed before checkp
 
 `check()` validates the upstream and tables, `initialize()` creates initial checkpoints, and `run_once()` consumes currently available events.
 
-## Fix the mode at construction
+## Source modes and typed decoding
 
-```rust,no_run
-use mysql_canal::{Cdc, CommittedTransaction, Full, Result, config::AppConfig};
-use std::path::Path;
+`Canal::new(AppConfig)` consumes every configured source. Set `row_image = "full"` or `"minimal"` in each `[sources.mysql-replication]` section; one consumer can include both modes. The adapter constructs a `Decoder<Full>` or `Decoder<Minimal>` for each source and FDE. Row decoding uses static dispatch.
 
-fn main() -> Result<()> {
-    let mut cdc = Cdc::<Full>::for_mode(AppConfig::read(Path::new("full.toml"))?)?;
-    cdc.add_handle(|event: CommittedTransaction<'_>| {
-        for change in event.changes {
-            println!("{} {:?}", event.source_id, change.pk);
-        }
-        Ok(())
-    });
-    cdc.run()
+Direct decoder integrations choose the generic mode explicitly:
+
+```rust
+use mysql_canal::{Decoder, Full, Result, TableMeta};
+
+fn full_decoder(tables: Vec<TableMeta>) -> Result<Decoder<Full>> {
+    Decoder::<Full>::new(tables)
 }
 ```
 
-Use `Cdc::<Minimal>::for_mode(config)` for MINIMAL. Every source must match the type, checked before connections or checkpoint initialization. Default `Cdc::new` permits per-source modes. Both modes use the same `Change` / `CommittedTransaction` fields; FULL `changed` includes every after-image column, even unchanged values. See the [typed example](examples/listen_typed.rs).
+Use `Decoder::<Minimal>::new(tables)` for MINIMAL. Both modes deliver the same `Change` / `CommittedTransaction` fields; FULL `changed` includes every after-image column, even unchanged values. See the [listener example](examples/listen.rs).
 
 ## Offline replay
 

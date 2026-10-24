@@ -19,7 +19,7 @@ mysql-canal = { path = "../mysql-canal", version = "=2.0.1" }
 mysql-replication = { path = "../mysql-replication", version = "=2.0.1" }
 
 [[example]]
-name = "cdc_listen"
+name = "canal_listen"
 path = "examples/listen.rs"
 
 [[example]]

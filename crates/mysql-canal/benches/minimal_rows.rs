@@ -5,10 +5,12 @@ use mysql_canal::{Decoder, PrimaryKey};
 use std::{hint::black_box, time::Instant};
 
 fn main() {
-    let mut decoder = Decoder::new(vec![basic()]).unwrap();
-    decoder
-        .table_map(&table_map(1, &basic(), &[3, 15, 3], &[100, 0]))
-        .unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
+    decode_table(
+        &mut decoder,
+        &table_map(1, &basic(), &[3, 15, 3], &[100, 0]),
+    )
+    .unwrap();
     for batch in [1i32, 100, 1000] {
         let mut images = Vec::new();
         for id in 0..batch {
@@ -21,15 +23,14 @@ fn main() {
         let start = Instant::now();
         let mut sum = 0i64;
         for _ in 0..iterations {
-            decoder
-                .rows(UPDATE_ROWS_EVENT, black_box(&data), |c| {
-                    if let PrimaryKey::Signed(id) = c.pk {
-                        sum = sum.wrapping_add(black_box(id));
-                    }
-                    black_box(c.changed);
-                    Ok(())
-                })
-                .unwrap();
+            decode_rows(&mut decoder, UPDATE_ROWS_EVENT, black_box(&data), |c| {
+                if let PrimaryKey::Signed(id) = c.pk {
+                    sum = sum.wrapping_add(black_box(id));
+                }
+                black_box(c.changed);
+                Ok(())
+            })
+            .unwrap();
         }
         let seconds = start.elapsed().as_secs_f64();
         black_box(sum);

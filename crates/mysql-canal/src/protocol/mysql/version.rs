@@ -51,34 +51,17 @@ impl<'a> FormatDescription<'a> {
     }
 }
 
+/// Decodes normalized event views; structural parsing belongs to EventParser.
 pub trait RowDecoder: Send {
     fn clear_table_maps(&mut self);
-    fn table_map_event(&mut self, event: TableMapEvent<'_>) -> Result<()> {
-        self.table_map(event.standard_body.ok_or_else(|| {
-            Error::Unsupported(
-                "custom TABLE_MAP layout requires RowDecoder::table_map_event".into(),
-            )
-        })?)
-    }
+    fn table_map_event(&mut self, event: TableMapEvent<'_>) -> Result<()>;
     fn rows_event(
         &mut self,
         event: RowsEvent<'_>,
         emit: &mut dyn FnMut(Change<'_>) -> Result<()>,
-    ) -> Result<()> {
-        let (kind, body) = event.standard_body.ok_or_else(|| {
-            Error::Unsupported("custom ROWS layout requires RowDecoder::rows_event".into())
-        })?;
-        self.rows(kind, body, emit)
-    }
-    fn table_map(&mut self, body: &[u8]) -> Result<()>;
-    fn rows(
-        &mut self,
-        event_type: u8,
-        body: &[u8],
-        emit: &mut dyn FnMut(Change<'_>) -> Result<()>,
     ) -> Result<()>;
 }
-impl<M: crate::CdcMode> RowDecoder for Decoder<M> {
+impl<M: crate::CdcImageMode> RowDecoder for Decoder<M> {
     fn table_map_event(&mut self, event: TableMapEvent<'_>) -> Result<()> {
         Decoder::table_map_event(self, event)
     }
@@ -90,25 +73,12 @@ impl<M: crate::CdcMode> RowDecoder for Decoder<M> {
         Decoder::rows_event(self, event, emit)
     }
     fn clear_table_maps(&mut self) {
-        self.clear_table_maps();
-    }
-    fn table_map(&mut self, body: &[u8]) -> Result<()> {
-        self.table_map(body)
-    }
-    fn rows(
-        &mut self,
-        event_type: u8,
-        body: &[u8],
-        emit: &mut dyn FnMut(Change<'_>) -> Result<()>,
-    ) -> Result<()> {
-        self.rows(event_type, body, emit)
+        Decoder::clear_table_maps(self)
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum EventAction<'a> {
-    TableMap,
-    Rows,
     Begin,
     Commit,
     Rollback,
@@ -125,23 +95,9 @@ pub trait VersionAdapter: Send + Sync {
         &self,
         variables: &BTreeMap<String, String>,
         consumer_id: u32,
-    ) -> Result<()> {
-        validate_server_variables(variables, consumer_id)
-    }
-    /// Existing adapters retain their MINIMAL validation; FULL is opt-in.
-    fn validate_server_with_row_image(
-        &self,
-        variables: &BTreeMap<String, String>,
-        consumer_id: u32,
         row_image: RowImageMode,
     ) -> Result<()> {
-        if row_image != RowImageMode::Minimal {
-            return Err(Error::Unsupported(format!(
-                "adapter {} does not support FULL row images",
-                self.name()
-            )));
-        }
-        self.validate_server(variables, consumer_id)
+        validate_server_variables(variables, consumer_id, row_image)
     }
     fn validate_format(&self, format: &FormatDescription<'_>) -> Result<()> {
         validate_mysql_v4(format)
@@ -154,26 +110,12 @@ pub trait VersionAdapter: Send + Sync {
         &self,
         tables: Vec<TableMeta>,
         _format: &FormatDescription<'_>,
-    ) -> Result<Box<dyn RowDecoder>> {
-        Ok(Box::new(Decoder::new(tables)?))
-    }
-    /// Existing custom decoders must explicitly opt into FULL images.
-    fn create_decoder_with_row_image(
-        &self,
-        tables: Vec<TableMeta>,
-        format: &FormatDescription<'_>,
         row_image: RowImageMode,
     ) -> Result<Box<dyn RowDecoder>> {
-        if row_image != RowImageMode::Minimal {
-            return Err(Error::Unsupported(format!(
-                "adapter {} does not support FULL row images",
-                self.name()
-            )));
+        match row_image {
+            RowImageMode::Minimal => Ok(Box::new(Decoder::<crate::Minimal>::new(tables)?)),
+            RowImageMode::Full => Ok(Box::new(Decoder::<crate::Full>::new(tables)?)),
         }
-        self.create_decoder(tables, format)
-    }
-    fn classify<'a>(&self, event: EventView<'a>) -> Result<EventAction<'a>> {
-        classify_mysql_event(event)
     }
 }
 
@@ -249,25 +191,6 @@ struct MysqlVersion {
     name: &'static str,
 }
 impl VersionAdapter for MysqlVersion {
-    fn validate_server_with_row_image(
-        &self,
-        variables: &BTreeMap<String, String>,
-        consumer_id: u32,
-        row_image: RowImageMode,
-    ) -> Result<()> {
-        validate_server_variables_with_row_image(variables, consumer_id, row_image)
-    }
-    fn create_decoder_with_row_image(
-        &self,
-        tables: Vec<TableMeta>,
-        _format: &FormatDescription<'_>,
-        row_image: RowImageMode,
-    ) -> Result<Box<dyn RowDecoder>> {
-        match row_image {
-            RowImageMode::Minimal => Ok(Box::new(Decoder::<crate::Minimal>::for_mode(tables)?)),
-            RowImageMode::Full => Ok(Box::new(Decoder::<crate::Full>::for_mode(tables)?)),
-        }
-    }
     fn name(&self) -> &str {
         self.name
     }
@@ -286,13 +209,6 @@ impl VersionAdapter for MysqlVersion {
 }
 
 pub fn validate_server_variables(
-    variables: &BTreeMap<String, String>,
-    consumer_id: u32,
-) -> Result<()> {
-    validate_server_variables_with_row_image(variables, consumer_id, RowImageMode::Minimal)
-}
-
-pub fn validate_server_variables_with_row_image(
     variables: &BTreeMap<String, String>,
     consumer_id: u32,
     row_image: RowImageMode,
@@ -363,7 +279,7 @@ pub fn validate_mysql_v4(format: &FormatDescription<'_>) -> Result<()> {
             Some(0 | 8)
         ) {
             return Err(Error::Unsupported(format!(
-                "post-header length for legacy event {kind}"
+                "post-header length for ROWS v1 event {kind}"
             )));
         }
     }
@@ -380,13 +296,6 @@ pub fn classify_mysql_event(event: EventView<'_>) -> Result<EventAction<'_>> {
             }
             EventAction::Commit
         }
-        event::TABLE_MAP_EVENT => EventAction::TableMap,
-        event::WRITE_ROWS_EVENT_V1
-        | event::UPDATE_ROWS_EVENT_V1
-        | event::DELETE_ROWS_EVENT_V1
-        | event::WRITE_ROWS_EVENT
-        | event::UPDATE_ROWS_EVENT
-        | event::DELETE_ROWS_EVENT => EventAction::Rows,
         event::GTID_EVENT | event::ANONYMOUS_GTID_EVENT | event::GTID_TAGGED_LOG_EVENT => {
             EventAction::GroupStart
         }

@@ -36,7 +36,7 @@ fn feed(p: &mut Processor, kind: u8, position: u32, data: &[u8], out: &mut Vec<u
             log_pos: position,
             data,
         },
-        out,
+        &mysql_canal::sink::JsonLinesSink::new(out),
     )
 }
 // Deliberately synthetic vendor format: not a claim about real MySQL 9.1.
@@ -59,7 +59,15 @@ impl VersionAdapter for CompactHeaders {
 fn fde_compiles_different_id_width_and_control_post_headers_then_rebinds_on_rotation() {
     let mut registry = VersionRegistry::default();
     registry.register(Arc::new(CompactHeaders)).unwrap();
-    let mut p = Processor::with_registry(state(), None, 1_000_000, registry, None).unwrap();
+    let mut p = Processor::new(
+        state(),
+        None,
+        1_000_000,
+        registry,
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut out = Vec::new();
     let mut fde = versioned_format();
     for (kind, len) in [
@@ -156,12 +164,12 @@ impl VersionAdapter for ReorderedFields {
             ));
         }
         Ok(Box::new(ReorderedParser {
-            fallback: MysqlEventParser::from_format(f)?,
+            base: MysqlEventParser::from_format(f)?,
         }))
     }
 }
 struct ReorderedParser {
-    fallback: MysqlEventParser,
+    base: MysqlEventParser,
 }
 impl EventParser for ReorderedParser {
     fn parse<'a>(&self, event: EventView<'a>) -> Result<ParsedEvent<'a>> {
@@ -235,7 +243,7 @@ impl EventParser for ReorderedParser {
                     parse_row_images,
                 )))
             }
-            _ => self.fallback.parse(event),
+            _ => self.base.parse(event),
         }
     }
 }
@@ -256,7 +264,7 @@ fn custom_parser_normalizes_field_order_endianness_and_new_event_code_without_co
     map.extend(&canonical_map[8..]);
     let mut row = vec![0, 0, 0, 0, 0, 0, 7];
     row.extend([1, 1, 0, 5, b'h', b'e', b'l', b'l', b'o']);
-    let mut decoder = Decoder::new(snapshot.tables.clone()).unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(snapshot.tables.clone()).unwrap();
     let ParsedEvent::TableMap(view) = parser.parse(raw(TABLE_MAP_EVENT, &map)).unwrap() else {
         panic!("TABLE_MAP")
     };
@@ -281,7 +289,15 @@ fn custom_parser_normalizes_field_order_endianness_and_new_event_code_without_co
     // decoder unit call. No processor branch knows this vendor event code.
     let mut registry = VersionRegistry::default();
     registry.register(Arc::new(ReorderedFields)).unwrap();
-    let mut p = Processor::with_registry(snapshot, None, 1_000_000, registry, None).unwrap();
+    let mut p = Processor::new(
+        snapshot,
+        None,
+        1_000_000,
+        registry,
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut out = Vec::new();
     for (kind, position, data) in [
         (FORMAT_DESCRIPTION_EVENT, 100, fde.as_slice()),
@@ -298,12 +314,12 @@ fn custom_parser_normalizes_field_order_endianness_and_new_event_code_without_co
     assert_eq!(change["changed"], serde_json::json!(["id"]));
 }
 #[test]
-fn fde_controls_legacy_support_and_v2_extra_data_is_lazy_but_checked_for_whitelist() {
+fn fde_controls_rows_v1_support_and_v2_extra_data_is_lazy_but_checked_for_whitelist() {
     let fde = format();
     let f = FormatDescription::parse(&fde).unwrap();
     let parser = MysqlEventParser::from_format(&f).unwrap();
     assert!(parser.parse(raw(WRITE_ROWS_EVENT_V1, &[])).is_err());
-    let mut decoder = Decoder::new(vec![basic()]).unwrap();
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![basic()]).unwrap();
     let mut excluded = basic();
     excluded.table = "excluded".into();
     let excluded_map = table_map(7, &excluded, &[3, 15, 3], &[100, 0]);
@@ -329,19 +345,19 @@ fn fde_controls_legacy_support_and_v2_extra_data_is_lazy_but_checked_for_whiteli
         panic!("rows")
     };
     assert!(decoder.rows_event(row, |_| Ok(())).is_err());
-    let mut legacy = fde;
+    let mut rows_v1 = fde;
     for kind in [
         WRITE_ROWS_EVENT_V1,
         UPDATE_ROWS_EVENT_V1,
         DELETE_ROWS_EVENT_V1,
     ] {
-        legacy[57 + usize::from(kind) - 1] = 8;
+        rows_v1[57 + usize::from(kind) - 1] = 8;
     }
-    let f = FormatDescription::parse(&legacy).unwrap();
+    let f = FormatDescription::parse(&rows_v1).unwrap();
     let parser = MysqlEventParser::from_format(&f).unwrap();
     let body = rows(7, DELETE_ROWS_EVENT_V1, 3, &[1], &[], &[0, 11, 0, 0, 0]);
     let ParsedEvent::Rows(row) = parser.parse(raw(DELETE_ROWS_EVENT_V1, &body)).unwrap() else {
-        panic!("legacy rows")
+        panic!("ROWS v1 expected")
     };
     let mut seen = false;
     decoder

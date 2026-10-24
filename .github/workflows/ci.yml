@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [master]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -60,15 +60,15 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
-      - name: Test protocol, CDC, facade, CLI and typed row example contracts
+      - name: Test protocol, CDC, facade, CLI and generic row example contracts
         # Includes the registered example harness and compile-fail doctests.
         run: cargo test --workspace --locked
       - name: Compile library, CLI, examples and benchmarks
         run: cargo check --workspace --all-targets --locked
 
   mysql:
-    name: MySQL compatibility
-    uses: ./.github/workflows/mysql-compatibility.yml
+    name: MySQL integration
+    uses: ./.github/workflows/mysql.yml
 
   package:
     name: Verify crates.io package

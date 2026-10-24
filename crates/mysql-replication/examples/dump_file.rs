@@ -6,7 +6,7 @@ fn main() -> Result<()> {
         eprintln!("usage: cargo run -p mysql-replication --example dump_file -- BINLOG_FILE");
         return Ok(());
     }
-    let mut reader = BinlogFile::with_config(
+    let mut reader = BinlogFile::<_, mysql_replication::Minimal>::new(
         BufReader::new(File::open(&args[1])?),
         ParserConfig::default(),
     )?;

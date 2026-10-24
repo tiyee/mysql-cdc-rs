@@ -14,11 +14,11 @@ mysql-canal = { path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
 ```
 
 ```rust,no_run
-use mysql_canal::{Cdc, CommittedTransaction, Result, config::AppConfig};
+use mysql_canal::{Canal, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let mut canal = Cdc::new(AppConfig::read(Path::new("canal.toml"))?)?;
+    let mut canal = Canal::new(AppConfig::read(Path::new("canal.toml"))?)?;
     canal.add_handle(|event: CommittedTransaction<'_>| {
         for change in event.changes {
             println!("{} {:?} {:?}", event.source_id, change.operation, change.pk);
@@ -41,25 +41,21 @@ fn main() -> Result<()> {
 
 `check()` 校验上游及表结构，`initialize()` 创建初始检查点，`run_once()` 消费当前可用事件。
 
-## 实例化时固定模式
+## 来源模式与泛型解码
 
-```rust,no_run
-use mysql_canal::{Cdc, CommittedTransaction, Full, Result, config::AppConfig};
-use std::path::Path;
+`Canal::new(AppConfig)` 统一消费所有配置来源。各 `[sources.mysql-replication]` 分别设置 `row_image = "full"` 或 `"minimal"`，同一消费实例可以包含两种模式。适配器按来源和 FDE 构造 `Decoder<Full>` 或 `Decoder<Minimal>`，行解码使用静态分派。
 
-fn main() -> Result<()> {
-    let mut cdc = Cdc::<Full>::for_mode(AppConfig::read(Path::new("full.toml"))?)?;
-    cdc.add_handle(|event: CommittedTransaction<'_>| {
-        for change in event.changes {
-            println!("{} {:?}", event.source_id, change.pk);
-        }
-        Ok(())
-    });
-    cdc.run()
+直接使用解码器时，显式指定泛型模式：
+
+```rust
+use mysql_canal::{Decoder, Full, Result, TableMeta};
+
+fn full_decoder(tables: Vec<TableMeta>) -> Result<Decoder<Full>> {
+    Decoder::<Full>::new(tables)
 }
 ```
 
-`Cdc::<Minimal>::for_mode(config)` 同理。每个来源配置必须与类型匹配，在连接和初始化检查点之前检查。默认 `Cdc::new` 支持各来源分别配置模式。两种模式使用相同的 `Change` / `CommittedTransaction` 字段；FULL 的 `changed` 包含全部 after-image 列，也可能包含值未改变的列。见[类型化示例](examples/listen_typed.rs)。
+MINIMAL 使用 `Decoder::<Minimal>::new(tables)`。两种模式交付相同的 `Change` / `CommittedTransaction` 字段；FULL 的 `changed` 包含全部 after-image 列，也可能包含值未改变的列。见[监听示例](examples/listen.rs)。
 
 ## 离线回放
 

@@ -1,7 +1,7 @@
 //! Template only: replace series/version checks after validating the actual wire
 //! format. Registration does not certify compatibility with an untested server.
 use mysql_canal::{
-    Cdc, CommittedTransaction, Result,
+    Canal, CommittedTransaction, Result,
     config::AppConfig,
     engine::runtime::Runtime,
     protocol::mysql::{
@@ -32,10 +32,9 @@ impl VersionAdapter for CustomMysql {
         Ok(Box::new(MysqlEventParser::from_format(format)?))
     }
     // Override validate_server/validate_format for new capability/layout rules.
-    // Opt into FULL with validate_server_with_row_image and
-    // create_decoder_with_row_image; their defaults accept MINIMAL only.
+    // validate_server and create_decoder receive the explicit image policy.
     // Override create_decoder if the column metadata or row value encoding also
-    // changes. classify is the fallback for additional control event codes.
+    // changes. Return additional control actions from your EventParser.
 }
 fn main() -> Result<()> {
     let Some(path) = std::env::args().nth(1) else {
@@ -44,10 +43,10 @@ fn main() -> Result<()> {
     };
     let mut runtime = Runtime::default();
     runtime.versions.register(Arc::new(CustomMysql))?;
-    let mut replication = Cdc::with_runtime(AppConfig::read(Path::new(&path))?, runtime)?;
+    let mut canal = Canal::with_runtime(AppConfig::read(Path::new(&path))?, runtime)?;
     let output = JsonLinesSink::new(BufWriter::new(std::io::stdout()));
-    replication.add_handle(move |event: CommittedTransaction<'_>| {
+    canal.add_handle(move |event: CommittedTransaction<'_>| {
         output.commit(event.source_id, event.checkpoint, event.changes)
     });
-    replication.run()
+    canal.run()
 }

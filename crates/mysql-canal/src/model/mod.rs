@@ -2,7 +2,9 @@
 pub mod change;
 pub mod mode;
 pub mod schema;
+pub mod transaction;
 
 pub use change::{Change, Operation, OwnedChange, PrimaryKey};
-pub use mode::{CdcMode, Configured, Full, Minimal};
+pub use mode::{CdcImageMode, Full, Minimal};
 pub use schema::{ColumnMeta, TableMeta};
+pub use transaction::CommittedTransaction;

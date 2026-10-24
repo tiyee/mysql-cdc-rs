@@ -19,18 +19,7 @@ pub struct Replay {
 }
 
 impl Replay {
-    pub fn new(state: State, transaction_budget: usize) -> Result<Self> {
-        Self::with_row_image(
-            state,
-            transaction_budget,
-            VersionRegistry::default(),
-            None,
-            RowImageMode::Minimal,
-        )
-    }
-
-    /// Selects historical row-image policy and optional custom version adapters.
-    pub fn with_row_image(
+    pub fn new(
         state: State,
         transaction_budget: usize,
         registry: VersionRegistry,
@@ -38,7 +27,7 @@ impl Replay {
         row_image: RowImageMode,
     ) -> Result<Self> {
         Ok(Self {
-            processor: Processor::with_row_image(
+            processor: Processor::new(
                 state,
                 None,
                 transaction_budget,
@@ -72,7 +61,7 @@ impl Replay {
             }
             // Only the FDE is applied before the checkpoint's schema boundary.
             if event.event_type == event::FORMAT_DESCRIPTION_EVENT || offset >= start {
-                self.processor.process_to(event, sink)?;
+                self.processor.process(event, sink)?;
             }
             offset = next;
         }

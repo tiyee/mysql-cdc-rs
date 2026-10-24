@@ -104,25 +104,30 @@ mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run
-use mysql_cdc_rs::{Cdc, CommittedTransaction, Result, config::AppConfig};
+use mysql_cdc_rs::canal::{Canal, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
     let config = AppConfig::read(Path::new("canal.toml"))?;
-    let mut cdc = Cdc::new(config)?;
-    cdc.add_handle(|transaction: CommittedTransaction<'_>| {
+    let mut canal = Canal::new(config)?;
+    canal.add_handle(|transaction: CommittedTransaction<'_>| {
         for change in transaction.changes {
-            println!("{} {:?} {:?}", transaction.source_id, change.operation, change.pk);
+            println!(
+                "{} {:?} {:?}",
+                transaction.source_id, change.operation, change.pk
+            );
         }
         Ok(())
     });
-    cdc.run()
+    canal.run()
 }
 ```
 
-`canal.toml` uses the [standalone canal configuration](crates/mysql-canal/examples/config/multi-source.toml), beginning at `[[sources]]`; the Pikachu product file has a different outer layer. CDC APIs are exported at the root and under `canal`; raw APIs are under `replication`. Register a handler before calling `run` or `run_once`.
+`canal.toml` uses the [standalone canal configuration](crates/mysql-canal/examples/config/multi-source.toml), beginning at `[[sources]]`; the Pikachu product file has a different outer layer. `mysql-cdc-rs` only re-exports the two library modules: `canal::Canal` manages conversion, handlers and checkpoints; `replication` manages raw readers and streams. Each module owns its configuration and error types. Register a handler before calling `run` or `run_once`.
 
 See the [Rust API reference](docs/event-api.md) for fixing mode-specific types and inspecting raw row values.
+
+Raw replication supports statically selected images through `BinlogFile<_, Full>` / `BinlogFile<_, Minimal>` or `ReplicationStream<M>`. Row events bind TABLE_MAP automatically; `rows.rows()` yields typed operations whose fields provide column definitions and borrowed values. MINIMAL distinguishes absent fields from SQL NULL. Missing optional metadata such as column names remains unknown; see the [Rust API reference](docs/event-api.md).
 
 ## Usage boundaries
 

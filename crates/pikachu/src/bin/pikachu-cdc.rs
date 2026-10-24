@@ -3,7 +3,7 @@ mod config;
 mod print_handle;
 
 use mysql_canal::{
-    Cdc, Error, Result,
+    Canal, Error, Result,
     config::{AppConfig, RowImageMode},
     engine::{Replay, checkpoint::State},
     protocol::mysql::version::VersionRegistry,
@@ -33,7 +33,7 @@ fn run() -> Result<()> {
             let state = State::read(Path::new(&args[2]))?;
             let path = Path::new(&args[3]);
             let sink = print_handle::PrintHandle::new();
-            Replay::with_row_image(
+            Replay::new(
                 state,
                 64 * 1024 * 1024,
                 VersionRegistry::default(),
@@ -45,7 +45,7 @@ fn run() -> Result<()> {
         command @ ("check" | "init" | "run") if args.len() >= 3 => {
             let mut config = config::Config::read(Path::new(&args[2]))?;
             let once = online_options(&mut config.canal, &args[3..], command == "run")?;
-            let mut canal = Cdc::new(config.canal)?;
+            let mut canal = Canal::new(config.canal)?;
             match command {
                 "check" => canal.check()?,
                 "init" => canal.initialize()?,

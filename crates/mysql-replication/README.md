@@ -14,11 +14,14 @@ mysql-replication = { path = "/path/to/mysql-cdc-rs/crates/mysql-replication" }
 ```
 
 ```rust,no_run
-use mysql_replication::{Event, Result, file::BinlogFile};
+use mysql_replication::{Event, Minimal, Result, file::BinlogFile, parser::ParserConfig};
 use std::{fs::File, io::BufReader};
 
 fn main() -> Result<()> {
-    let mut reader = BinlogFile::new(BufReader::new(File::open("binlog.000001")?))?;
+    let mut reader = BinlogFile::<_, Minimal>::new(
+        BufReader::new(File::open("binlog.000001")?),
+        ParserConfig::default(),
+    )?;
     while let Some(event) = reader.next_event()? {
         println!("{} {}", event.header.server_id, event.header.log_pos);
         event.event.dump(&mut std::io::stderr())?;
@@ -36,12 +39,16 @@ fn main() -> Result<()> {
 ## Subscribe to MySQL
 
 ```rust,no_run
-use mysql_replication::{Result, config::{Config, RowImageMode}, stream::ReplicationStream};
+use mysql_replication::{
+    Full, Result,
+    config::{Config, RowImageMode},
+    stream::ReplicationStream,
+};
 
 fn main() -> Result<()> {
     let mut settings = Config::new("MYSQL_URL", 123);
     settings.row_image = RowImageMode::Full;
-    let mut stream = ReplicationStream::connect(
+    let mut stream = ReplicationStream::<Full>::connect(
         &settings.connection_config()?,
         settings.replication_config("binlog.000001", 4)?,
     )?;
@@ -57,15 +64,26 @@ Credentials come from `MYSQL_URL`. `row_image` validates the upstream setting wi
 ## Fix the mode at construction
 
 ```rust,no_run
-use mysql_replication::{Full, Result, file::BinlogFile, parser::ParserConfig};
+use mysql_replication::{EventData, Full, Result, file::BinlogFile, parser::ParserConfig};
 use std::{fs::File, io::BufReader};
 
 fn main() -> Result<()> {
-    let mut reader = BinlogFile::<_, Full>::for_mode(
+    let mut reader = BinlogFile::<_, Full>::new(
         BufReader::new(File::open("binlog.000001")?),
         ParserConfig::default(),
     )?;
     while let Some(event) = reader.next_event()? {
+        if let EventData::Rows(rows) = &event.event {
+            for row in rows.rows()? {
+                let (before, after) = row?.operation.into_images();
+                for image in before.into_iter().chain(after) {
+                    for field in image.fields() {
+                        let field = field?;
+                        println!("{:?}: {:?}", field.column.name, field.value);
+                    }
+                }
+            }
+        }
         let owned = event.into_owned()?;
         let _view: mysql_replication::BinlogEvent<'_, Full> = owned.view()?;
     }
@@ -73,15 +91,20 @@ fn main() -> Result<()> {
 }
 ```
 
-`Minimal` / `Full` propagate through parser, reader, `BinlogEvent` and `RowsEvent`. `ReplicationStream::<Full>::for_mode(connection, config)` validates type/config agreement before connecting. `next_event()` returns mode-checked events; raw `next_frame()` / `next_view()` remain unclassified. Default constructors use `Unspecified`.
+`Minimal` / `Full` propagate through parser, reader, `BinlogEvent` and `RowsEvent`; every typed constructor requires an explicit mode. `ReplicationStream::<Full>::connect(connection, config)` validates type/config agreement before connecting. Use `FrameReader` for raw files and `ReplicationConnection` for raw network frames/views; typed readers expose only `next_event()`.
 
 ## Decode row images
 
-Build a `RowsDecoder` from TABLE_MAP and iterate before/after images through `RowsEvent::rows(&decoder)`. `Minimal` uses `SparseImage`; `Full` uses `CompleteImage` and rejects incomplete images. Raw decoding requires no primary key and provides no transaction buffering. Callers maintain, replace and clear TABLE_MAP plans.
+`BinlogFile<_, M>` / `ReplicationStream<M>` automatically bind shared column definitions from TABLE_MAP, so `RowsEvent<M>::rows()` needs no external decoder. The same `Full` / `Minimal` markers select types through static dispatch, without runtime mode checks in row loops. `Row.operation` uses `RowOperation::Insert { after }`, `Update { before, after }`, or `Delete { before }`, preventing missing required images.
+
+`Minimal` yields `SparseImage`, whose `field(index)` returns `Result<Option<Field>>`; a valid but unlogged column is `None`. `Full` yields `CompleteImage`, returns `Result<Field>` and rejects incomplete images. Both reject out-of-range indices. Each `Field` provides `column: &ColumnInfo` and a borrowed `value: RowValue`; SQL NULL is `Field.value = RowValue::Null`. `fields()` iterates present fields, while `columns()` exposes every table column definition.
+
+Definitions include ordinals, available names, wire types, nullability, signedness, collations and key metadata. Metadata availability is independent of image completeness: `binlog_row_image=FULL` does not guarantee names. Missing optional attributes stay `None`; decoding never queries the current server schema. `into_owned()` / `view()` preserve historical column plans and the actual checksum. Parser mappings are source-local, replaced on remaps and cleared at file/statement boundaries. The sentinel has its own `EventData::RowsStatementEnd` variant. Select the mode before the first read.
+
+Custom protocol parsers use `file::FrameReader` / `stream::ReplicationConnection`. Explicit `RowsDecoder<M>` decoding shares the same generic events and images as automatic binding. Raw decoding requires no primary key or transaction buffering; canal retains its own adapters and lightweight change output.
 
 ```sh
-cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
-cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image full
+cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001 --row-image full
 ```
 
 Run examples from the workspace root. See the [event reference](https://github.com/tiyee/mysql-cdc-rs/blob/master/docs/events.md) for field definitions, NULL/absent-column distinctions and mode-specific accessors.

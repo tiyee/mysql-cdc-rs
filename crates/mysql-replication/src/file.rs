@@ -2,22 +2,19 @@
 use crate::{
     BinlogEvent, BinlogFrame, BinlogParser, FrameDecoder, MAX_EVENT_BYTES, Result,
     error::invalid,
-    events::{BinlogMode, EventHeader, Unspecified},
+    events::{BinlogMode, EventHeader},
     parser::ParserConfig,
 };
 use std::io::Read;
 
-pub struct BinlogFile<R, M: BinlogMode = Unspecified> {
+/// Validated raw file frames for custom protocol adapters.
+pub struct FrameReader<R> {
     reader: R,
     buffer: Vec<u8>,
     framing: FrameDecoder,
-    parser: BinlogParser<M>,
 }
-impl<R: Read> BinlogFile<R> {
-    pub fn new(reader: R) -> Result<Self> {
-        Self::with_config(reader, ParserConfig::default())
-    }
-    pub fn with_config(mut reader: R, config: ParserConfig) -> Result<Self> {
+impl<R: Read> FrameReader<R> {
+    pub fn new(mut reader: R) -> Result<Self> {
         let mut magic = [0; 4];
         reader.read_exact(&mut magic)?;
         if magic != [0xfe, b'b', b'i', b'n'] {
@@ -27,33 +24,33 @@ impl<R: Read> BinlogFile<R> {
             reader,
             buffer: Vec::new(),
             framing: FrameDecoder::new(),
-            parser: BinlogParser::new(config),
         })
     }
-}
-impl<R: Read, M: BinlogMode> BinlogFile<R, M> {
-    pub fn for_mode(reader: R, config: ParserConfig) -> Result<Self> {
-        BinlogFile::with_config(reader, config).map(|file| file.with_mode())
-    }
-    pub fn with_mode<N: BinlogMode>(self) -> BinlogFile<R, N> {
-        BinlogFile {
-            reader: self.reader,
-            buffer: self.buffer,
-            framing: self.framing,
-            parser: self.parser.with_mode(),
-        }
-    }
-    /// Reads only a frame, so custom adapters can select their own body layout.
     pub fn next_frame(&mut self) -> Result<Option<BinlogFrame<'_>>> {
         read_frame(&mut self.reader, &mut self.buffer, &mut self.framing)
     }
+}
+
+/// A file reader whose field policy is fixed at construction.
+pub struct BinlogFile<R, M: BinlogMode> {
+    frames: FrameReader<R>,
+    parser: BinlogParser<M>,
+}
+impl<R: Read, M: BinlogMode> BinlogFile<R, M> {
+    pub fn new(reader: R, config: ParserConfig) -> Result<Self> {
+        Ok(Self {
+            frames: FrameReader::new(reader)?,
+            parser: BinlogParser::new(config),
+        })
+    }
     pub fn next_event(&mut self) -> Result<Option<BinlogEvent<'_, M>>> {
-        let Some(frame) = read_frame(&mut self.reader, &mut self.buffer, &mut self.framing)? else {
+        let Some(frame) = self.frames.next_frame()? else {
             return Ok(None);
         };
         self.parser.parse(frame).map(Some)
     }
 }
+
 fn read_frame<'a>(
     reader: &mut impl Read,
     buffer: &'a mut Vec<u8>,

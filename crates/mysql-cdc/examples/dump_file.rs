@@ -8,7 +8,7 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    let mut reader = BinlogFile::with_config(
+    let mut reader = BinlogFile::<_, mysql_cdc_rs::replication::Minimal>::new(
         BufReader::new(File::open(&args[1])?),
         ParserConfig::default(),
     )?;

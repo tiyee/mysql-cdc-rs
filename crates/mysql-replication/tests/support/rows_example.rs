@@ -81,7 +81,7 @@ impl Fixture {
         Self(path)
     }
     fn run(&self, mode: Option<&str>) -> (Result<()>, Vec<u8>) {
-        let mut args = vec!["decode_typed_rows".into(), self.0.to_str().unwrap().into()];
+        let mut args = vec!["decode_rows".into(), self.0.to_str().unwrap().into()];
         if let Some(mode) = mode {
             args.extend(["--row-image".into(), mode.into()]);
         }

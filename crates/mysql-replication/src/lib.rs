@@ -18,8 +18,7 @@ mod wire;
 
 pub use error::{Error, Result};
 pub use events::{
-    BinlogEvent, BinlogMode, Event, EventData, EventHeader, Full, ImageMode, Minimal,
-    OwnedBinlogEvent, Unspecified,
+    BinlogEvent, BinlogMode, Event, EventData, EventHeader, Full, Minimal, OwnedBinlogEvent,
 };
 pub use frame::{BinlogFrame, EventView, FrameDecoder, MAX_EVENT_BYTES};
 pub use parser::BinlogParser;

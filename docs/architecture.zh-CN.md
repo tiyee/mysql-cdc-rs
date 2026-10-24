@@ -16,6 +16,8 @@ mysql-cdc 把 MySQL 日志里的数据修改整理成应用可以消费的变更
 
 组件依赖从上到下：**Pikachu → mysql-canal → mysql-replication**。`mysql-cdc-rs` 是统一的 Rust 库入口，方便应用同时使用两个库，不增加处理步骤。整套系统名称是 **mysql-cdc**。
 
+聚合库仅提供 `canal` 和 `replication` 两个模块。`canal::Canal::new` 管理配置来源、处理器和检查点；原始事件消费由复制库的读取器和复制流管理。配置与错误类型也归各模块所有。
+
 ## 一次更新怎样到达应用
 
 假设应用把 `app.users` 中主键 42 的姓名改为 Bob：

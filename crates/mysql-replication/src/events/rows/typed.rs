@@ -1,58 +1,7 @@
 //! Typed, borrowed image views over the common ROWS wire layout.
-use super::{
-    ColumnDefinition, RowFields, RowImage, RowValue, Rows, RowsDecoder, RowsEvent, RowsKind,
-};
-use crate::{
-    Error, Result,
-    config::RowImageMode,
-    error::invalid,
-    events::{BinlogMode, TableMapEvent},
-};
-use std::{fmt::Debug, iter::FusedIterator, marker::PhantomData};
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// A supported image policy with its own borrowed image representation.
-///
-/// This trait is sealed so that a typed FULL event cannot bypass completeness
-/// validation. Modes describe accepted shapes, not a producer setting inferred
-/// from the bytes. MINIMAL may contain all columns and does not require a key.
-pub trait ImageMode: sealed::Sealed + BinlogMode + Send + Sync + 'static {
-    type Image<'a>: TryFrom<RowImage<'a>, Error = Error> + AsRef<RowImage<'a>> + Debug + Clone;
-    #[doc(hidden)]
-    const REQUIRE_COMPLETE: bool;
-    const ROW_IMAGE: RowImageMode;
-    #[doc(hidden)]
-    fn validate_rows(rows: &Rows<'_>) -> Result<()>;
-}
-
-/// Sparse images retain only the columns actually present in the binlog.
-#[derive(Debug, Clone, Copy)]
-pub struct Minimal;
-impl sealed::Sealed for Minimal {}
-impl ImageMode for Minimal {
-    type Image<'a> = SparseImage<'a>;
-    const REQUIRE_COMPLETE: bool = false;
-    const ROW_IMAGE: RowImageMode = RowImageMode::Minimal;
-    fn validate_rows(_: &Rows<'_>) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Every column must be present in every existing image.
-#[derive(Debug, Clone, Copy)]
-pub struct Full;
-impl sealed::Sealed for Full {}
-impl ImageMode for Full {
-    type Image<'a> = CompleteImage<'a>;
-    const REQUIRE_COMPLETE: bool = true;
-    const ROW_IMAGE: RowImageMode = RowImageMode::Full;
-    fn validate_rows(rows: &Rows<'_>) -> Result<()> {
-        rows.require_complete()
-    }
-}
+use super::{ColumnInfo, Fields, RowImage, RowValue, TableDefinition, decoder::DecodedRows};
+use crate::{Error, Result, error::invalid, events::BinlogMode};
+use std::{iter::FusedIterator, marker::PhantomData};
 
 /// A borrowed sparse image. A missing field is distinct from SQL NULL.
 ///
@@ -75,12 +24,18 @@ impl<'a> SparseImage<'a> {
     pub fn column_indices(&self) -> &[u16] {
         self.image.column_indices()
     }
-    pub fn fields(&self) -> RowFields<'_, 'a> {
+    pub fn table(&self) -> &TableDefinition {
+        self.image.table()
+    }
+    pub fn columns(&self) -> &[ColumnInfo] {
+        self.image.columns()
+    }
+    pub fn fields(&self) -> Fields<'_, 'a> {
         self.image.fields()
     }
     /// Reads through present fields up to this absolute index, without allocating.
-    /// Returns `None` for an absent column, including an out-of-range index.
-    pub fn field(&self, column_index: usize) -> Result<Option<RowValue<'a>>> {
+    /// Returns `None` only for an absent column; out-of-range indices are errors.
+    pub fn field(&self, column_index: usize) -> Result<Option<Field<'_, 'a>>> {
         field(&self.image, column_index)
     }
 }
@@ -108,12 +63,18 @@ impl<'a> CompleteImage<'a> {
     pub fn column_count(&self) -> usize {
         self.image.column_count()
     }
-    pub fn fields(&self) -> RowFields<'_, 'a> {
+    pub fn table(&self) -> &TableDefinition {
+        self.image.table()
+    }
+    pub fn columns(&self) -> &[ColumnInfo] {
+        self.image.columns()
+    }
+    pub fn fields(&self) -> Fields<'_, 'a> {
         self.image.fields()
     }
     /// Reads through fields up to this absolute index, without allocating.
     /// Every in-range column exists; SQL NULL is `RowValue::Null`.
-    pub fn field(&self, column_index: usize) -> Result<RowValue<'a>> {
+    pub fn field(&self, column_index: usize) -> Result<Field<'_, 'a>> {
         if column_index >= self.column_count() {
             return Err(invalid("column index outside complete row image"));
         }
@@ -137,12 +98,36 @@ impl<'a> AsRef<RowImage<'a>> for CompleteImage<'a> {
     }
 }
 
-fn field<'a>(image: &RowImage<'a>, index: usize) -> Result<Option<RowValue<'a>>> {
+/// A present field, borrowing its column definition and original event value.
+///
+/// ```compile_fail
+/// use mysql_replication::events::{CompleteImage, Field};
+/// fn retain_metadata<'a>(image: CompleteImage<'a>) -> Field<'static, 'a> {
+///     image.field(0).unwrap()
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Field<'meta, 'event> {
+    pub column: &'meta ColumnInfo,
+    pub value: RowValue<'event>,
+}
+
+fn field<'image, 'event>(
+    image: &'image RowImage<'event>,
+    index: usize,
+) -> Result<Option<Field<'image, 'event>>> {
+    let column = image
+        .columns()
+        .get(index)
+        .ok_or_else(|| invalid("column index outside row image"))?;
     for field in image.fields() {
         let field = field?;
-        let column_index = usize::from(field.column_index);
+        let column_index = usize::from(field.column.index);
         if column_index == index {
-            return Ok(Some(field.value));
+            return Ok(Some(Field {
+                column,
+                value: field.value,
+            }));
         }
         if column_index > index {
             break;
@@ -151,121 +136,85 @@ fn field<'a>(image: &RowImage<'a>, index: usize) -> Result<Option<RowValue<'a>>>
     Ok(None)
 }
 
-/// One operation with mode-specific image types. Missing images remain `None`.
-///
-/// The modes have distinct image types even when their bitmaps happen to match.
-///
-/// ```compile_fail
-/// use mysql_replication::events::{Full, Minimal, TypedRow};
-/// fn sparse(row: TypedRow<'_, Full>) -> TypedRow<'_, Minimal> {
-///     row
-/// }
-/// ```
+/// An operation whose shape cannot contain missing required images.
 #[derive(Debug, Clone)]
-pub struct TypedRow<'a, M: ImageMode> {
-    /// Before image for UPDATE/DELETE; `None` for INSERT. The image is sparse
-    /// under `Minimal` and complete under `Full`; SQL NULL is a field value.
-    pub before: Option<M::Image<'a>>,
-    /// After image for INSERT/UPDATE; `None` for DELETE, with the same mode's
-    /// image type as `before`.
-    pub after: Option<M::Image<'a>>,
+pub enum RowOperation<I> {
+    Insert { after: I },
+    Update { before: I, after: I },
+    Delete { before: I },
+}
+impl<I> RowOperation<I> {
+    pub fn before(&self) -> Option<&I> {
+        match self {
+            Self::Insert { .. } => None,
+            Self::Update { before, .. } | Self::Delete { before } => Some(before),
+        }
+    }
+    pub fn after(&self) -> Option<&I> {
+        match self {
+            Self::Delete { .. } => None,
+            Self::Update { after, .. } | Self::Insert { after } => Some(after),
+        }
+    }
+    pub fn into_images(self) -> (Option<I>, Option<I>) {
+        match self {
+            Self::Insert { after } => (None, Some(after)),
+            Self::Update { before, after } => (Some(before), Some(after)),
+            Self::Delete { before } => (Some(before), None),
+        }
+    }
 }
 
-/// A ROWS event with checked image shape and an owned TABLE_MAP execution plan.
+/// A statically selected operation; FULL and MINIMAL remain distinct types.
 ///
-/// Private fields prevent bypassing the mode check. Values still borrow the
-/// input and are validated while iterating; a malformed row never yields a
-/// partially decoded operation. The source decoder can be dropped immediately.
-pub struct TypedRowsEvent<'a, M: ImageMode> {
-    event: RowsEvent<'a>,
-    rows: Rows<'a>,
-    column_count: usize,
+/// ```compile_fail
+/// use mysql_replication::events::{Full, Minimal, Row};
+/// fn sparse(row: Row<'_, Full>) -> Row<'_, Minimal> { row }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Row<'a, M: BinlogMode> {
+    pub operation: RowOperation<M::Image<'a>>,
+}
+
+/// A mode-specific streaming iterator. It yields one error and then stops.
+pub struct Rows<'a, M: BinlogMode> {
+    rows: DecodedRows<'a>,
+    done: bool,
     mode: PhantomData<M>,
 }
-impl<'a, M: ImageMode> TypedRowsEvent<'a, M> {
-    pub(super) fn new(event: RowsEvent<'a>, decoder: &RowsDecoder) -> Result<Self> {
-        let rows = decoder.rows(&event)?;
-        M::validate_rows(&rows)?;
-        Ok(Self {
-            event,
+impl<'a, M: BinlogMode> Rows<'a, M> {
+    pub(crate) fn new(rows: DecodedRows<'a>) -> Self {
+        Self {
             rows,
-            column_count: decoder.columns().len(),
-            mode: PhantomData,
-        })
-    }
-    pub fn table_id(&self) -> u64 {
-        self.event.table_id
-    }
-    pub fn flags(&self) -> u16 {
-        self.event.flags
-    }
-    pub fn kind(&self) -> RowsKind {
-        self.event.kind
-    }
-    pub fn column_count(&self) -> usize {
-        self.column_count
-    }
-    pub fn rows(self) -> TypedRows<'a, M> {
-        TypedRows {
-            rows: self.rows,
             done: false,
             mode: PhantomData,
         }
     }
 }
-
-/// A mode-specific streaming iterator. It yields one error and then stops.
-pub struct TypedRows<'a, M: ImageMode> {
-    rows: Rows<'a>,
-    done: bool,
-    mode: PhantomData<M>,
-}
-impl<'a, M: ImageMode> Iterator for TypedRows<'a, M> {
-    type Item = Result<TypedRow<'a, M>>;
+impl<'a, M: BinlogMode> Iterator for Rows<'a, M> {
+    type Item = Result<Row<'a, M>>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
         }
         let result = self.rows.next()?.and_then(|row| {
-            Ok(TypedRow {
-                before: row.before.map(M::Image::try_from).transpose()?,
-                after: row.after.map(M::Image::try_from).transpose()?,
-            })
+            let operation = match (row.before, row.after) {
+                (None, Some(after)) => RowOperation::Insert {
+                    after: M::Image::try_from(after)?,
+                },
+                (Some(before), Some(after)) => RowOperation::Update {
+                    before: M::Image::try_from(before)?,
+                    after: M::Image::try_from(after)?,
+                },
+                (Some(before), None) => RowOperation::Delete {
+                    before: M::Image::try_from(before)?,
+                },
+                (None, None) => return Err(invalid("row operation has no images")),
+            };
+            Ok(Row { operation })
         });
         self.done = result.is_err();
         Some(result)
     }
 }
-impl<M: ImageMode> FusedIterator for TypedRows<'_, M> {}
-
-/// A reusable generic decoder, bound to a TABLE_MAP and an image policy.
-#[derive(Debug)]
-pub struct TypedRowsDecoder<M: ImageMode> {
-    decoder: RowsDecoder,
-    mode: PhantomData<M>,
-}
-impl<M: ImageMode> TypedRowsDecoder<M> {
-    pub fn new(table: &TableMapEvent<'_>) -> Result<Self> {
-        RowsDecoder::new(table).map(Self::from)
-    }
-    pub fn table_id(&self) -> u64 {
-        self.decoder.table_id()
-    }
-    pub fn columns(&self) -> &[ColumnDefinition] {
-        self.decoder.columns()
-    }
-    pub fn event<'a>(&self, event: &RowsEvent<'a>) -> Result<TypedRowsEvent<'a, M>> {
-        event.with_mode::<M>(&self.decoder)
-    }
-    pub fn rows<'a>(&self, event: &RowsEvent<'a>) -> Result<TypedRows<'a, M>> {
-        self.event(event).map(TypedRowsEvent::rows)
-    }
-}
-impl<M: ImageMode> From<RowsDecoder> for TypedRowsDecoder<M> {
-    fn from(decoder: RowsDecoder) -> Self {
-        Self {
-            decoder,
-            mode: PhantomData,
-        }
-    }
-}
+impl<M: BinlogMode> FusedIterator for Rows<'_, M> {}

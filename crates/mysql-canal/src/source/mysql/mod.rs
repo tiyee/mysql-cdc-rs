@@ -13,7 +13,7 @@ use crate::{
     },
 };
 use ::mysql::{Conn, params, prelude::Queryable};
-use mysql_replication::stream::ReplicationStream;
+use mysql_replication::stream::ReplicationConnection;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub struct MysqlSource;
@@ -27,7 +27,7 @@ impl SourcePlugin for MysqlSource {
         versions: &VersionRegistry,
     ) -> Result<Box<dyn SourceSession>> {
         let mut conn = connect(config)?;
-        let (uuid, version, adapter) = inspect_server_with_row_image(
+        let (uuid, version, adapter) = inspect_server(
             &mut conn,
             config.replication.server_id,
             versions,
@@ -84,7 +84,6 @@ impl SourceSession for MysqlSession {
             .replication
             .replication_config(&state.file, state.position)?;
         replication.non_blocking = once;
-        replication.parser = mysql_replication::parser::ParserConfig::minimal();
         let mut conn = self.conn;
         primary_key::validate_primary_keys(
             &mut conn,
@@ -94,12 +93,12 @@ impl SourceSession for MysqlSession {
                 .map(|t| (t.schema.as_str(), t.table.as_str())),
         )?;
         Ok(Box::new(MysqlEvents {
-            stream: ReplicationStream::from_connection(conn, replication)?,
+            stream: ReplicationConnection::from_connection(conn, replication)?,
         }))
     }
 }
 struct MysqlEvents {
-    stream: ReplicationStream,
+    stream: ReplicationConnection,
 }
 impl EventStream for MysqlEvents {
     fn next_event(&mut self) -> Result<Option<EventView<'_>>> {
@@ -113,19 +112,6 @@ pub fn connect(config: &Config) -> Result<Conn> {
 }
 
 pub fn inspect_server(
-    conn: &mut Conn,
-    server_id: u32,
-    registry: &crate::protocol::mysql::version::VersionRegistry,
-    selected: Option<&str>,
-) -> Result<(
-    String,
-    crate::protocol::mysql::version::ServerVersion,
-    std::sync::Arc<dyn crate::protocol::mysql::version::VersionAdapter>,
-)> {
-    inspect_server_with_row_image(conn, server_id, registry, selected, RowImageMode::Minimal)
-}
-
-pub fn inspect_server_with_row_image(
     conn: &mut Conn,
     server_id: u32,
     registry: &VersionRegistry,
@@ -142,7 +128,7 @@ pub fn inspect_server_with_row_image(
     let version = crate::protocol::mysql::version::ServerVersion::parse(&raw)?;
     let adapter = registry.resolve(&version, selected)?;
     let variables: Vec<(String, String)> = conn.query("SHOW GLOBAL VARIABLES WHERE Variable_name IN ('log_bin','binlog_format','binlog_row_image','binlog_transaction_compression','binlog_row_value_options','server_id')")?;
-    adapter.validate_server_with_row_image(
+    adapter.validate_server(
         &variables.into_iter().collect::<BTreeMap<_, _>>(),
         server_id,
         row_image,

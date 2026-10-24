@@ -4,12 +4,13 @@ use mysql_replication::{
     Error, Event, EventData, Result,
     event_type::*,
     events::{
-        FormatDescriptionEvent, Full, ImageMode, Minimal, RowImage, RowValue, RowsDecoder,
+        BinlogMode, FormatDescriptionEvent, Full, Minimal, RowImage, RowValue, RowsDecoder,
         RowsEvent, RowsKind, TableMapEvent,
     },
     primary_key::validate_primary_keys,
     stream::{
-        ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage as RequiredImage, connect,
+        ConnectionConfig, ReplicationConfig, ReplicationConnection, ReplicationStream,
+        RowImage as RequiredImage, connect,
     },
     version::parse_server_version,
 };
@@ -218,25 +219,16 @@ fn mysql_primary_key_preflight_validates_only_selected_tables_before_binlog_requ
             validate_primary_keys(&mut fixture.conn, [(schema.as_str(), table)]),
             &expected,
         );
-        // An invalid filename would fail differently if a binlog request were sent.
-        let config = ReplicationConfig::new(902001, "missing.000001", 4);
-        unsupported(
-            ReplicationStream::connect_with_tables(
-                &ConnectionConfig::new("CDC_TEST_MYSQL_URL"),
-                config.clone(),
-                [(schema.as_str(), table)],
-            ),
-            &expected,
-        );
-        let conn = connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL")).unwrap();
-        unsupported(
-            ReplicationStream::from_connection_with_tables(
+        // Preflight fails before the invalid file could be requested.
+        let mut conn = connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL")).unwrap();
+        let subscription = (|| -> Result<ReplicationConnection> {
+            validate_primary_keys(&mut conn, [(schema.as_str(), table)])?;
+            ReplicationConnection::from_connection(
                 conn,
-                config,
-                [(schema.as_str(), table)],
-            ),
-            &expected,
-        );
+                ReplicationConfig::new(902001, "missing.000001", 4),
+            )
+        })();
+        unsupported(subscription, &expected);
     }
 }
 
@@ -270,38 +262,44 @@ fn image(image: Option<RowImage<'_>>, raw: &[u8]) -> Image {
                     RowValue::Null => Value::Null,
                     value => panic!("unexpected raw value: {value:?}"),
                 };
-                (field.column_index, value)
+                (field.column.index, value)
             })
             .collect()
     })
 }
 
-fn typed_images<M: ImageMode>(
-    event: &RowsEvent<'_>,
-    decoder: &RowsDecoder,
+fn typed_images<M: BinlogMode>(
+    body: &[u8],
+    kind: RowsKind,
+    v2: bool,
+    table_body: &[u8],
     raw: &[u8],
 ) -> Vec<(Image, Image)> {
+    let mut table = TableMapEvent::default();
+    table.decode(table_body).unwrap();
+    let decoder = RowsDecoder::<M>::new(&table).unwrap();
+    let mut event = RowsEvent::<M>::with_layout(kind, if v2 { 10 } else { 8 }, v2);
+    event.decode(body).unwrap();
     let mut indices = [None, None];
-    event
-        .with_mode::<M>(decoder)
+    decoder
+        .rows(&event)
         .unwrap()
-        .rows()
         .map(|row| {
-            let row = row.unwrap();
-            for (image, previous) in [row.before.as_ref(), row.after.as_ref()]
+            let (before, after) = row.unwrap().operation.into_images();
+            for (image, previous) in [before.as_ref(), after.as_ref()]
                 .into_iter()
                 .zip(&mut indices)
             {
                 if let Some(image) = image {
                     let current = image.as_ref().column_indices().as_ptr();
                     if let Some(previous) = previous.replace(current) {
-                        assert_eq!(current, previous, "rows must share their column index plan");
+                        assert_eq!(current, previous, "rows share their column plan");
                     }
                 }
             }
             (
-                image(row.before.map(|value| value.as_ref().clone()), raw),
-                image(row.after.map(|value| value.as_ref().clone()), raw),
+                image(before.map(|image| image.as_ref().clone()), raw),
+                image(after.map(|image| image.as_ref().clone()), raw),
             )
         })
         .collect()
@@ -314,28 +312,31 @@ fn mysql_raw_rows_preserve_sparse_images_exact_values_and_unselected_tables() {
     fixture.sql("CREATE TABLE items (id BIGINT UNSIGNED PRIMARY KEY, note VARCHAR(80), amount DECIMAL(12,2)) ENGINE=InnoDB");
     fixture.sql("CREATE TABLE without_key (id INT NOT NULL, note VARCHAR(80)) ENGINE=InnoDB");
     let start = fixture.position();
+    let typed_start = start.clone();
     fixture.sql("INSERT INTO items VALUES (18446744073709551615,'Alice',123.40)");
     fixture.sql("UPDATE items SET note=NULL, amount=-123.40 WHERE id=18446744073709551615");
     fixture.sql("UPDATE items SET id=42 WHERE id=18446744073709551615");
     fixture.sql("DELETE FROM items WHERE id=42");
     fixture.sql("INSERT INTO without_key VALUES (7,'outside')");
-    let mut stream = ReplicationStream::connect_with_tables(
-        &ConnectionConfig::new("CDC_TEST_MYSQL_URL"),
-        start,
-        [(fixture.schema.as_str(), "items")],
-    )
-    .unwrap();
+    let mut conn = connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL")).unwrap();
+    validate_primary_keys(&mut conn, [(fixture.schema.as_str(), "items")]).unwrap();
+    let mut stream = ReplicationConnection::from_connection(conn, start).unwrap();
+    let mut parser = mysql_replication::BinlogParser::<Minimal>::default();
     let mut tables = BTreeMap::new();
     let mut actual = Vec::new();
-    while let Some(event) = stream.next_event().unwrap() {
+    while let Some(frame) = stream.next_frame().unwrap() {
+        let body = frame.body;
+        let event = parser.parse(frame).unwrap();
         match event.event {
-            EventData::FormatDescription(_) | EventData::Rotate(_) => tables.clear(),
+            EventData::FormatDescription(_)
+            | EventData::Rotate(_)
+            | EventData::RowsStatementEnd(_) => tables.clear(),
             EventData::TableMap(table) if table.schema == fixture.schema.as_bytes() => {
                 tables.insert(
                     table.table_id,
                     (
                         String::from_utf8(table.table.to_vec()).unwrap(),
-                        RowsDecoder::new(&table).unwrap(),
+                        RowsDecoder::<Minimal>::new(&table).unwrap(),
                     ),
                 );
             }
@@ -345,27 +346,20 @@ fn mysql_raw_rows_preserve_sparse_images_exact_values_and_unselected_tables() {
                         .get(&rows.table_id)
                         .expect("ROWS must have a current TABLE_MAP");
                     if !full_mode() && rows.kind != RowsKind::Write {
+                        let mut full = RowsEvent::<Full>::with_layout(rows.kind, 10, true);
                         unsupported(
-                            rows.with_mode::<Full>(decoder),
+                            full.decode(body),
                             "FULL row images must contain every table column",
                         );
                     }
-                    let typed = if full_mode() {
-                        typed_images::<Full>(&rows, decoder, event.raw_data)
-                    } else {
-                        typed_images::<Minimal>(&rows, decoder, event.raw_data)
-                    };
-                    let mut typed = typed.into_iter();
-                    for row in rows.rows(decoder).unwrap() {
-                        let row = row.unwrap();
-                        let before = image(row.before, event.raw_data);
-                        let after = image(row.after, event.raw_data);
-                        let typed = typed.next().expect("typed row count must match");
-                        assert_eq!(typed.0, before);
-                        assert_eq!(typed.1, after);
+                    for row in decoder.rows(&rows).unwrap() {
+                        let (before, after) = row.unwrap().operation.into_images();
+                        let before =
+                            image(before.map(|image| image.as_ref().clone()), event.raw_data);
+                        let after =
+                            image(after.map(|image| image.as_ref().clone()), event.raw_data);
                         actual.push((table.clone(), rows.kind, before, after));
                     }
-                    assert!(typed.next().is_none());
                 }
                 if rows.flags & STMT_END_F != 0 {
                     tables.clear();
@@ -446,6 +440,50 @@ fn mysql_raw_rows_preserve_sparse_images_exact_values_and_unselected_tables() {
             ),
         ]
     );
+    fn bound_images<M: BinlogMode>(
+        config: ReplicationConfig,
+        schema: &str,
+    ) -> Vec<(String, RowsKind, Image, Image)> {
+        let mut stream =
+            ReplicationStream::<M>::connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL"), config)
+                .unwrap();
+        let mut output = Vec::new();
+        while let Some(event) = stream.next_event().unwrap() {
+            if let EventData::Rows(rows) = event.event {
+                assert_eq!(&*rows.table().unwrap().schema, schema.as_bytes());
+                let table = std::str::from_utf8(&rows.table().unwrap().table)
+                    .unwrap()
+                    .to_owned();
+                let columns = rows.columns().unwrap();
+                assert_eq!(columns.len(), if table == "items" { 3 } else { 2 });
+                if let Some(unsigned) = columns[0].unsigned {
+                    assert_eq!(unsigned, table == "items");
+                }
+                for row in rows.rows().unwrap() {
+                    let (before, after) = row.unwrap().operation.into_images();
+                    for image in before.iter().chain(&after) {
+                        assert!(std::ptr::eq(
+                            image.as_ref().columns().as_ptr(),
+                            columns.as_ptr()
+                        ));
+                    }
+                    output.push((
+                        table.clone(),
+                        rows.kind,
+                        image(before.map(|image| image.as_ref().clone()), event.raw_data),
+                        image(after.map(|image| image.as_ref().clone()), event.raw_data),
+                    ));
+                }
+            }
+        }
+        output
+    }
+    let bound = if full_mode() {
+        bound_images::<Full>(typed_start, &fixture.schema)
+    } else {
+        bound_images::<Minimal>(typed_start, &fixture.schema)
+    };
+    assert_eq!(bound, actual);
 }
 
 fn full_mode() -> bool {
@@ -479,7 +517,7 @@ fn mysql_row_image_requirement_rejects_mismatch_and_none_consumes_without_changi
         RequiredImage::Full
     });
     unsupported(
-        ReplicationStream::connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL"), mismatch),
+        ReplicationConnection::connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL"), mismatch),
         if full_mode() {
             "requires binlog_row_image=MINIMAL"
         } else {
@@ -489,23 +527,30 @@ fn mysql_row_image_requirement_rejects_mismatch_and_none_consumes_without_changi
     let mut unrestricted = config;
     unrestricted.required_row_image = None;
     let mut stream =
-        ReplicationStream::connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL"), unrestricted)
+        ReplicationConnection::connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL"), unrestricted)
             .unwrap();
     let mut decoder = None;
+    let mut parser = mysql_replication::BinlogParser::<Minimal>::default();
     let mut actual = Vec::new();
-    while let Some(event) = stream.next_event().unwrap() {
+    while let Some(frame) = stream.next_frame().unwrap() {
+        let body = frame.body;
+        let event = parser.parse(frame).unwrap();
         match event.event {
-            EventData::FormatDescription(_) | EventData::Rotate(_) => decoder = None,
+            EventData::FormatDescription(_)
+            | EventData::Rotate(_)
+            | EventData::RowsStatementEnd(_) => decoder = None,
             EventData::TableMap(table) => {
                 assert_eq!(table.schema, fixture.schema.as_bytes());
                 assert_eq!(table.table, b"settings_test");
-                decoder = Some(RowsDecoder::new(&table).unwrap());
+                decoder = Some(body.to_vec());
             }
             EventData::Rows(rows) => {
                 if rows.table_id != 0x00ff_ffff || rows.flags & STMT_END_F == 0 {
                     assert_eq!(rows.kind, RowsKind::Write);
                     actual.extend(typed_images::<Full>(
-                        &rows,
+                        body,
+                        rows.kind,
+                        true,
                         decoder.as_ref().unwrap(),
                         event.raw_data,
                     ));
@@ -584,7 +629,8 @@ fn mysql_next_view_decodes_typed_wide_multirow_images_in_both_modes() {
     fixture.sql("UPDATE wide SET c65=NULL,c75='updated' WHERE id IN (1,2) ORDER BY id");
     fixture.sql("DELETE FROM wide WHERE id IN (1,2) ORDER BY id");
     let mut stream =
-        ReplicationStream::connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL"), config).unwrap();
+        ReplicationConnection::connect(&ConnectionConfig::new("CDC_TEST_MYSQL_URL"), config)
+            .unwrap();
     let mut headers = Vec::new();
     let mut tables = BTreeMap::new();
     let mut actual = Vec::new();
@@ -605,7 +651,7 @@ fn mysql_next_view_decodes_typed_wide_multirow_images_in_both_modes() {
                 table.decode(view.body).unwrap();
                 assert_eq!(table.schema, fixture.schema.as_bytes());
                 assert_eq!(table.table, b"wide");
-                tables.insert(table.table_id, RowsDecoder::new(&table).unwrap());
+                tables.insert(table.table_id, view.body.to_vec());
             }
             kind @ (WRITE_ROWS_EVENT | UPDATE_ROWS_EVENT | DELETE_ROWS_EVENT) => {
                 let operation = match kind {
@@ -613,7 +659,7 @@ fn mysql_next_view_decodes_typed_wide_multirow_images_in_both_modes() {
                     UPDATE_ROWS_EVENT => RowsKind::Update,
                     _ => RowsKind::Delete,
                 };
-                let mut event = RowsEvent::with_layout(
+                let mut event = RowsEvent::<Minimal>::with_layout(
                     operation,
                     usize::from(headers[usize::from(kind) - 1]),
                     true,
@@ -624,9 +670,9 @@ fn mysql_next_view_decodes_typed_wide_multirow_images_in_both_modes() {
                         .get(&event.table_id)
                         .expect("ROWS must have a current TABLE_MAP");
                     let rows = if full_mode() {
-                        typed_images::<Full>(&event, decoder, view.body)
+                        typed_images::<Full>(view.body, operation, true, decoder, view.body)
                     } else {
-                        typed_images::<Minimal>(&event, decoder, view.body)
+                        typed_images::<Minimal>(view.body, operation, true, decoder, view.body)
                     };
                     assert_eq!(rows.len(), 2);
                     actual.extend(

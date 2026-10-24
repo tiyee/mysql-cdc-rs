@@ -8,10 +8,7 @@ use crate::{
     protocol::mysql::file::EventView,
     protocol::mysql::version::{EventAction, VersionRegistry},
 };
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 /// Per-source transaction engine; adapters own version-specific decoding.
 pub struct Processor {
@@ -25,44 +22,13 @@ impl Processor {
         state: State,
         state_path: Option<PathBuf>,
         transaction_budget: usize,
-    ) -> Result<Self> {
-        Self::with_registry(
-            state,
-            state_path,
-            transaction_budget,
-            VersionRegistry::default(),
-            None,
-        )
-    }
-    pub fn with_registry(
-        state: State,
-        state_path: Option<PathBuf>,
-        transaction_budget: usize,
-        registry: VersionRegistry,
-        selected_adapter: Option<String>,
-    ) -> Result<Self> {
-        Self::with_row_image(
-            state,
-            state_path,
-            transaction_budget,
-            registry,
-            selected_adapter,
-            RowImageMode::Minimal,
-        )
-    }
-
-    /// Uses the saved schema with an explicit policy for online or offline input.
-    pub fn with_row_image(
-        state: State,
-        state_path: Option<PathBuf>,
-        transaction_budget: usize,
         registry: VersionRegistry,
         selected_adapter: Option<String>,
         row_image: RowImageMode,
     ) -> Result<Self> {
         state.validate()?;
         Ok(Self {
-            converter: super::converter::EventConverter::with_row_image(
+            converter: super::converter::EventConverter::new(
                 state.tables.clone(),
                 registry,
                 selected_adapter,
@@ -87,13 +53,6 @@ impl Processor {
         }
         Ok(())
     }
-    pub fn process(
-        &mut self,
-        event: EventView<'_>,
-        output: &mut (impl Write + Send),
-    ) -> Result<()> {
-        self.process_to(event, &crate::sink::JsonLinesSink::new(output))
-    }
     /// Converts a protocol event before transaction delivery; this does not expose
     /// uncommitted rows to the transaction sink.
     pub fn process_binlog<M: mysql_replication::events::BinlogMode>(
@@ -101,9 +60,9 @@ impl Processor {
         event: &mysql_replication::BinlogEvent<'_, M>,
         sink: &dyn crate::sink::TransactionSink,
     ) -> Result<()> {
-        self.process_to(event.frame().into(), sink)
+        self.process(event.frame().into(), sink)
     }
-    pub fn process_to(
+    pub fn process(
         &mut self,
         event: EventView<'_>,
         sink: &dyn crate::sink::TransactionSink,
@@ -154,11 +113,6 @@ impl Processor {
                 if let Some(path) = &self.state_path {
                     self.state.save(path)?;
                 }
-            }
-            EventAction::TableMap | EventAction::Rows => {
-                return Err(invalid(
-                    "EventParser must normalize TABLE_MAP/ROWS into typed views",
-                ));
             }
             EventAction::GroupStart if self.transaction.is_active() => {
                 return Err(invalid("new GTID inside unfinished transaction"));

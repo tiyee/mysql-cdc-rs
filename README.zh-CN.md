@@ -104,25 +104,30 @@ mysql-cdc-rs = { path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run
-use mysql_cdc_rs::{Cdc, CommittedTransaction, Result, config::AppConfig};
+use mysql_cdc_rs::canal::{Canal, CommittedTransaction, Result, config::AppConfig};
 use std::path::Path;
 
 fn main() -> Result<()> {
     let config = AppConfig::read(Path::new("canal.toml"))?;
-    let mut cdc = Cdc::new(config)?;
-    cdc.add_handle(|transaction: CommittedTransaction<'_>| {
+    let mut canal = Canal::new(config)?;
+    canal.add_handle(|transaction: CommittedTransaction<'_>| {
         for change in transaction.changes {
-            println!("{} {:?} {:?}", transaction.source_id, change.operation, change.pk);
+            println!(
+                "{} {:?} {:?}",
+                transaction.source_id, change.operation, change.pk
+            );
         }
         Ok(())
     });
-    cdc.run()
+    canal.run()
 }
 ```
 
-`canal.toml` 使用[独立 Canal 配置](crates/mysql-canal/examples/config/multi-source.toml)，从 `[[sources]]` 开始；不要直接传入 Pikachu 的产品配置。根路径及 `canal` 导出 CDC API，`replication` 导出原始事件 API。库必须注册处理器，才能执行 `run` / `run_once`。
+`canal.toml` 使用[独立 Canal 配置](crates/mysql-canal/examples/config/multi-source.toml)，从 `[[sources]]` 开始；不要直接传入 Pikachu 的产品配置。`mysql-cdc-rs` 仅重导出两个库模块：`canal::Canal` 管理转换、处理器和检查点，`replication` 管理原始读取器与复制流；各模块拥有自己的配置和错误类型。库必须注册处理器，才能执行 `run` / `run_once`。
 
 按模式固定 Rust 类型及读取原始行值的示例见[Rust API 参考](docs/event-api.zh-CN.md)。
+
+原始复制可用 `BinlogFile<_, Full>` / `BinlogFile<_, Minimal>` 或 `ReplicationStream<M>` 静态选择镜像类型。行事件自动关联 TABLE_MAP，`rows.rows()` 产生类型化操作，字段提供列定义与借用值；MINIMAL 区分未记录字段和 SQL NULL。列名等可选元数据缺失时保留未知，具体契约见 [Rust API 参考](docs/event-api.zh-CN.md)。
 
 ## 使用边界
 

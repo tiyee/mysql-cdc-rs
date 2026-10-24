@@ -160,7 +160,7 @@ impl Fixture {
         State::read(&self.config.state_file).unwrap()
     }
     pub fn processor(&self, checkpoint: &State) -> Processor {
-        Processor::with_row_image(
+        Processor::new(
             checkpoint.clone(),
             Some(self.config.state_file.clone()),
             self.config.max_transaction_bytes,
@@ -179,7 +179,7 @@ impl Fixture {
         let mut processor = self.processor(checkpoint);
         let mut stream = self.stream(checkpoint, true);
         while let Some(event) = stream.next_event()? {
-            processor.process_to(event, sink)?;
+            processor.process(event, sink)?;
         }
         processor.finish()?;
         Ok(self.saved())

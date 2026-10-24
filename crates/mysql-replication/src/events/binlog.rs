@@ -1,4 +1,4 @@
-use super::{BinlogMode, Event, EventData, EventHeader, Unspecified};
+use super::{BinlogMode, Event, EventData, EventHeader};
 use crate::{BinlogFrame, Result};
 use std::{ops::Range, sync::Arc};
 
@@ -12,7 +12,7 @@ use std::{ops::Range, sync::Arc};
 /// fn change_policy(event: BinlogEvent<'_, Full>) -> BinlogEvent<'_, Minimal> { event }
 /// ```
 #[derive(Debug, Clone)]
-pub struct BinlogEvent<'a, M: BinlogMode = Unspecified> {
+pub struct BinlogEvent<'a, M: BinlogMode> {
     /// Original header, body and trailer/checksum, excluding file/network framing.
     pub raw_data: &'a [u8],
     /// The same 19-byte common header in every row-image mode.
@@ -53,7 +53,7 @@ impl<M: BinlogMode> BinlogEvent<'_, M> {
 
 /// No self references: a view borrows this owned raw buffer when requested.
 #[derive(Debug, Clone)]
-pub struct OwnedBinlogEvent<M: BinlogMode = Unspecified> {
+pub struct OwnedBinlogEvent<M: BinlogMode> {
     raw_data: Arc<[u8]>,
     header: EventHeader,
     body: Range<usize>,

@@ -1,10 +1,7 @@
 //! Synchronous replication configuration without CDC schema or checkpoints.
 use crate::{
     BinlogEvent, BinlogFrame, BinlogParser, Error, FrameDecoder, MAX_EVENT_BYTES, Result,
-    error::invalid,
-    event_type as code,
-    events::{BinlogMode, ImageMode, Unspecified},
-    parser::ParserConfig,
+    error::invalid, event_type as code, events::BinlogMode, parser::ParserConfig,
 };
 use mysql::{
     BinlogDumpFlags, BinlogRequest, BinlogStream, Conn, Opts, OptsBuilder, SslOpts,
@@ -83,33 +80,14 @@ impl ReplicationConfig {
     }
 }
 
-pub struct ReplicationStream<M: BinlogMode = Unspecified> {
+/// Raw network transport for adapters that own event-body parsing.
+pub struct ReplicationConnection {
     stream: BinlogStream,
     current: Option<DriverEvent>,
     buffer: Vec<u8>,
     framing: FrameDecoder,
-    parser: BinlogParser<M>,
 }
-impl ReplicationStream {
-    /// Validates primary keys for selected tables before starting replication.
-    /// The table list controls validation only; it does not filter binlog events.
-    pub fn connect_with_tables<'a>(
-        connection: &ConnectionConfig,
-        replication: ReplicationConfig,
-        tables: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> Result<Self> {
-        Self::from_connection_with_tables(connect(connection)?, replication, tables)
-    }
-    /// Validates primary keys on this connection before sending the binlog request.
-    /// The table list controls validation only; it does not filter binlog events.
-    pub fn from_connection_with_tables<'a>(
-        mut conn: Conn,
-        config: ReplicationConfig,
-        tables: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> Result<Self> {
-        crate::primary_key::validate_primary_keys(&mut conn, tables)?;
-        Self::from_connection(conn, config)
-    }
+impl ReplicationConnection {
     pub fn connect(connection: &ConnectionConfig, replication: ReplicationConfig) -> Result<Self> {
         Self::from_connection(connect(connection)?, replication)
     }
@@ -145,38 +123,8 @@ impl ReplicationStream {
             current: None,
             buffer: Vec::new(),
             framing: FrameDecoder::new(),
-            parser: BinlogParser::new(config.parser),
         })
     }
-    /// Selects an image policy before connecting and requesting binlog bytes.
-    pub fn connect_with_mode<M: ImageMode>(
-        connection: &ConnectionConfig,
-        replication: ReplicationConfig,
-    ) -> Result<ReplicationStream<M>> {
-        let replication = bind_image_mode::<M>(replication)?;
-        Self::from_connection_with_mode(connect(connection)?, replication)
-    }
-    pub fn from_connection_with_mode<M: ImageMode>(
-        conn: Conn,
-        mut config: ReplicationConfig,
-    ) -> Result<ReplicationStream<M>> {
-        config = bind_image_mode::<M>(config)?;
-        let stream = Self::from_connection(conn, config)?;
-        Ok(ReplicationStream {
-            stream: stream.stream,
-            current: stream.current,
-            buffer: stream.buffer,
-            framing: stream.framing,
-            parser: stream.parser.with_mode(),
-        })
-    }
-}
-impl<M: ImageMode> ReplicationStream<M> {
-    pub fn for_mode(connection: &ConnectionConfig, config: ReplicationConfig) -> Result<Self> {
-        ReplicationStream::connect_with_mode::<M>(connection, config)
-    }
-}
-impl<M: BinlogMode> ReplicationStream<M> {
     /// CDC's fast path: checksum verification and a borrowed body, with no raw
     /// frame assembly, GTID metadata decoding or row-value materialization.
     pub fn next_view(&mut self) -> Result<Option<crate::EventView<'_>>> {
@@ -201,14 +149,35 @@ impl<M: BinlogMode> ReplicationStream<M> {
     pub fn next_frame(&mut self) -> Result<Option<BinlogFrame<'_>>> {
         read_frame(&mut self.stream, &mut self.buffer, &mut self.framing)
     }
+}
+
+/// Typed event subscription; the image mode is explicit and fixed.
+pub struct ReplicationStream<M: BinlogMode> {
+    connection: ReplicationConnection,
+    parser: BinlogParser<M>,
+}
+impl<M: BinlogMode> ReplicationStream<M> {
+    pub fn connect(connection: &ConnectionConfig, config: ReplicationConfig) -> Result<Self> {
+        let config = bind_image_mode::<M>(config)?;
+        Self::from_connection(connect(connection)?, config)
+    }
+    pub fn from_connection(conn: Conn, config: ReplicationConfig) -> Result<Self> {
+        let config = bind_image_mode::<M>(config)?;
+        let parser = BinlogParser::new(config.parser);
+        Ok(Self {
+            connection: ReplicationConnection::from_connection(conn, config)?,
+            parser,
+        })
+    }
     pub fn next_event(&mut self) -> Result<Option<BinlogEvent<'_, M>>> {
-        let Some(frame) = read_frame(&mut self.stream, &mut self.buffer, &mut self.framing)? else {
+        let Some(frame) = self.connection.next_frame()? else {
             return Ok(None);
         };
         self.parser.parse(frame).map(Some)
     }
 }
-fn bind_image_mode<M: ImageMode>(mut config: ReplicationConfig) -> Result<ReplicationConfig> {
+
+fn bind_image_mode<M: BinlogMode>(mut config: ReplicationConfig) -> Result<ReplicationConfig> {
     let expected = M::ROW_IMAGE.into();
     if config
         .required_row_image

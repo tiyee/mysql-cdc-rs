@@ -17,13 +17,12 @@ crates/pikachu/
 ├── examples/config/     # CLI configuration
 └── tests/               # CLI replay tests
 crates/mysql-canal/
-├── src/cdc.rs           # Cdc and committed transaction handlers
 ├── src/config/          # Named sources and CDC policy
-├── src/model/           # Exact primary keys and lightweight changes
+├── src/model/           # Exact primary keys, changes and committed transaction views
 ├── src/protocol/mysql/  # CDC adapters and selective primary-key decoding
 ├── src/source/          # Source plugins, schema discovery and initial positions
-├── src/engine/          # Event conversion, transactions, offline replay and checkpoints
-├── src/sink/            # Transaction sinks and JSON Lines output
+├── src/engine/          # Canal lifecycle, event conversion, replay and checkpoints
+├── src/sink/            # Transaction handlers, sinks and JSON Lines output
 ├── examples/            # CDC listeners, adapters and configuration
 ├── benches/             # Selective decoding benchmarks
 └── tests/               # CDC, conversion and dedicated MySQL tests
@@ -42,11 +41,11 @@ docs/                   # Configuration, events, architecture, development, test
 .github/workflows/       # CI, MySQL compatibility and workspace publishing
 ```
 
-Use `Cdc` for configuration-driven CDC and `TransactionHandler` for committed transactions. `mysql_cdc_rs::replication::BinlogEvent` describes one protocol event; `mysql_cdc_rs::CommittedTransaction` describes converted, committed changes. `engine::converter::EventConverter` explicitly converts binlog views into changes and transaction actions; `Processor` buffers the changes and delivers them only at commit. A QUERY containing DDL is valid in the replication layer; the CDC layer stops with `Error::Statement`.
+Use `Canal` for configuration-driven CDC and `TransactionHandler` for committed transactions. `mysql_cdc_rs::replication::BinlogEvent` describes one protocol event; `mysql_cdc_rs::canal::CommittedTransaction` describes converted, committed changes. `engine::converter::EventConverter` explicitly converts binlog views into changes and transaction actions; `Processor` buffers the changes and delivers them only at commit. A QUERY containing DDL is valid in the replication layer; the CDC layer stops with `Error::Statement`.
 
 CDC uses the replication library's `next_view()` network path to borrow the driver body directly, without assembling a second raw buffer. Offline replay uses `next_frame()`. Both paths delay ROWS image parsing until table selection, decode only the primary key and skip other values by their encoded lengths. Table layout metadata is still required to locate fields safely. The selected row-image mode is checked against the upstream setting; replication cannot request individual columns from an existing binlog. See the [replication API](../crates/mysql-replication/README.md) for raw events, parser configuration and transport limits.
 
-For opt-in raw row inspection, `mysql_replication::events::RowsDecoder` returns borrowed, sparse before/after images independently from the CDC path; see [row decoding](event-api.md#decoding-raw-row-images).
+For raw row inspection, `mysql_replication::events::RowsDecoder<M>` returns generic operations with borrowed images independently from the CDC path; see [row decoding](event-api.md#read-events-with-fields).
 
 ## Performance design
 
@@ -69,7 +68,7 @@ These benchmarks measure direct Decoder calls and the EventParser + `dyn RowDeco
 
 The CLI flushes output, writes state, and fsyncs on every transaction. With many small transactions, persistence often costs more than decoding. For higher throughput, implement `TransactionSink` with batched durable storage and acknowledge the transaction before saving the checkpoint. Shared multi-source output takes one lock per transaction. Slow output applies backpressure without an unbounded message queue. Total transaction budgets are the sum of all source budgets, plus driver buffers and metadata. Source transport and version/row adapters dispatch per connection or event; sinks dispatch per transaction. Row callbacks keep borrowed types.
 
-The library's `Decoder::new(Vec<TableMeta>)` accepts whitelisted schemas in column order. `table_map(&[u8])` preprocesses mappings, and `rows(event_type, &[u8], callback)` delivers borrowed `Change` values. Inputs are event bodies with the 19-byte common header and checksum removed; the decoder does not assume full row images. Use `Change::into_owned()` when retaining changes beyond the input buffer's lifetime. Use `Processor` for commit handling, `source::mysql::MysqlSource` for real connections, and `Runtime` for multi-source execution. See `crates/mysql-canal/tests/integration/mysql_live.rs` for the live path.
+The library's `Decoder::<M>::new(Vec<TableMeta>)` accepts whitelisted schemas in column order, with `M` set to `Full` or `Minimal`. `table_map_event(TableMapEvent)` preprocesses mappings, and `rows_event(RowsEvent, callback)` delivers borrowed `Change` values. Inputs are normalized views from an FDE-bound `EventParser`. Use `Change::into_owned()` when retaining changes across events. `Canal` manages source lifecycles and transaction handlers, `Processor` handles commits and persistence, and `Runtime` schedules sources. See `crates/mysql-canal/tests/integration/mysql_live.rs` for the live path.
 
 ## Version adapters and plugins
 
@@ -91,16 +90,16 @@ Unregistered series are rejected. A condition such as `major >= 5` is not suffic
 
 To add a version, implement `VersionAdapter` and call `runtime.versions.register(Arc::new(adapter))`. Each FDE creates a file-specific parser through `create_event_parser`; `create_decoder` handles column metadata and value encoding. `crates/mysql-canal/examples/custom_version.rs` provides a compilable template. Registration alone does not establish compatibility.
 
-When event structures differ, override `create_event_parser`. A custom `EventParser` produces borrowed `TableMapEvent` and `RowsEvent` views directly from the input, handling offsets, field order, endianness, and new event codes without rebuilding a canonical byte buffer. Control events may return `ParsedEvent::Control`. `classify` handles `Unclassified` events; QUERY/ROTATE/TABLE_MAP/ROWS already recognized by the parser do not call it again.
+When event structures differ, override `create_event_parser`. A custom `EventParser` produces borrowed `TableMapEvent` and `RowsEvent` views directly from the input, handling offsets, field order, endianness, and new event codes without rebuilding a canonical byte buffer. Control events may return `ParsedEvent::Control`. The converter handles the returned transaction or log action directly.
 
 The default `MysqlEventParser` precompiles TABLE_MAP ID widths, ROWS v1/v2 headers, and QUERY/ROTATE post-header lengths from the FDE into a fixed dispatch table. A ROWS event with a zero post-header length in the FDE is rejected even if its code is known. Core row loops consume normalized views without reading version numbers or wire event types. Image parsers are selected at FDE/event time, and excluded tables are skipped before extra-data, bitmap, or value parsing.
 
-Custom parsers use `RowsEvent::new(..., parse_images)` to provide a function returning borrowed `RowImages`. Reuse the default `Decoder` when MySQL value encodings match. Otherwise, override `create_decoder` and implement `RowDecoder::table_map_event` and `rows_event`. Raw-body methods handle standard layouts; default trait view methods reject nonstandard layouts explicitly. `crates/mysql-canal/tests/integration/event_adapters.rs` uses synthetic vendor formats to cover four-byte IDs, extended control headers, reordered fields, alternate endianness, new ROWS codes, file transitions, and zero-copy UTF-8 keys. These fixtures do not represent real-server compatibility tests.
+Custom parsers use `RowsEvent::new(..., parse_images)` to provide a function returning borrowed `RowImages`. Reuse the default `Decoder` when MySQL value encodings match. Otherwise, override `create_decoder` and implement `RowDecoder::table_map_event` and `rows_event`. `RowDecoder` requires `table_map_event` and `rows_event`; all wire parsing belongs to the FDE-bound `EventParser`. `crates/mysql-canal/tests/integration/event_adapters.rs` uses synthetic vendor formats to cover four-byte IDs, extended control headers, reordered fields, alternate endianness, new ROWS codes, file transitions, and zero-copy UTF-8 keys. These fixtures do not represent real-server compatibility tests.
 
 The transport owns common binlog v4 framing: the 19-byte header, FDE bootstrap, and CRC32/NONE. The current MySQL driver also preparses FDE/TABLE_MAP/ROTATE, so it may reject vendor layout changes before they reach the adapter. Such cases need a custom `SourcePlugin` as well. Registering a `VersionAdapter` alone cannot bypass driver layout restrictions. Default Oracle MySQL adapters continue to enforce validated layouts rather than assuming unknown FDE length changes are safe.
 
 ```rust,ignore
-let mut runtime = mysql_cdc_rs::engine::Runtime::default();
+let mut runtime = mysql_cdc_rs::canal::engine::Runtime::default();
 runtime.versions.register(std::sync::Arc::new(MyVersionAdapter))?;
 // runtime.sources.register(Arc::new(MySourcePlugin))?;
 runtime.run(config, false, sink)?;
@@ -108,7 +107,7 @@ runtime.run(config, false, sink)?;
 
 Adapter selection is automatic by default. To override a built-in adapter for the same series, set `adapter = "your-adapter"` in that source's configuration. Overlapping matches without an explicit selection produce an ambiguity error; registration order does not silently override adapters. A pinned adapter also constrains historical FDE versions, so recovery across series upgrades generally uses automatic selection with all required adapters registered.
 
-Custom version adapters opt into FULL through `validate_server_with_row_image` and `create_decoder_with_row_image`; the default implementations handle MINIMAL and reject FULL.
+Custom adapters implement `validate_server(variables, consumer_id, row_image)` and `create_decoder(tables, format, row_image)`. The common v4 defaults support both policies; custom restrictions must be explicit. `RowDecoder` accepts normalized views only, and `EventParser` owns all structural/control classification.
 
 ## Making and verifying changes
 
@@ -134,17 +133,17 @@ Raw row decoding is opt-in:
 
 ```text
 TABLE_MAP ──> RowsDecoder::new ──> compiled column layout
-ROWS ───────> RowsEvent::rows ──> Row { before, after }
-                                      └─> RowImage::fields ──> RowField / RowValue
+ROWS ───────> RowsEvent::rows ──> Row<M> { operation }
+                                      └─> RowImage::fields ──> Field / RowValue
 ```
 
 [`RowsKind`](../crates/mysql-replication/src/events/rows.rs) distinguishes `Write`, `Update` and `Delete`. WRITE has an after image; UPDATE pairs before/after images; DELETE has a before image. The [raw decoder](../crates/mysql-replication/src/events/rows/decoder.rs) exposes present fields with absolute zero-based column indices. Missing columns remain absent, and a present SQL NULL is `RowValue::Null`. MINIMAL images cannot reconstruct a complete old/new row.
 
-TABLE_MAP provides wire layouts, but the raw decoder does not infer SQL signedness, column names or character sets. Callers choose signed/unsigned integer interpretation from their SQL metadata. Strings remain bytes; temporal, JSON, geometry and vector values remain encoded bytes. Exact DECIMAL values retain precision and scale. Raw decoding does not require a primary key or manage transactions, output handlers or checkpoints. See the [decoder example](../crates/mysql-replication/examples/decode_rows.rs).
+TABLE_MAP provides wire layouts, but the raw decoder does not guess missing SQL signedness, column names or character sets. Callers choose signed/unsigned integer interpretation from their SQL metadata. Strings remain bytes; temporal, JSON, geometry and vector values remain encoded bytes. Exact DECIMAL values retain precision and scale. Raw decoding does not require a primary key or manage transactions, output handlers or checkpoints. See the [decoder example](../crates/mysql-replication/examples/decode_rows.rs).
 
-Callers maintain TABLE_MAP plans independently per source, replace remapped IDs, and clear plans at file/statement boundaries. Raw row iteration can yield rows before a later error and provides no commit visibility guarantee.
+For `BinlogParser<Full>` / `BinlogParser<Minimal>`, a static mode strategy owns source-local TABLE_MAP state, binds each ROWS event to its historical plan, replaces remaps and clears file/statement boundaries. `RowsEvent<M>::rows()` returns `Row { operation: RowOperation<M::Image> }`; `fields()` exposes column metadata plus borrowed values. FULL/MINIMAL dispatch is static. Explicit `RowsDecoder<M>` consumers maintain their own mappings. Optional names, signedness, collations and primary-key metadata are decoded when present; unknown attributes remain in the original TLVs. Missing attributes are never inferred from the current schema. Raw iteration can yield rows before a later error and provides no commit visibility guarantee.
 
-The separate [`primary_key`](../crates/mysql-replication/src/primary_key.rs) helper validates selected tables through INFORMATION_SCHEMA. `connect_with_tables` / `from_connection_with_tables` opt into this preflight; their table list does not filter the replication stream. Plain `connect` / `from_connection` remain available without preflight. These optional APIs serve raw-library callers. Canal owns a separate source-level preflight that reuses its CDC key decoder's type rules; its normal stream uses `from_connection` after that check. The raw decoder remains independent of primary-key policy.
+The separate `primary_key::validate_primary_keys` helper performs optional INFORMATION_SCHEMA preflight before a caller opens raw transport. It does not filter events. Canal owns its separate source preflight and opens `ReplicationConnection` only after validation. Raw decoding remains independent of primary-key policy.
 
 ### Canal: protocol views to committed CDC changes
 
@@ -166,16 +165,16 @@ Offline: replication BinlogFile::next_frame ──> canal EventView
                         ├─ retain OwnedChange until commit
                         ├─ rollback: discard buffered changes
                         └─ commit: TransactionSink
-                                      └─> Cdc handlers ──> save checkpoint
+                                      └─> Canal handlers ──> save checkpoint
 ```
 
 [`EventConverter`](../crates/mysql-canal/src/engine/converter.rs) selects adapters from each FDE's producer version. The [`EventParser`](../crates/mysql-canal/src/protocol/mysql/events/parser.rs) normalizes version-specific event layouts. The [`RowDecoder`](../crates/mysql-canal/src/protocol/mysql/version.rs) interface and built-in [`Decoder`](../crates/mysql-canal/src/protocol/mysql/decoder.rs) apply historical SQL schema and exact table selection. Excluded tables are skipped before row-image parsing. Selected rows decode only the key and skip non-key values by encoded length, while still checking NULL constraints and byte boundaries.
 
 `Change<'_>` contains table metadata, operation, exact primary key, optional previous key and shared changed-column indices. INSERT/UPDATE indices follow the after-image bitmap; DELETE has no changed fields. An after-image field does not necessarily differ from its old value. Source identity is supplied by the transaction; the JSON sink resolves column indices to names. CDC does not expose full row objects or non-key field values.
 
-Conversion alone is not committed delivery. `EventConverter::convert_binlog` accepts a structured `BinlogEvent`, converts its frame to the CDC view and uses canal's adapters; it does not consume predecoded raw `RowValue` objects. Its callbacks can run before COMMIT and do not buffer or discard rolled-back rows. Use [`Processor`](../crates/mysql-canal/src/engine/processor.rs) or [`Cdc`](../crates/mysql-canal/src/cdc.rs) for transaction delivery.
+Conversion alone is not committed delivery. `EventConverter::convert_binlog` accepts a structured `BinlogEvent`, converts its frame to the CDC view and uses canal's adapters; it does not consume predecoded raw `RowValue` objects. Its callbacks can run before COMMIT and do not buffer or discard rolled-back rows. Use [`Processor`](../crates/mysql-canal/src/engine/processor.rs) or [`Canal`](../crates/mysql-canal/src/engine/canal.rs) for transaction delivery.
 
-`Processor` turns borrowed changes into owned transaction data only when retaining them across events. COMMIT/XID passes a complete transaction to `TransactionSink`. `Cdc`'s sink invokes registered `TransactionHandler`s in order with a borrowing `CommittedTransaction`; all must succeed before the checkpoint is saved. Fully filtered commits still deliver an empty change slice. Rollback discards the buffer and may save the rollback position. DDL and other unsupported statements stop CDC with `Error::Statement`; errors and incomplete transactions do not persist an unacknowledged commit. Output followed by a crash before checkpoint persistence can replay, so handlers must tolerate duplicates.
+`Processor` turns borrowed changes into owned transaction data only when retaining them across events. COMMIT/XID passes a complete transaction to `TransactionSink`. `Canal`'s sink invokes registered `TransactionHandler`s in order with a borrowing `CommittedTransaction`; all must succeed before the checkpoint is saved. Fully filtered commits still deliver an empty change slice. Rollback discards the buffer and may save the rollback position. DDL and other unsupported statements stop CDC with `Error::Statement`; errors and incomplete transactions do not persist an unacknowledged commit. Output followed by a crash before checkpoint persistence can replay, so handlers must tolerate duplicates.
 
 ### Startup, recovery and source isolation
 
@@ -191,14 +190,14 @@ Current-primary-key preflight is a startup eligibility check; saved historical s
 
 ### Pikachu and facade integration
 
-[`pikachu-cdc`](../crates/pikachu/src/bin/pikachu-cdc.rs) maps `check`, `init`, `run` and `run --once` to `Cdc`. It registers [`PrintHandle`](../crates/pikachu/src/bin/print_handle/mod.rs) for consumption. That handler delegates to canal's `JsonLinesSink`, writes change records to stdout and flushes before checkpoint persistence; flushing is not downstream durable acknowledgement. Diagnostics go to stderr.
+[`pikachu-cdc`](../crates/pikachu/src/bin/pikachu-cdc.rs) maps `check`, `init`, `run` and `run --once` to `Canal`. It registers [`PrintHandle`](../crates/pikachu/src/bin/print_handle/mod.rs) for consumption. That handler delegates to canal's `JsonLinesSink`, writes change records to stdout and flushes before checkpoint persistence; flushing is not downstream durable acknowledgement. Diagnostics go to stderr.
 
 `replay` delegates to canal's [`engine::Replay`](../crates/mysql-canal/src/engine/replay.rs). Replay owns file-name and event-boundary checks, FDE bootstrapping, historical-event skipping and transaction delivery through `Processor`. It uses the supplied checkpoint's historical schema and an explicit `TransactionSink`, without updating the state file or querying the current server. Positions are checked before processing each event, including commits; later errors can still follow earlier successful commits. The CLI contains no event loop or protocol dispatch.
 
-Use `mysql-replication` for protocol inspection, `mysql-canal` for embedded committed CDC, or [`mysql-cdc-rs`](../crates/mysql-cdc/src/lib.rs) for both through one dependency. The facade's root `Error`/`Result` are canal's; raw operations use `replication::Error`/`replication::Result`.
+Use `mysql-replication` for protocol inspection, `mysql-canal` for embedded committed CDC, or [`mysql-cdc-rs`](../crates/mysql-cdc/src/lib.rs) for both through one dependency. The aggregate only re-exports `canal` and `replication`; each module owns its construction, configuration and error types. Use `canal::Canal::new`, `canal::Error` / `canal::Result`, or the readers, streams and error types under `replication`.
 
-Generic entry points bind shared `Minimal` / `Full` types at construction. Replication carries `M` through parser, reader, `BinlogEvent`, `EventData`, `RowsEvent` and owned views. `Event` remains the shared object-safe decoding interface for common control bodies. Canal exposes `Cdc<M>` and `Decoder<M>`; fixed CDC instances reject source configuration conflicts before startup. Built-in adapters assemble generic decoders per FDE, while normalized changes and transaction delivery retain shared types. The default `Configured` CDC entry point permits mixed sources; dynamic adapter interfaces remain object safe.
+Generic entry points bind shared `Minimal` / `Full` types at construction. Replication carries `M` through parser, reader, `BinlogEvent`, `EventData`, `RowsEvent` and owned views. `Event` remains the shared object-safe decoding interface for common control bodies. Canal exposes `Decoder<M>` for typed row decoding. `Canal::new(AppConfig)` orchestrates sources, each with its own replication image setting. Built-in adapters assemble `Decoder<Full>` or `Decoder<Minimal>` per source and FDE, while normalized changes and transaction delivery retain shared types. A single consumer can include both modes; dynamic adapter interfaces remain object safe.
 
 ### Image policies
 
-`mysql_replication::config::RowImageMode`, re-exported by canal, is source-local under `[sources.mysql-replication]` and defaults to MINIMAL. Runtime passes it to online server checks and to Processor → EventConverter → VersionAdapter → Decoder; each FDE rebinds the decoder with the same policy. Offline replay supplies the mode explicitly. Raw `RowsEvent` and `RowsDecoder` remain bitmap-driven and independent of this CDC policy. FULL requires complete images but retains selective key decoding, borrowed UTF-8 keys and shared after-image column indices. Checkpoints store historical schemas; the mode is a runtime option, not a property inferred from the current server or FDE.
+`mysql_replication::config::RowImageMode`, re-exported by canal, is source-local under `[sources.mysql-replication]` and defaults to MINIMAL. Runtime passes it to online server checks and to Processor → EventConverter → VersionAdapter → Decoder<M>; each FDE rebinds the decoder with the same policy. Offline replay supplies the mode explicitly. Raw `RowsEvent` and `RowsDecoder` remain bitmap-driven and independent of this CDC policy. FULL requires complete images but retains selective key decoding, borrowed UTF-8 keys and shared after-image column indices. Checkpoints store historical schemas; the mode is a runtime option, not a property inferred from the current server or FDE.

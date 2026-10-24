@@ -1,9 +1,6 @@
-use super::events::{
-    GENERATED_INVISIBLE_PK_F, MysqlEventParser, RowsEvent, STMT_END_F, TableMapEvent,
-};
+use super::events::{GENERATED_INVISIBLE_PK_F, RowsEvent, STMT_END_F, TableMapEvent};
 use crate::{
-    CdcMode, Change, ColumnMeta, Configured, Error, Operation, PrimaryKey, Result, TableMeta,
-    config::RowImageMode,
+    CdcImageMode, Change, ColumnMeta, Error, Operation, PrimaryKey, Result, TableMeta,
     error::invalid,
     model::schema::{KeyDecoder, key_decoder},
     protocol::mysql::wire::{Cursor, bit, set_bits},
@@ -91,35 +88,17 @@ impl ImagePlan {
 
 /// TABLE_MAP preprocessing + sparse ROWS decoding. The callback borrows event bytes.
 /// Only white-listed tables are compiled; other tables' ROWS payloads are skipped.
-pub struct Decoder<M: CdcMode = Configured> {
-    policy: M::Policy,
+pub struct Decoder<M: CdcImageMode> {
+    mode: std::marker::PhantomData<M>,
     tables: BTreeMap<String, BTreeMap<String, Arc<TableMeta>>>,
     compiled: BTreeMap<String, BTreeMap<String, Arc<TablePlan>>>,
     index: Vec<(u64, Option<Arc<TablePlan>>)>,
 }
 
-impl Decoder {
+impl<M: CdcImageMode> Decoder<M> {
     pub fn new(tables: Vec<TableMeta>) -> Result<Self> {
-        Self::with_row_image(tables, RowImageMode::Minimal)
-    }
-
-    /// Compiles layouts for the selected image policy without materializing rows.
-    pub fn with_row_image(tables: Vec<TableMeta>, row_image: RowImageMode) -> Result<Self> {
-        Self::build(tables, row_image)
-    }
-}
-impl<M: mysql_replication::events::ImageMode + CdcMode> Decoder<M> {
-    pub fn for_mode(tables: Vec<TableMeta>) -> Result<Self> {
-        Self::build(
-            tables,
-            <M as mysql_replication::events::ImageMode>::ROW_IMAGE,
-        )
-    }
-}
-impl<M: CdcMode> Decoder<M> {
-    fn build(tables: Vec<TableMeta>, row_image: RowImageMode) -> Result<Self> {
         let mut out = Self {
-            policy: M::policy(row_image)?,
+            mode: std::marker::PhantomData,
             tables: BTreeMap::new(),
             compiled: BTreeMap::new(),
             index: Vec::new(),
@@ -142,11 +121,6 @@ impl<M: CdcMode> Decoder<M> {
 
     pub fn clear_table_maps(&mut self) {
         self.index.clear();
-    }
-
-    /// Input excludes the 19-byte common header and checksum. Modern 6-byte IDs only.
-    pub fn table_map(&mut self, data: &[u8]) -> Result<()> {
-        self.table_map_event(MysqlEventParser::standard().table_map(data)?)
     }
 
     pub fn table_map_event(&mut self, event: TableMapEvent<'_>) -> Result<()> {
@@ -195,18 +169,6 @@ impl<M: CdcMode> Decoder<M> {
     }
 
     /// Supports WRITE_ROWS_EVENT, UPDATE_ROWS_EVENT and DELETE_ROWS_EVENT, v1/v2.
-    pub fn rows(
-        &mut self,
-        event_type: u8,
-        data: &[u8],
-        mut emit: impl FnMut(Change<'_>) -> Result<()>,
-    ) -> Result<()> {
-        self.rows_event(
-            MysqlEventParser::standard().rows(event_type, data)?,
-            &mut emit,
-        )
-    }
-
     pub fn rows_event(
         &mut self,
         event: RowsEvent<'_>,
@@ -252,7 +214,6 @@ impl<M: CdcMode> Decoder<M> {
         }
         // Validate once per event, before the row loop and any callback.
         M::validate_image(
-            &self.policy,
             operation,
             count,
             bit(first, table.pk_index),

@@ -27,7 +27,7 @@ The Rust type is `BinlogEvent<'a, M>`. `Event<'a>` is a shared, object-safe **tr
 
 ### Common envelope and header
 
-These are all public fields of `BinlogEvent<'a, M>`, for `M = Unspecified`, `Minimal` or `Full`:
+These are all public fields of `BinlogEvent<'a, M>`, for `M = Minimal` or `Full`:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -59,6 +59,7 @@ The internal `body` field is not public. `event.frame().body` exposes the borrow
 | `Query` / `QueryEvent<'a>` | `thread_id: u32`, `execution_time: u32`, `error_code: u16`, `status_vars`, `schema`, `query` (each `&'a [u8]`) |
 | `TableMap` / `TableMapEvent<'a>` | `table_id: u64`, `flags: u16`, `schema`, `table`, `column_data` (each `&'a [u8]`) |
 | `Rows` / `RowsEvent<'a, M>` | `table_id: u64`, `flags: u16`, `kind: RowsKind`, `encoded_images: &'a [u8]` |
+| `RowsStatementEnd` / `RowsStatementEndEvent<'a>` | `table_id()`, `flags()`, `kind()`; no columns or row images |
 | `Xid` / `XidEvent` | `xid: u64` |
 | `Gtid` and `AnonymousGtid` / `GtidEvent` | `flags: u8`, `sid: [u8; 16]`, `gno: i64`, plus the optional metadata listed below |
 | `TaggedGtid` / `TaggedGtidEvent<'a>` | `gtid: GtidEvent`, `tag: &'a str`, `unknown_fields: &'a [u8]` |
@@ -70,81 +71,71 @@ The optional `GtidEvent` fields are `last_committed` / `sequence_number` (`Optio
 
 `TableMapEvent::columns()` exposes `TableColumns { count: usize, types, metadata, nullable, optional_metadata }`, with the last four fields borrowed byte slices. `PreviousGtidsEvent::sids()` exposes `SidIntervals { sid, intervals }`, both borrowed byte slices. These accessors are also shared by both modes. The `RowsEvent.flags` value is a ROWS-body flag set, separate from `BinlogEvent.header.flags`.
 
-### Fields and accessors that differ by mode
+### Fields and accessors selected by the generic mode
 
-The four public `RowsEvent` fields above retain the same names and wire meaning. The mode difference appears when decoding images and rows:
+Select `Full` or `Minimal` before reading. The same marker types are re-exported by canal. The parser, reader, event envelope, ROWS body and images retain `M`; mode selection uses static trait dispatch, without a runtime mode enum or per-row mode checks.
 
 | API / property | `Minimal` | `Full` |
 | --- | --- | --- |
-| Envelope / body types | `BinlogEvent<'a, Minimal>` / `EventData<'a, Minimal>` | `BinlogEvent<'a, Full>` / `EventData<'a, Full>` |
-| `RowsEvent<M>::rows(&RowsDecoder)` | `Result<TypedRows<'a, Minimal>>` | `Result<TypedRows<'a, Full>>` |
-| Iterator item | `Result<TypedRow<'a, Minimal>>` | `Result<TypedRow<'a, Full>>` |
-| Public `TypedRow.before` | `Option<SparseImage<'a>>` | `Option<CompleteImage<'a>>` |
-| Public `TypedRow.after` | `Option<SparseImage<'a>>` | `Option<CompleteImage<'a>>` |
-| Image shape | Present columns only; complete bitmaps are also accepted by raw replication | Every column must exist in each existing image; sparse input is rejected, not filled in |
-| `image.field(index)` | `Result<Option<RowValue<'a>>>`; `None` for an absent or out-of-range column | `Result<RowValue<'a>>`; every in-range column exists, out-of-range access is an error |
-| Column indices | `image.column_indices()` gives present absolute zero-based indices | All table indices are present; use `image.as_ref().column_indices()` if needed |
+| Envelope / body | `BinlogEvent<'a, Minimal>` / `EventData<'a, Minimal>` | `BinlogEvent<'a, Full>` / `EventData<'a, Full>` |
+| `RowsEvent<M>::rows()` | `Result<Rows<'a, Minimal>>` | `Result<Rows<'a, Full>>` |
+| Iterator item | `Result<Row<'a, Minimal>>` | `Result<Row<'a, Full>>` |
+| `Row.operation` | `RowOperation<SparseImage<'a>>` | `RowOperation<CompleteImage<'a>>` |
+| `image.field(index)` | `Result<Option<Field<'_, 'a>>>`; absent is `None` | `Result<Field<'_, 'a>>`; every in-range column exists |
+| `image.fields()` | Present fields in table-column order | All fields in table-column order |
+| `image.columns()` | All table column definitions, including absent fields | All table column definitions |
+| Out-of-range index | `Error::Invalid` | `Error::Invalid` |
 
-`TypedRowsEvent<M>` has no public fields; use `table_id()`, `flags()`, `kind()`, `column_count()` and `rows()`.
+`RowOperation<I>` has `Insert { after: I }`, `Update { before: I, after: I }`, and `Delete { before: I }` variants. Required images cannot be missing. `before()` / `after()` borrow the applicable image; `into_images()` consumes the operation and returns the corresponding optional pair.
 
-Both image types have `column_count()` (total table columns) and `fields()` (an iterator over present fields). Their internal buffers/plans are private. `RowField` has `column_index: u16` and `value: RowValue<'a>` in both modes. Column names, SQL signedness and character-set interpretation are not supplied as mode-specific row fields.
+A present SQL NULL is `Field { value: RowValue::Null, .. }`. Under MINIMAL, `field(i)? == None` means a valid table column was not logged. Missing columns are never filled with NULL, defaults or values fetched from the current server. MINIMAL accepts complete bitmaps too; bytes cannot establish the producer's configured image policy.
 
-`RowsEvent::images()` returns the shared encoded view `RowImages { extra_data: &'a [u8], column_count: usize, before_columns: &'a [u8], after_columns: &'a [u8], rows: &'a [u8] }`. For WRITE, `before_columns` names the **first wire bitmap**, which describes the after image; for DELETE both bitmap fields reference the before bitmap, and UPDATE has separate before/after bitmaps. These names do not create a before image for an INSERT. Full-mode parsing checks complete bitmaps before returning normal ROWS envelopes; statement-end sentinels carry no images. Field values are validated during row iteration.
+`RowsEvent<M>::table()` and `columns()` return the bound historical definition in a `Result`. The parser owns a source-local TABLE_MAP registry and replaces a plan on every remap, even when the ID and column count are unchanged. It clears the registry on FDE, ROTATE, QUERY, XID and the ROWS statement-end flag. The final ordinary row event retains its bound plan after clearing. Missing TABLE_MAP and mismatched column counts are errors. Choose `M` explicitly in the constructor; a reader cannot change its mode.
 
-The default `Unspecified` policy keeps the unclassified/raw API: `RowsEvent::rows` returns `Rows<'a>` with `Row { before: Option<RowImage<'a>>, after: Option<RowImage<'a>> }`. It does not establish a MINIMAL/FULL producer setting. Raw views from `next_frame()` / `next_view()` are likewise unclassified.
+`EventData::RowsStatementEnd` represents the special statement-end sentinel. Its payload exposes `table_id()`, `flags()` and `kind()`, with no table definition or row iterator. It clears mappings without requiring a TABLE_MAP. Both modes reject partial-JSON row events with `Error::Unsupported`; raw frame/view APIs remain available.
 
-| Operation (`RowsKind`) | `before` in either mode | `after` in either mode |
+### Column metadata and borrowed field values
+
+`TableDefinition` owns `schema: Box<[u8]>`, `table: Box<[u8]>`, shared `columns: Arc<[ColumnInfo]>`, and the original `optional_metadata: Box<[u8]>` TLVs. Each `ColumnInfo` contains:
+
+| Field | Type | Meaning |
 | --- | --- | --- |
-| INSERT (`Write`) | `None` | `Some(image)` |
-| UPDATE (`Update`) | `Some(image)` | `Some(image)` |
-| DELETE (`Delete`) | `Some(image)` | `None` |
+| `index` | `u16` | Absolute zero-based table ordinal |
+| `name` | `Option<Box<str>>` | UTF-8 column name when logged |
+| `definition` | `ColumnDefinition` | Validated wire type, resolved type, nullability and encoding parameters |
+| `unsigned` | `Option<bool>` | Logged numeric signedness; `None` means unknown |
+| `collation_id` | `Option<u32>` | Logged character collation ID |
+| `primary_key` | `Option<bool>` | Logged key membership; absent key metadata stays unknown |
+| `primary_key_prefix` | `Option<usize>` | Character prefix length; zero means the entire key column |
 
-Three cases remain distinct: `row.after` being `None` means the operation has no after image; `SparseImage::field(i)?` returning `None` means the column is not represented (or is out of range); `Some(RowValue::Null)` means a present column holds SQL NULL. Full-image access returns `RowValue::Null` directly for a present SQL NULL.
+`Field<'meta, 'event>` contains `column: &'meta ColumnInfo` and `value: RowValue<'event>`. Definitions are shared across events/images with `Arc`; row bytes remain borrowed. The metadata borrow cannot outlive the image, and a borrowed value cannot outlive the event buffer. `into_owned()` retains one raw buffer plus its shared TABLE_MAP plan; `view()` rebuilds borrowed fields without server queries or self-references and preserves the actual checksum.
 
-```rust,no_run
-use mysql_replication::{Full, Minimal, Result, events::{RowValue, TypedRow}};
+Column metadata is independent of row-image completeness. `binlog_row_image=FULL` does not guarantee names; `binlog_row_metadata=FULL` logs additional attributes on servers supporting that setting. Missing attributes remain `None`. Malformed names, signedness, charset or key metadata return errors. Unknown TLVs remain available in `optional_metadata`; ENUM/SET labels and other attributes are not normalized by this API. See the [MySQL metadata setting](https://dev.mysql.com/doc/refman/8.4/en/replication-options-binary-log.html#sysvar_binlog_row_metadata).
 
-fn inspect_minimal(row: TypedRow<'_, Minimal>) -> Result<()> {
-    if let Some(after) = row.after {
-        match after.field(0)? {
-            None => println!("column 0 is absent"),
-            Some(RowValue::Null) => println!("column 0 is SQL NULL"),
-            Some(value) => println!("column 0: {value:?}"),
-        }
-    }
-    Ok(())
-}
+Integers retain their wire width; choose `signed()` or `unsigned()` using known metadata. DECIMAL remains exact with precision and scale. Text/BLOB values remain borrowed bytes; temporal, JSON, geometry and vector values remain encoded bytes. No character-set conversion or JSON object materialization is implied.
 
-fn inspect_full(row: TypedRow<'_, Full>) -> Result<()> {
-    if let Some(after) = row.after {
-        let value: RowValue<'_> = after.field(0)?;
-        println!("column 0: {value:?}");
-    }
-    Ok(())
-}
-```
-
-These types are raw replication records. Canal's `Change` / `OwnedChange` instead contain `table`, `operation`, `pk`, `previous_pk` and `changed`; `CommittedTransaction` contains `source_id`, `checkpoint` and `changes`. Those public fields stay the same across modes. FULL changes which after-image column indices are included in `changed`; it does not add full-row values to CDC output. Canal also imposes its key-only MINIMAL before-image policy for selected single-key tables, while raw `Minimal` accepts sparse or complete images without requiring a primary key.
-
-## Decoding raw row images
-
-The event framework lives in `events`: `BinlogEvent` is the common container, `EventHeader` the common header, and `EventData` the typed body enum. Container ownership, control events, TABLE_MAP and ROWS have separate implementation modules. `RowsEvent` describes the wire event and `RowsDecoder` compiles the column layout independently from CDC policy.
+## Read events with fields
 
 ```rust,no_run
-use mysql_replication::{Result, events::{RowValue, RowsDecoder, RowsEvent, TableMapEvent}};
+use mysql_replication::{EventData, Full, Result, file::BinlogFile, parser::ParserConfig};
+use std::{fs::File, io::BufReader};
 
-fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
-    let decoder = RowsDecoder::new(table)?;
-    for row in event.rows(&decoder)? {
-        let row = row?;
-        for (label, image) in [("before", row.before), ("after", row.after)] {
-            if let Some(image) = image {
-                for field in image.fields() {
-                    let field = field?;
-                    match field.value {
-                        RowValue::Null => println!("{label}[{}] = NULL", field.column_index),
-                        RowValue::Decimal(value) => println!("{label}[{}] = {value}", field.column_index),
-                        value => println!("{label}[{}] = {value:?}", field.column_index),
+fn inspect() -> Result<()> {
+    let mut reader = BinlogFile::<_, Full>::new(
+        BufReader::new(File::open("binlog.000001")?),
+        ParserConfig::default(),
+    )?;
+    while let Some(event) = reader.next_event()? {
+        if let EventData::Rows(rows) = event.event {
+            for row in rows.rows()? {
+                let (before, after) = row?.operation.into_images();
+                for image in before.into_iter().chain(after) {
+                    for field in image.fields() {
+                        let field = field?;
+                        println!(
+                            "{} {:?}: {:?}",
+                            field.column.index, field.column.name, field.value
+                        );
                     }
                 }
             }
@@ -154,64 +145,43 @@ fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
 }
 ```
 
-Cache one decoder per active TABLE_MAP within each source. Replace it when the table ID is remapped and clear mappings at file/statement boundaries. The decoder checks table ID and column count, but cannot detect a stale mapping with the same ID and column count. It owns the compiled layouts, so the input TABLE_MAP may be released. Each ROWS iterator compiles its sparse image plans once and shares column indices across rows; row payloads are borrowed without allocating a full row vector. Row boundaries, field lengths, NULL constraints and packed DECIMAL groups are validated before each operation is yielded. A decoding error is yielded once and terminates that iterator; earlier rows may already have been consumed. This API provides no transaction buffering.
-
-- WRITE has only `after`, DELETE only `before`, and UPDATE has paired images. A missing image is `None`. Within an image, `fields()` yields only present columns with absolute zero-based indices. `RowValue::Null` means a present SQL NULL; an absent column is not filled in or inferred. Compact NULL bitmaps support sparse images and tables wider than 64 columns.
-- Integers retain their actual wire width in `IntegerValue`. Call `signed()` or `unsigned()` using known SQL metadata; required TABLE_MAP metadata does not identify signedness. `DecimalValue` preserves precision and scale, validates packed digit groups, and formats exactly, including 65-digit values. FLOAT/DOUBLE, BIT, ENUM indices, SET masks and YEAR have explicit value variants.
-- CHAR/VARCHAR and BLOB values are borrowed `Bytes`, excluding length prefixes. Character sets are not guessed. Temporal, JSON, geometry and vector values are borrowed `Encoded` bytes; `decoder.columns()` exposes their type and encoding metadata. This API does not convert them into dates, JSON objects or vectors. Legacy DECIMAL, typed arrays and unknown column types are explicitly unsupported.
-- Invalid lengths, incomplete UPDATE pairs, invalid metadata and NULL in NOT NULL columns return raw protocol errors. Raw row decoding does not require a primary key; the separate selected-table preflight applies key restrictions when requested. CDC-specific decoding errors belong to `mysql-canal`. The CDC path continues skipping non-key values and does not call this decoder.
-
-Run the complete offline inspection example with a binlog file that includes its FDE and TABLE_MAP events:
-
-```sh
-cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001
-```
-
-## Choose image types with generics
-
-`RowsEvent` remains the common borrowed wire event. `TypedRowsDecoder<M>` binds a TABLE_MAP plan to an image policy and returns `TypedRowsEvent<'a, M>` / `TypedRow<'a, M>`:
-
-| Mode | Image type | `field(index)` result |
-| --- | --- | --- |
-| `Minimal` | `SparseImage<'a>` | `Result<Option<RowValue<'a>>>`; absent is `None`, SQL NULL is `Some(RowValue::Null)` |
-| `Full` | `CompleteImage<'a>` | `Result<RowValue<'a>>`; every in-range column exists, SQL NULL is `RowValue::Null` |
+The same reader with `Minimal` yields `SparseImage`. Mode-specific field access is checked by the compiler:
 
 ```rust,no_run
-use mysql_replication::{Result, events::{
-    Full, Minimal, RowValue, RowsEvent, TableMapEvent, TypedRowsDecoder,
-}};
+use mysql_replication::{
+    Result,
+    events::{CompleteImage, Field, SparseImage},
+};
 
-fn inspect(table: &TableMapEvent<'_>, event: &RowsEvent<'_>) -> Result<()> {
-    let full = TypedRowsDecoder::<Full>::new(table)?;
-    for row in full.rows(event)? {
-        if let Some(after) = row?.after {
-            let value: RowValue<'_> = after.field(0)?;
-            println!("{value:?}");
-        }
-    }
-    let minimal = TypedRowsDecoder::<Minimal>::new(table)?;
-    for row in minimal.rows(event)? {
-        if let Some(after) = row?.after {
-            let value: Option<RowValue<'_>> = after.field(0)?;
-            println!("{value:?}");
-        }
+fn full(image: &CompleteImage<'_>) -> Result<()> {
+    let field: Field<'_, '_> = image.field(0)?;
+    println!("{:?}: {:?}", field.column.name, field.value);
+    Ok(())
+}
+
+fn minimal(image: &SparseImage<'_>) -> Result<()> {
+    let field: Option<Field<'_, '_>> = image.field(0)?;
+    if let Some(field) = field {
+        println!("{:?}: {:?}", field.column.name, field.value);
     }
     Ok(())
 }
 ```
 
-`TypedRowsDecoder::<Full>::event` rejects an incomplete bitmap in either existing image before iteration with `Error::Unsupported`. Values and complete UPDATE pairs are validated before yielding each row; malformed input yields one error and stops. WRITE has only `after`, DELETE only `before`, and UPDATE both. The generic changes the image type, not whether an operation has a before or after image. `CompleteImage::try_from(raw_image)` checks the same completeness invariant.
+Each ROWS iterator compiles its sparse image plans once and shares column indices across rows, including tables wider than 64 columns. `field(index)` scans present fields up to the requested index; prefer `fields()` for sequential access. Row boundaries, lengths, NULL constraints and packed DECIMAL groups are validated before yielding each operation. A late error is yielded once and terminates the iterator; previously yielded rows remain visible. There is no transaction buffering in replication.
 
-`column_count()` reports the total TABLE_MAP column count, including absent columns. `fields()` streams present fields with absolute column indices and is preferred for sequential access. `field(index)` scans up to that column without allocating; FULL returns `Error::Invalid` for an out-of-range index, MINIMAL returns `None`. Bytes remain borrowed and rows share the compiled column-index plan. Typed events and rows can outlive their decoder, but not the input bytes. `AsRef<RowImage>` permits common generic code; no full-row vector is created.
+## Raw transport and explicit protocol layouts
 
-Use `raw_event.with_mode::<Full>(&raw_decoder)` to reuse an existing `RowsDecoder`. `TypedRowsDecoder::<Full>::from(raw_decoder)` also reuses its plan. Modes are sealed to preserve the completeness check. MINIMAL accepts complete bitmaps too: an INSERT or a table without a primary key can have all columns even under MINIMAL logging. The bytes cannot establish the producer's setting; online callers separately set `required_row_image` to check that setting.
+`file::FrameReader<R>::new(reader)` exposes validated `next_frame()` results without a field policy. `stream::ReplicationConnection` exposes raw network `next_frame()` / borrowed `next_view()`. Custom adapters use these transport interfaces and own their structural parser. Typed `BinlogFile<R, M>` and `ReplicationStream<M>` expose only `next_event()`, and require an explicit `M`.
 
-For a runtime parameter, select the generic implementation once at the boundary with `match mode { ... run::<Minimal>(), ... run::<Full>() }`. The example defaults to MINIMAL and accepts both values:
+For a standalone layout already validated by the caller, `RowsEvent::<M>::with_layout(kind, post_header, v2)` plus `Event::decode(body)` parses the ROWS envelope. `RowsDecoder::<M>::new(table_map)?.rows(&event)` decodes it using an explicitly supplied TABLE_MAP. This uses the same `Row<M>`, `Rows<M>`, `Field` and image types as automatic parser binding, without alternate event representations or cross-mode conversion. Raw protocol decoding requires no primary key. Canal keeps its own adapters, saved schema and selective key decoder.
 
 ```sh
-cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image full
-cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.000001 --row-image minimal
+cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001 --row-image full
+cargo run -p mysql-replication --example decode_rows -- /path/to/binlog.000001 --row-image minimal
 ```
+
+The single row example chooses a generic instantiation once at its command-line boundary. Row decoding itself uses static dispatch.
 
 ## Normalized canal event fields
 
@@ -233,7 +203,9 @@ cargo run -p mysql-replication --example decode_typed_rows -- /path/to/binlog.00
 | `checkpoint` | `&'a State` | Commit boundary saved only after all handlers succeed |
 | `changes` | `&'a [OwnedChange]` | Changes in binlog order; empty for a fully filtered commit |
 
-`State` carries the historical schema, file/position and source UUID/ID/plugin. Transaction data is borrowed for the callback; clone only what must outlive it. `EventConverter` callbacks can run before COMMIT. Use `Cdc` or `Processor` for committed delivery.
+`Canal::new(AppConfig)` creates the multi-source consumer. Each source configures its replication row-image mode independently; adapters construct `Decoder<Full>` or `Decoder<Minimal>` at the FDE boundary and decode rows through static dispatch.
+
+`State` carries the historical schema, file/position and source UUID/ID/plugin. Transaction data is borrowed for the callback; clone only what must outlive it. `EventConverter` callbacks can run before COMMIT. Use `Canal` or `Processor` for committed delivery.
 
 MINIMAL and FULL use these same normalized types and fields. Their difference is the after-image indices recorded in `changed`, described below; neither mode adds full row values.
 
@@ -250,12 +222,16 @@ In Rust, `Config::replication` uses `mysql_replication::config::Config`, re-expo
 `config::Config` owns reusable connection/subscription settings and supports `config::RowImageMode::{Minimal, Full}`. It defaults to MINIMAL, validates the required upstream setting without modifying MySQL, and builds low-level connection/stream configurations. Canal includes this exact type in its required `[sources.mysql-replication]` section. Defaults are 10 seconds for `connect_timeout_secs` and 90 for `read_timeout_secs`; zero timeouts are rejected. `tls_ca` is optional; an embedding application resolves relative paths. The binlog file and position are supplied by the consumer at runtime.
 
 ```rust,no_run
-use mysql_replication::{Result, config::{Config, RowImageMode}, stream::ReplicationStream};
+use mysql_replication::{
+    Full, Result,
+    config::{Config, RowImageMode},
+    stream::ReplicationStream,
+};
 
 fn main() -> Result<()> {
     let mut settings = Config::new("MYSQL_URL", 123);
     settings.row_image = RowImageMode::Full;
-    let mut stream = ReplicationStream::connect(
+    let mut stream = ReplicationStream::<Full>::connect(
         &settings.connection_config()?,
         settings.replication_config("binlog.000001", 4)?,
     )?;
@@ -269,16 +245,18 @@ fn main() -> Result<()> {
 The low-level APIs remain available for explicit parser selection and optional table preflight:
 
 ```rust,no_run
-use mysql_replication::{Result, stream::{ConnectionConfig, ReplicationConfig, ReplicationStream, RowImage}, parser::ParserConfig};
+use mysql_replication::{
+    Result,
+    primary_key::validate_primary_keys,
+    stream::{ConnectionConfig, ReplicationConfig, ReplicationConnection, connect},
+};
 
 fn main() -> Result<()> {
     let connection = ConnectionConfig::new("MYSQL_URL");
-    let mut config = ReplicationConfig::new(123, "binlog.000001", 4);
-    config.required_row_image = Some(RowImage::Minimal);
-    config.parser = ParserConfig::minimal();
-    let mut stream = ReplicationStream::connect_with_tables(
-        &connection, config, [("app", "users"), ("app", "orders")],
-    )?;
+    let mut conn = connect(&connection)?;
+    validate_primary_keys(&mut conn, [("app", "users"), ("app", "orders")])?;
+    let config = ReplicationConfig::new(123, "binlog.000001", 4);
+    let mut stream = ReplicationConnection::from_connection(conn, config)?;
     while let Some(view) = stream.next_view()? {
         // Borrowed body: no second raw-frame copy or row-value decoding.
         println!("{} {}", view.header.event_type, view.body.len());
@@ -289,18 +267,18 @@ fn main() -> Result<()> {
 
 Connection configuration controls credentials via an environment variable, TLS CA and timeouts. Replication configuration controls server ID, file/position, blocking mode, required upstream row image and parser options. Row-image requirements are verified, never changed globally. MySQL sends the available binlog bytes; there is no per-column network projection.
 
-`ReplicationStream::connect_with_tables` and `from_connection_with_tables` validate the caller's selected tables through INFORMATION_SCHEMA before sending a binlog request. Every selected table must have a single-column PRIMARY KEY: TINYINT/SMALLINT/MEDIUMINT/INT/BIGINT (signed or unsigned), exact DECIMAL, or CHAR/VARCHAR using utf8, utf8mb3, utf8mb4, ascii or latin1. Missing tables/keys, composite keys, UNIQUE-only indexes, FLOAT/DOUBLE, binary/date keys and unsupported character sets return an error with the database/table and, when available, column name. Empty selections are rejected. This list controls validation only, not event filtering. `connect` and `from_connection` perform raw replication without this preflight. Call `primary_key::validate_primary_keys(&mut conn, tables)` to run the same check independently without starting replication. `mysql-canal` owns its CDC startup eligibility checks and does not depend on these helpers. Raw event parsing and row decoding require no primary key.
+`primary_key::validate_primary_keys(&mut conn, tables)` performs optional INFORMATION_SCHEMA preflight before the caller constructs a transport. Selected tables need a supported single-column PRIMARY KEY; missing/composite keys and unsupported types or character sets fail explicitly. The list controls validation, not filtering. Raw transport and row decoding themselves require no key. Canal owns its separate startup eligibility check.
 
 - `next_event()` returns typed protocol events and the complete raw bytes.
 - `next_frame()` validates bounds and checksums, retaining raw bytes while leaving body interpretation to custom adapters.
 - Network `next_view()` validates the driver's event and borrows its body directly, avoiding full raw-frame assembly for consumers that do not need it.
-- `ParserConfig::minimal()` skips GTID metadata and Previous GTIDs decoding. They remain explicit raw bodies with their original event codes.
-- ROWS image parsing is deferred by default; `RowsEvent::images()` reads extra data and sparse bitmaps on demand. `RowsDecode::ValidateImages` validates those immediately. These parser modes do not decode field values; the separate `RowsDecoder` API on this page is opt-in.
-- `TableMapEvent::columns()` validates column envelopes on demand, after table selection.
+- `ParserConfig { decode_gtids: false, decode_previous_gtids: false }` retains those bodies as raw events.
+- Typed parsers bind TABLE_MAP and validate image bitmaps at event time; row values remain borrowed and are validated during iteration.
+- `TableMapEvent::columns()` exposes wire metadata; typed parsers compile its definitions before returning a TABLE_MAP.
 
 ## Protocol and transport limits
 
-The structured parser selects advertised layouts from every file's FDE and accepts the registered MySQL series 5.7, 8.0–8.4, 9.0 and 9.7. Producer versions must have numeric `major.minor.patch` components, optionally followed by a nonempty `-` or `+` suffix (such as `5.7.44-log` or `8.0.45-0ubuntu0.24.04.1`). Malformed versions and MariaDB identifiers are rejected, using the same numeric parsing rules as CDC. Unknown series/layouts fail explicitly. `next_frame()` permits custom body parsers. When switching between frame/view and structured-event methods, feed encountered FDE frames into your own `BinlogParser`; the built-in structured parser only observes `next_event()` calls.
+The structured parser selects advertised layouts from every file's FDE and accepts the registered MySQL series 5.7, 8.0–8.4, 9.0 and 9.7. Producer versions must have numeric `major.minor.patch` components, optionally followed by a nonempty `-` or `+` suffix (such as `5.7.44-log` or `8.0.45-0ubuntu0.24.04.1`). Malformed versions and MariaDB identifiers are rejected, using the same numeric parsing rules as CDC. Unknown series/layouts fail explicitly. `next_frame()` permits custom body parsers. Raw transport and typed readers are separate interfaces. Feed every FDE and TABLE_MAP to a custom parser when using raw transport.
 
 Offline files must retain their initial FDE. CRC32/NONE are supported; truncated tails and oversized events fail, with a 64 MiB bound. Network transport uses `mysql`'s driver, which pre-parses FDE/TABLE_MAP/ROTATE and allocates before this library can check event size. Custom framing may require another transport. Full raw network events preserve the driver's original header fields, body, algorithm and stored checksum; they never call the driver's checksum-recalculating serializer. `next_view()` avoids this assembly entirely. Disconnects propagate errors without silent reconnects.
 

@@ -61,9 +61,15 @@ impl Log {
         self.snapshot.save(&state_path).unwrap();
         let saved = fs::read(&state_path).unwrap();
         fs::write(&path, &self.bytes).unwrap();
-        let result = Replay::new(State::read(&state_path).unwrap(), budget)
-            .unwrap()
-            .run(&path, sink);
+        let result = Replay::new(
+            State::read(&state_path).unwrap(),
+            budget,
+            mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+            None,
+            mysql_canal::config::RowImageMode::Minimal,
+        )
+        .unwrap()
+        .run(&path, sink);
         assert_eq!(fs::read(state_path).unwrap(), saved);
         result
     }
@@ -203,13 +209,19 @@ fn replay_propagates_sink_failure_and_transaction_budget() {
 #[test]
 fn replay_requires_matching_filename() {
     let log = Log::new();
-    let error = Replay::new(log.snapshot.clone(), 1024)
-        .unwrap()
-        .run(
-            &log.directory.join("binlog.000002"),
-            &JsonLinesSink::new(Vec::new()),
-        )
-        .unwrap_err();
+    let error = Replay::new(
+        log.snapshot.clone(),
+        1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap()
+    .run(
+        &log.directory.join("binlog.000002"),
+        &JsonLinesSink::new(Vec::new()),
+    )
+    .unwrap_err();
     assert!(matches!(error, Error::Schema(message)
         if message == "replay filename must match the state's binlog file"));
 }

@@ -15,10 +15,9 @@ struct RowsLayout {
     operation: Operation,
     id_width: usize,
     parse_images: RowImagesParser,
-    standard: bool,
 }
 
-/// Compiled once from each FDE. CommittedTransaction codes directly index a fixed dispatch table;
+/// Compiled once from each FDE. Event codes directly index a fixed dispatch table;
 /// the per-row loop never branches on producer version or ROWS v1/v2.
 pub struct MysqlEventParser {
     table_id_width: usize,
@@ -63,7 +62,6 @@ impl MysqlEventParser {
                 } else {
                     parse_row_images
                 },
-                standard: width == 6,
             });
         }
         Ok(Self {
@@ -73,62 +71,34 @@ impl MysqlEventParser {
             rows,
         })
     }
-    /// Raw Decoder compatibility API: modern TABLE_MAP plus ROWS v1 and v2,
-    /// without a file-level FDE. Streaming callers should use from_format.
-    pub(crate) fn standard() -> &'static Self {
-        static STANDARD: std::sync::OnceLock<MysqlEventParser> = std::sync::OnceLock::new();
-        STANDARD.get_or_init(|| {
-            let mut rows = [None; 256];
-            for (kind, operation, v2) in row_kinds() {
-                rows[usize::from(kind)] = Some(RowsLayout {
-                    operation,
-                    id_width: 6,
-                    parse_images: if v2 {
-                        parse_v2_row_images
-                    } else {
-                        parse_row_images
-                    },
-                    standard: true,
-                });
-            }
-            Self {
-                table_id_width: 6,
-                query_post_header: 13,
-                rotate_post_header: 8,
-                rows,
-            }
-        })
-    }
-    pub(crate) fn table_map<'a>(&self, body: &'a [u8]) -> Result<TableMapEvent<'a>> {
+    pub fn table_map<'a>(&self, body: &'a [u8]) -> Result<TableMapEvent<'a>> {
         let mut input = Cursor::new(body);
         let id = input.le(self.table_id_width)?;
         let flags = input.le(2)? as u16;
         let schema = input.name()?;
         let table = input.name()?;
-        let mut parsed = TableMapEvent::new(id, flags, schema, table, input.remaining());
-        if self.table_id_width == 6 {
-            parsed.standard_body = Some(body);
-        }
-        Ok(parsed)
+        Ok(TableMapEvent::new(
+            id,
+            flags,
+            schema,
+            table,
+            input.remaining(),
+        ))
     }
-    pub(crate) fn rows<'a>(&self, kind: u8, body: &'a [u8]) -> Result<RowsEvent<'a>> {
+    pub fn rows<'a>(&self, kind: u8, body: &'a [u8]) -> Result<RowsEvent<'a>> {
         let layout = self.rows[usize::from(kind)].ok_or_else(|| {
             Error::Unsupported(format!("ROWS event {kind} not advertised by this FDE"))
         })?;
         let mut input = Cursor::new(body);
         let id = input.le(layout.id_width)?;
         let flags = input.le(2)? as u16;
-        let mut parsed = RowsEvent::new(
+        Ok(RowsEvent::new(
             id,
             flags,
             layout.operation,
             input.remaining(),
             layout.parse_images,
-        );
-        if layout.standard {
-            parsed.standard_body = Some((kind, body));
-        }
-        Ok(parsed)
+        ))
     }
 }
 impl EventParser for MysqlEventParser {
@@ -147,7 +117,7 @@ impl EventParser for MysqlEventParser {
             event::ROTATE_EVENT => {
                 ParsedEvent::Control(parse_rotate(raw.data, self.rotate_post_header)?)
             }
-            _ => ParsedEvent::Unclassified(raw),
+            _ => ParsedEvent::Control(super::super::version::classify_mysql_event(raw)?),
         })
     }
 }

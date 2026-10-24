@@ -16,8 +16,13 @@ fn protocol_events_convert_to_exact_cdc_changes_without_copying_utf8_keys() {
     table.columns[0].charset = Some("utf8mb4".into());
     table.columns[0].octet_length = Some(100);
     let mut framing = FrameDecoder::new();
-    let mut parser = BinlogParser::default();
-    let mut converter = EventConverter::new(vec![table.clone()], VersionRegistry::default(), None);
+    let mut parser = BinlogParser::<mysql_replication::Minimal>::default();
+    let mut converter = EventConverter::new(
+        vec![table.clone()],
+        VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    );
     let fde = framed(FORMAT_DESCRIPTION_EVENT, 100, &format(), false);
     let event = parser.parse(framing.decode(&fde).unwrap()).unwrap();
     assert!(matches!(
@@ -73,9 +78,17 @@ fn protocol_events_convert_to_exact_cdc_changes_without_copying_utf8_keys() {
 
 #[test]
 fn typed_binlog_input_is_delivered_only_after_cdc_commit() {
-    let mut processor = Processor::new(state(), None, 1024 * 1024).unwrap();
+    let mut processor = Processor::new(
+        state(),
+        None,
+        1024 * 1024,
+        mysql_canal::protocol::mysql::version::VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
     let mut framing = FrameDecoder::new();
-    let mut parser = BinlogParser::default();
+    let mut parser = BinlogParser::<mysql_replication::Minimal>::default();
     let mut output = Vec::new();
     let frames = [
         framed(FORMAT_DESCRIPTION_EVENT, 100, &format(), false),
@@ -117,8 +130,13 @@ fn typed_binlog_input_is_delivered_only_after_cdc_commit() {
 #[test]
 fn ddl_is_a_valid_protocol_event_and_an_explicit_cdc_error() {
     let mut framing = FrameDecoder::new();
-    let mut parser = BinlogParser::default();
-    let mut converter = EventConverter::new(vec![basic()], VersionRegistry::default(), None);
+    let mut parser = BinlogParser::<mysql_replication::Minimal>::default();
+    let mut converter = EventConverter::new(
+        vec![basic()],
+        VersionRegistry::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    );
     let fde = framed(FORMAT_DESCRIPTION_EVENT, 100, &format(), false);
     let event = parser.parse(framing.decode(&fde).unwrap()).unwrap();
     converter
@@ -147,7 +165,7 @@ fn full_converter_preserves_mode_across_fde_and_borrows_utf8_keys() {
     table.columns[0] = column("id", "varchar", true);
     table.columns[0].charset = Some("utf8mb4".into());
     table.columns[0].octet_length = Some(100);
-    let mut converter = EventConverter::with_row_image(
+    let mut converter = EventConverter::new(
         vec![table.clone()],
         VersionRegistry::default(),
         None,
