@@ -176,6 +176,7 @@ impl Default for VersionRegistry {
             (8, 4, "mysql84"),
             (9, 0, "mysql90"),
             (9, 7, "mysql97"),
+            (26, 10, "mysql2610"),
         ]
         .into_iter()
         .map(|(major, minor, name)| {

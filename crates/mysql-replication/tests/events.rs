@@ -421,7 +421,12 @@ fn producer_version_requires_complete_numbers_and_rejects_mariadb() {
             "malformed producer {version} must fail"
         );
     }
-    for version in ["5.7.44-MariaDB", "8.4.6-mArIaDb", "9.7.2-MariaDB"] {
+    for version in [
+        "5.7.44-MariaDB",
+        "8.4.6-mArIaDb",
+        "9.7.2-MariaDB",
+        "26.10.0-MariaDB",
+    ] {
         let raw = frame(FORMAT_DESCRIPTION_EVENT, &format(version), false, 0);
         let mut framing = FrameDecoder::new();
         assert!(
@@ -434,6 +439,7 @@ fn producer_version_requires_complete_numbers_and_rejects_mariadb() {
         "8.0.45-0ubuntu0.24.04.1",
         "8.4.6-commercial",
         "9.7.2+build.1",
+        "26.10.0-commercial",
     ] {
         let raw = frame(FORMAT_DESCRIPTION_EVENT, &format(version), false, 0);
         let mut framing = FrameDecoder::new();
@@ -458,13 +464,15 @@ fn framing_and_layout_failures_are_explicit() {
     assert!(
         matches!(reader.next_event(),Err(Error::Io(e)) if e.kind()==io::ErrorKind::UnexpectedEof)
     );
-    let unknown = frame(FORMAT_DESCRIPTION_EVENT, &format("10.0.1"), false, 0);
     let mut framing = FrameDecoder::new();
-    let raw = framing.decode(&unknown).unwrap();
-    assert!(matches!(
-        BinlogParser::<Minimal>::default().parse(raw),
-        Err(Error::Unsupported(_))
-    ));
+    for version in ["10.0.1", "26.7.0", "26.11.0"] {
+        let unknown = frame(FORMAT_DESCRIPTION_EVENT, &format(version), false, 0);
+        let raw = framing.decode(&unknown).unwrap();
+        assert!(matches!(
+            BinlogParser::<Minimal>::default().parse(raw),
+            Err(Error::Unsupported(message)) if message.contains(version)
+        ));
+    }
     let mut bad = fde;
     bad[9..13].copy_from_slice(&18u32.to_le_bytes());
     assert!(matches!(framing.decode(&bad), Err(Error::Invalid(_))));
@@ -499,7 +507,20 @@ fn each_fde_reselects_layout_and_unknown_changes_are_rejected() {
         };
         assert_eq!(description.server_version, version);
     }
-    let mut changed = format("8.4.6");
+    // Post-header lengths advertised by MySQL 26.10.0. Its ROWS v1 slots are zero.
+    let mut changed = format("26.10.0");
+    changed.truncate(57);
+    changed.extend([
+        0, 13, 0, 8, 0, 0, 0, 0, 4, 0, 4, 0, 0, 0, 99, 0, 4, 26, 8, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0,
+        10, 10, 10, 42, 42, 0, 18, 52, 0, 10, 40, 0, 0,
+    ]);
+    let raw = frame(FORMAT_DESCRIPTION_EVENT, &changed, false, 0);
+    parser.parse(framing.decode(&raw).unwrap()).unwrap();
+    let raw = frame(WRITE_ROWS_EVENT_V1, &[], false, 0);
+    assert!(matches!(
+        parser.parse(framing.decode(&raw).unwrap()),
+        Err(Error::Unsupported(message)) if message == format!("ROWS event {WRITE_ROWS_EVENT_V1} absent from FDE")
+    ));
     changed[57 + usize::from(TABLE_MAP_EVENT) - 1] = 6;
     let raw = frame(FORMAT_DESCRIPTION_EVENT, &changed, false, 0);
     assert!(

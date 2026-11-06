@@ -8,7 +8,7 @@
 
 ## 1. 准备 MySQL
 
-以下配置适用于 MySQL 5.7、8.0、8.4 LTS 和 9.7 LTS。
+以下配置适用于 MySQL 5.7、8.0、8.4 LTS、9.7 LTS 和 26.10 Innovation。
 
 ```ini
 [mysqld]
@@ -28,7 +28,7 @@ MySQL 从 8.0.3 起提供 `binlog_row_value_options`，从 8.0.20 起提供 `bin
 CREATE USER 'cdc'@'127.0.0.1' IDENTIFIED BY 'replace-me';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'cdc'@'127.0.0.1';
 GRANT SELECT ON app.* TO 'cdc'@'127.0.0.1';
--- Initialization uses a global read lock; RELOAD can be granted on MySQL 5.7/8.x.
+-- Initialization takes a global read lock with FLUSH TABLES WITH READ LOCK.
 GRANT RELOAD ON *.* TO 'cdc'@'127.0.0.1';
 ```
 

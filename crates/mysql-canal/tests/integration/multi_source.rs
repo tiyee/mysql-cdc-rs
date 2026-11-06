@@ -539,6 +539,7 @@ fn version_profiles_validate_each_supported_series_and_reject_unknown_series() {
         ("8.4.6", "mysql84", "SHOW BINARY LOG STATUS"),
         ("9.0.1", "mysql90", "SHOW BINARY LOG STATUS"),
         ("9.7.2", "mysql97", "SHOW BINARY LOG STATUS"),
+        ("26.10.0", "mysql2610", "SHOW BINARY LOG STATUS"),
     ] {
         let body = format_for(version);
         let f = FormatDescription::parse(&body).unwrap();
@@ -579,15 +580,16 @@ fn version_profiles_validate_each_supported_series_and_reject_unknown_series() {
         "9.1.0",
         "9.8.0",
         "26.7.0",
+        "26.11.0",
+        "26.10.0-MariaDB",
         "5.7.44-MariaDB",
         "9.7.2-MariaDB",
         "10.0.0",
     ] {
-        assert!(
-            registry
-                .resolve(&ServerVersion::parse(version).unwrap(), None)
-                .is_err()
-        );
+        assert!(matches!(
+            registry.resolve(&ServerVersion::parse(version).unwrap(), None),
+            Err(Error::Unsupported(message)) if message.contains(version)
+        ));
     }
     assert!(
         registry
@@ -1220,7 +1222,7 @@ fn full_capabilities_are_opt_in_and_keep_other_safety_checks() {
         ("binlog_row_image".into(), "FULL".into()),
         ("server_id".into(), "1".into()),
     ]);
-    for version in ["5.7.44", "8.0.45", "8.4.6", "9.7.2"] {
+    for version in ["5.7.44", "8.0.45", "8.4.6", "9.7.2", "26.10.0"] {
         let adapter = VersionRegistry::default()
             .resolve(&ServerVersion::parse(version).unwrap(), None)
             .unwrap();

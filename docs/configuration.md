@@ -8,7 +8,7 @@ Follow this guide to prepare MySQL, connect one source, check and run consumptio
 
 ## 1. Prepare MySQL
 
-These settings apply to MySQL 5.7, 8.0, 8.4 LTS and 9.7 LTS.
+These settings apply to MySQL 5.7, 8.0, 8.4 LTS, 9.7 LTS and 26.10 Innovation.
 
 ```ini
 [mysqld]
@@ -28,7 +28,7 @@ Example permissions; an administrator should replace the address, password, and 
 CREATE USER 'cdc'@'127.0.0.1' IDENTIFIED BY 'replace-me';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'cdc'@'127.0.0.1';
 GRANT SELECT ON app.* TO 'cdc'@'127.0.0.1';
--- Initialization uses a global read lock; RELOAD can be granted on MySQL 5.7/8.x.
+-- Initialization takes a global read lock with FLUSH TABLES WITH READ LOCK.
 GRANT RELOAD ON *.* TO 'cdc'@'127.0.0.1';
 ```
 

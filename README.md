@@ -20,7 +20,7 @@ mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 | [pikachu](crates/pikachu/README.md) | `pikachu-cdc` | CLI product built on canal, with JSON Lines output |
 | [mysql-cdc-rs](crates/mysql-cdc/README.md) | Unified Rust library | Unified library entry point re-exporting both libraries |
 
-All four package manifests specify **2.1.0** and require Rust **1.89+**. The real-server matrix covers the historical Oracle MySQL 5.7 and 8.0 series and both LTS series, 8.4 and 9.7. It tests the first and latest available Docker patch in each LTS series. Built-in adapters also accept 8.1–8.3 and 9.0. See the [testing guide](docs/testing.md).
+All four package manifests specify **2.1.0** and require Rust **1.89+**. The real-server matrix covers the historical Oracle MySQL 5.7 and 8.0 series, the 8.4 and 9.7 LTS series, and the 26.10 Innovation series. It tests the first and latest available Docker patch in each LTS series. Built-in adapters also accept 8.1–8.3 and 9.0. See the [testing guide](docs/testing.md).
 
 ## CLI example
 

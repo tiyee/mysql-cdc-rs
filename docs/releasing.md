@@ -13,7 +13,7 @@
 | 代码质量 | stable Rust：rustfmt、Clippy（warnings 拒绝）、rustdoc（warnings 拒绝） |
 | Rust 测试 | Ubuntu / Rust 1.89.0、Ubuntu / stable、macOS / stable |
 | 目标编译 | 同一 Rust 矩阵检查库、CLI、示例和 benchmark |
-| 实库测试 | Ubuntu / MySQL 5.7、8.0、8.4 LTS、9.7 LTS，分别运行 ROW + MINIMAL / FULL |
+| 实库测试 | Ubuntu / MySQL 5.7、8.0、8.4 LTS、9.7 LTS、26.10 Innovation，分别运行 ROW + MINIMAL / FULL |
 | 发布包 | `cargo publish --workspace --dry-run --locked --registry crates-io` |
 | 发布保护 | Python 测试验证 tag 必须精确匹配 Cargo 版本，包括预发布版本 |
 
@@ -21,7 +21,7 @@
 
 MySQL 矩阵按每个系列的 MINIMAL / FULL 两种模式启动专用容器，串行执行 replication、canal 和 CLI 的实库目标。完整场景与本地命令集中维护在[测试指南](testing.zh-CN.md)。合成协议回归和实库验证分别执行，不能互相替代。
 
-截至 2026-11，MySQL 矩阵保留 5.7 与 8.0 历史基线，并覆盖其后全部已发布 LTS 系列 8.4、9.7，依据 [MySQL 官方版本说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)。5.7 固定最终版 `mysql:5.7.44`，其余分别使用 `mysql:8.0`、`mysql:8.4`、`mysql:9.7` 系列标签跟踪可用补丁；不用 `latest` 或 `lts` 替代显式系列。两个 LTS 系列还固定测试首版 `mysql:8.4.0` 和 `mysql:9.7.0`，包括 InnoDB 保存点回滚后的输出与恢复。实际补丁版本会写入测试日志，并用 `CDC_TEST_MYSQL_SERIES` 校验镜像确实属于对应系列。新增 LTS 系列时，同步更新复制库的生产者版本检查和 Canal 的 `VersionRegistry`，并在矩阵中加入首版及系列标签。9.0 是 Innovation 系列，适配器保留，但不列入 LTS CI 矩阵。
+截至 2026-11，MySQL 矩阵保留 5.7 与 8.0 历史基线，并覆盖其后全部已发布 LTS 系列 8.4、9.7，依据 [MySQL 官方版本说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)。5.7 固定最终版 `mysql:5.7.44`，其余分别使用 `mysql:8.0`、`mysql:8.4`、`mysql:9.7` 系列标签跟踪可用补丁；不用 `latest` 或 `lts` 替代显式系列。两个 LTS 系列还固定测试首版 `mysql:8.4.0` 和 `mysql:9.7.0`，包括 InnoDB 保存点回滚后的输出与恢复。实际补丁版本会写入测试日志，并用 `CDC_TEST_MYSQL_SERIES` 校验镜像确实属于对应系列。新增 LTS 系列时，同步更新复制库的生产者版本检查和 Canal 的 `VersionRegistry`，并在矩阵中加入首版及系列标签。26.10 Innovation 单独使用 `mysql:26.10` 系列标签，在相同的两种镜像模式下执行完整实库测试。9.0 保留内置适配器，实库矩阵不单列该系列。
 
 打包检查会从生成的 `.crate` 解包并编译，检查包内是否缺文件，但不会上传；参考 [Cargo 官方发布说明](https://doc.rust-lang.org/cargo/reference/publishing.html)。复制库包包含其源码、原始事件协议/实库测试、README、许可证与生成的 lockfile；canal 包包含 CDC 库、监听/适配器示例、CDC/转换/实库测试、benchmark、配置示例、README、许可证与生成的 lockfile；聚合包包含重导出入口、监听与原始事件示例、双语 README、许可证与生成的 lockfile；`crates/pikachu` 包包含 CLI、默认打印 handle、CLI 离线/实库测试、配置示例、README、许可证与生成的 lockfile；根目录是纯 workspace，发布文档保留在根目录 `docs/` 下。包不包含工作流、AI 协作文件、本地 state 或凭据。打包使用 stable Cargo 的 workspace 发布能力，在临时本地 registry 中校验尚未上传的库依赖；保持 Rust 1.89 编译测试。自定义 registry 镜像替换可能影响 workspace 本地依赖校验，应在使用官方 crates.io 的独立 Cargo 配置中执行打包检查。
 

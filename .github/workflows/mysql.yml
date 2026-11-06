@@ -28,6 +28,8 @@ jobs:
             image: mysql:9.7.0
           - series: "9.7"
             image: mysql:9.7
+          - series: "26.10"
+            image: mysql:26.10
         row_image: [minimal, full]
 
     env:

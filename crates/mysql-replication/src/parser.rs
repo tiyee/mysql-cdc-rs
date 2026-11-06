@@ -64,7 +64,7 @@ impl<M: BinlogMode> BinlogParser<M> {
                 .server_version
                 .to_ascii_lowercase()
                 .contains("mariadb")
-                || !matches!((major, minor), (5, 7) | (8, 0..=4) | (9, 0 | 7))
+                || !matches!((major, minor), (5, 7) | (8, 0..=4) | (9, 0 | 7) | (26, 10))
             {
                 return Err(Error::Unsupported(format!(
                     "unregistered producer {}",

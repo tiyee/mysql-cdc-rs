@@ -184,7 +184,7 @@ fn full_converter_preserves_mode_across_fde_and_borrows_utf8_keys() {
         None,
         RowImageMode::Full,
     );
-    for version in ["5.7.44-log", "8.0.46", "8.4.13", "9.7.4"] {
+    for version in ["5.7.44-log", "8.0.46", "8.4.13", "9.7.4", "26.10.0"] {
         let mut fde = format();
         fde[2..52].fill(0);
         fde[2..2 + version.len()].copy_from_slice(version.as_bytes());

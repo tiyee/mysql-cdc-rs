@@ -33,7 +33,7 @@ state_file = "west-state.json"
 max_transaction_bytes = 67108864
 [mysql-canal.sources.source]
 plugin = "mysql"
-# adapter = "mysql57" # optional; auto-select from server/FDE version by default
+# adapter = "mysql2610" # optional; auto-select from server/FDE version by default
 [mysql-canal.sources.mysql-replication]
 url_env = "MYSQL_WEST_URL"
 server_id = 901002
