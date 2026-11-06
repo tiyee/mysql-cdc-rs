@@ -380,7 +380,7 @@ The default parser returns `EventData::TaggedPreviousGtids` for tagged PREVIOUS_
 | `Error::MissingPrimaryKey` | Missing or NULL primary key |
 | `Error::Invalid` | Invalid input such as a malformed producer version |
 | `Error::Unsupported` | Unsupported vendor, FDE layout or type |
-| `Error::Statement` | QUERY other than BEGIN/COMMIT/ROLLBACK, including DDL |
+| `Error::Statement` | Unsupported QUERY, including DDL and an explicit `ROLLBACK TO` in the binlog |
 
 `Canal::run_detailed()` and `run_once_detailed()` return `RunError::Sources(Vec<SourceFailure>)` for worker failures. Each entry exposes `source_id` and the original `Error`. Setup errors are available through `RunError::Setup`.
 

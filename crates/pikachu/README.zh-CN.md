@@ -44,7 +44,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 文件名须与 `state.file` 一致，文件须保留开头的 FORMAT_DESCRIPTION；从保存的事件边界开始回放，截断或未完成事务会报错。每次命令只读取一个来源的一个文件。
 
-消费错误写入 stderr，并返回非零退出码；变更记录使用 stdout。默认处理器在保存检查点前 flush stdout，但这不代表下游持久化确认，消费方须容忍重放。任何非 BEGIN/COMMIT/ROLLBACK 的 QUERY 都以 `Error::Statement` 停止 CDC，DDL 不会自动刷新 schema 并继续。
+消费错误写入 stderr，并返回非零退出码；变更记录使用 stdout。默认处理器在保存检查点前 flush stdout，但这不代表下游持久化确认，消费方须容忍重放。CDC 可以继续处理 InnoDB 事务中的 `SAVEPOINT` 和 `RELEASE SAVEPOINT` 标记。若 binlog 中出现显式 `ROLLBACK TO`、DDL 或其他不支持的语句，CDC 在确认该事务前以 `Error::Statement` 停止。
 
 按上文从源码构建，命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
 

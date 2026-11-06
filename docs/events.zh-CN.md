@@ -575,6 +575,20 @@ SQL 整数按历史 SQL 元数据的符号输出 JSON 数字；DECIMAL 用保留
 
 直接读取原始 BinlogEvent 时，看到行修改不代表事务已经提交。需要提交后交付的应用应使用 Canal 的事务消费接口。
 
+### InnoDB 保存点
+
+```sql
+BEGIN;
+UPDATE app.users SET name = 'Alice' WHERE id = 42;
+SAVEPOINT keep_name;
+UPDATE app.users SET age = 21 WHERE id = 42;
+ROLLBACK TO SAVEPOINT keep_name;
+RELEASE SAVEPOINT keep_name;
+COMMIT;
+```
+
+假设两次 UPDATE 都修改了行，提交时 Canal 只交付修改姓名的那条变更。当 MySQL 能在 binlog 缓存中回滚 InnoDB 事务时，它会移除已撤销的行事件。日志仍可能包含设置或释放保存点的 QUERY 事件，Canal 经过这些标记时不会确认事务。若服务器在日志中保留了显式 `ROLLBACK TO`，Canal 会在交付该事务前返回 `Error::Statement`。[MySQL binlog 实现](https://github.com/mysql/mysql-server/blob/mysql-5.7.44/sql/binlog.cc#L2411-L2475)
+
 ## 支持范围与停止条件
 
 CDC 要求单列主键，支持整数、精确 DECIMAL，以及 utf8、utf8mb3、utf8mb4、ascii、latin1 的 CHAR/VARCHAR。联合主键、无主键和未支持的主键类型会报错。大整数消费方应使用能保留精度的 JSON 解析器。

@@ -8,7 +8,7 @@ Follow this guide to prepare MySQL, connect one source, check and run consumptio
 
 ## 1. Prepare MySQL
 
-Example server settings; MySQL 5.7 does not have the last two variables, so omit them there:
+These settings apply to MySQL 5.7, 8.0, 8.4 LTS and 9.7 LTS.
 
 ```ini
 [mysqld]
@@ -16,9 +16,9 @@ server-id=1
 log-bin=binlog
 binlog-format=ROW
 binlog-row-image=MINIMAL
-binlog-transaction-compression=OFF
-binlog-row-value-options=
 ```
+
+On servers that expose them, keep `binlog_row_value_options` empty and `binlog_transaction_compression` set to `OFF`. MySQL introduced these options in 8.0.3 and 8.0.20 respectively. [MySQL 8.0 variable history](https://dev.mysql.com/doc/refman/8.0/en/added-deprecated-removed.html)
 
 Writer connections must use ROW and the configured MINIMAL or FULL image mode. Changing GLOBAL settings does not update SESSION settings on existing connections. The consumer checks global settings and validates whitelisted row images against the selected policy. The CDC `server_id` must be nonzero and differ from the upstream server and other replication consumers.
 

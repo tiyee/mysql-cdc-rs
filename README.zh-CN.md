@@ -20,7 +20,7 @@ mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 | [pikachu](crates/pikachu/README.zh-CN.md) | `pikachu-cdc` | 基于 Canal 的 CLI 产品，默认输出 JSON Lines |
 | [mysql-cdc-rs](crates/mysql-cdc/README.zh-CN.md) | Rust 统一入口 | 统一库入口，重导出两个底层库 |
 
-四个包当前清单版本均为 **2.1.0**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
+四个包当前清单版本均为 **2.1.0**，需要 Rust **1.89+**。实库矩阵覆盖 Oracle MySQL 5.7、8.0 两个历史系列，以及 8.4、9.7 两个 LTS 系列。每个 LTS 系列都测试首版和系列镜像当前提供的补丁版。内置适配器还可识别 8.1–8.3 和 9.0。详见[测试指南](docs/testing.zh-CN.md)。
 
 ## CLI 使用示例
 
@@ -163,6 +163,7 @@ fn main() -> Result<()> {
 
 - 首次启动从当前提交位点开始，不做全量快照；后续使用检查点保存的历史 schema 恢复。
 - COMMIT 后交付完整事务，回滚丢弃。所有处理器成功后才保存检查点，故障可能导致重放，消费方须幂等。
+- InnoDB 应用可以设置、释放和回滚到保存点。MySQL 通常会在提交前从 binlog 中移除已撤销的行。若 binlog 中出现显式 `ROLLBACK TO`（例如事务还写入了非事务表），CDC 在该语句处停止，保留上次确认的检查点。
 - 支持单列整数、精确 DECIMAL 及受支持字符集的 CHAR/VARCHAR 主键。DDL、未知布局和不支持的数据会报错停止。
 - 每个来源独立维护连接和检查点，跨来源没有全局顺序。
 

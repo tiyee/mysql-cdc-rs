@@ -28,6 +28,44 @@ fn raw(kind: u8, data: &[u8]) -> EventView<'_> {
         data,
     }
 }
+
+#[test]
+fn query_parser_accepts_only_complete_savepoint_markers() {
+    use mysql_canal::protocol::mysql::version::EventAction;
+
+    let fde = format();
+    let parser = MysqlEventParser::from_format(&FormatDescription::parse(&fde).unwrap()).unwrap();
+    for sql in [
+        "SAVEPOINT s1",
+        "release\tSAVEPOINT\nS1;",
+        "SAVEPOINT `a``b; c`",
+        r#"SAVEPOINT "a""b c""#,
+        "SAVEPOINT 子事务",
+    ] {
+        assert!(
+            matches!(
+                parser.parse(raw(QUERY_EVENT, &query(sql))),
+                Ok(ParsedEvent::Control(EventAction::Ignore))
+            ),
+            "{sql}"
+        );
+    }
+    for sql in [
+        "SAVEPOINT",
+        "SAVEPOINTX s1",
+        "SAVEPOINT a; ALTER TABLE t ADD b INT",
+        "RELEASE SAVEPOINT `a`; DROP TABLE `b`",
+        "SAVEPOINT `unterminated",
+        "SAVEPOINT ``",
+        "RELEASE s1",
+        "ROLLBACK TO s1",
+        "ROLLBACK TO SAVEPOINT s1",
+    ] {
+        assert!(
+            matches!(parser.parse(raw(QUERY_EVENT, &query(sql))), Err(Error::Statement(statement)) if statement == sql)
+        );
+    }
+}
 fn feed(p: &mut Processor, kind: u8, position: u32, data: &[u8], out: &mut Vec<u8>) -> Result<()> {
     p.process(
         EventView {

@@ -380,7 +380,7 @@ fn main() -> Result<()> {
 | `Error::MissingPrimaryKey` | 主键缺失或为 NULL |
 | `Error::Invalid` | 畸形生产者版本等非法输入 |
 | `Error::Unsupported` | 未支持的厂商、FDE 布局或类型 |
-| `Error::Statement` | 非 BEGIN/COMMIT/ROLLBACK 的 QUERY，包括 DDL |
+| `Error::Statement` | 不支持的 QUERY，例如 DDL 或 binlog 中显式的 `ROLLBACK TO` |
 
 `Canal::run_detailed()` 和 `run_once_detailed()` 通过 `RunError::Sources(Vec<SourceFailure>)` 返回工作线程的故障，每项保留 `source_id` 和原始 `Error`。准备阶段的通用错误通过 `RunError::Setup` 返回。
 

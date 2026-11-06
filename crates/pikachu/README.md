@@ -44,7 +44,7 @@ Replay a local binlog using a saved historical schema:
 
 The filename must match `state.file`, and the file must retain its initial FORMAT_DESCRIPTION. Replay begins at the saved event boundary and fails on truncation or an incomplete transaction. Each invocation reads one file for one source.
 
-Consumption errors are written to stderr and produce a nonzero exit status; change records use stdout. The default handler flushes stdout before saving a checkpoint, but this is not downstream durable acknowledgement. Consumers must tolerate replay. Any QUERY other than BEGIN/COMMIT/ROLLBACK stops CDC with `Error::Statement`; DDL does not automatically refresh the schema and continue.
+Consumption errors are written to stderr and produce a nonzero exit status; change records use stdout. The default handler flushes stdout before saving a checkpoint, but this is not downstream durable acknowledgement. Consumers must tolerate replay. CDC continues past `SAVEPOINT` and `RELEASE SAVEPOINT` markers inside InnoDB transactions. An explicit `ROLLBACK TO` in the binlog, DDL or another unsupported statement stops CDC with `Error::Statement` before the transaction is acknowledged.
 
 Build from source using the commands above; the executable is `pikachu-cdc`. For embedded CDC and raw replication through one dependency, use `mysql-cdc-rs` (`mysql_cdc_rs`); `mysql-canal` and `mysql-replication` remain available separately. See the [project guide](https://github.com/tiyee/mysql-cdc-rs#readme) for setup, the output contract, compatibility and limitations.
 

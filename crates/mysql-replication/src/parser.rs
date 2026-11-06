@@ -50,6 +50,7 @@ impl<M: BinlogMode> BinlogParser<M> {
             self.tables.clear();
         }
         let mut event = if kind == code::FORMAT_DESCRIPTION_EVENT {
+            self.headers = None;
             let mut format = FormatDescriptionEvent::default();
             format.decode(frame.body)?;
             format.checksum_algorithm =

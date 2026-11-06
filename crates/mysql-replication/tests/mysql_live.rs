@@ -38,6 +38,12 @@ impl Fixture {
                 "wrong MySQL image series"
             );
         }
+        if let Ok(image) = std::env::var("MYSQL_IMAGE")
+            && let Some(tag) = image.strip_prefix("mysql:")
+            && let Ok(pinned) = parse_server_version(tag)
+        {
+            assert_eq!(version, pinned, "wrong patch for {image}");
+        }
         eprintln!("Testing raw replication on MySQL {raw}");
         let schema = format!(
             "replication_{}_{}",

@@ -8,7 +8,7 @@
 
 ## 1. 准备 MySQL
 
-服务器配置示例（5.7 没有后两个变量，不必配置）：
+以下配置适用于 MySQL 5.7、8.0、8.4 LTS 和 9.7 LTS。
 
 ```ini
 [mysqld]
@@ -16,9 +16,9 @@ server-id=1
 log-bin=binlog
 binlog-format=ROW
 binlog-row-image=MINIMAL
-binlog-transaction-compression=OFF
-binlog-row-value-options=
 ```
+
+MySQL 从 8.0.3 起提供 `binlog_row_value_options`，从 8.0.20 起提供 `binlog_transaction_compression`。在提供对应选项的服务器上，前者应保持为空，后者应设为 `OFF`。[MySQL 8.0 变量版本记录](https://dev.mysql.com/doc/refman/8.0/en/added-deprecated-removed.html)
 
 写入连接必须使用 ROW 和配置选择的 MINIMAL 或 FULL 行镜像模式；只改 GLOBAL 不会改变已有会话的 SESSION 值。程序检查全局配置，并按所选策略校验白名单表的行镜像。CDC 的 `server_id` 必须非零且与源和其他复制消费者不同。
 

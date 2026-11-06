@@ -575,6 +575,20 @@ Events from one source follow log order, and another source cannot interrupt a t
 
 When reading raw BinlogEvent records directly, seeing a row change does not mean the transaction committed. Use canal's transaction consumption interface when delivery must wait for commit.
 
+### InnoDB savepoints
+
+```sql
+BEGIN;
+UPDATE app.users SET name = 'Alice' WHERE id = 42;
+SAVEPOINT keep_name;
+UPDATE app.users SET age = 21 WHERE id = 42;
+ROLLBACK TO SAVEPOINT keep_name;
+RELEASE SAVEPOINT keep_name;
+COMMIT;
+```
+
+If both updates changed the row, Canal delivers only the name update at commit. For an InnoDB transaction that MySQL can roll back in its binlog cache, MySQL removes the reverted row events. Setting or releasing a savepoint can still appear as a QUERY event. Neither marker acknowledges the transaction. If the server retains an explicit `ROLLBACK TO` in the log, Canal returns `Error::Statement` before delivering the affected transaction. [MySQL binlog implementation](https://github.com/mysql/mysql-server/blob/mysql-5.7.44/sql/binlog.cc#L2411-L2475)
+
 ## Supported data and stopping conditions
 
 CDC requires a single-column primary key: integers, exact DECIMAL, or CHAR/VARCHAR using utf8, utf8mb3, utf8mb4, ascii or latin1. Composite, missing or unsupported keys fail explicitly. Consumers of large integers should use a JSON parser that preserves their precision.

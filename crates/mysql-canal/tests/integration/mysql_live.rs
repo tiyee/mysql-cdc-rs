@@ -741,6 +741,38 @@ fn mysql_rollback_discards_insert_update_delete() {
 
 #[test]
 #[ignore = "requires dedicated MySQL; run with --ignored --test-threads=1"]
+fn mysql_savepoints_preserve_only_committed_rows() {
+    let mut fixture = Fixture::new(ITEMS);
+    fixture.sql("BEGIN");
+    fixture.sql("INSERT INTO items VALUES (1,'before')");
+    fixture.sql("SAVEPOINT `part one`");
+    fixture.sql("UPDATE items SET note='discarded' WHERE id=1");
+    fixture.sql("SAVEPOINT nested");
+    fixture.sql("INSERT INTO items VALUES (2,'discarded')");
+    fixture.sql("ROLLBACK TO SAVEPOINT `part one`");
+    fixture.sql("RELEASE SAVEPOINT `part one`");
+    fixture.sql("INSERT INTO items VALUES (3,'after')");
+    fixture.sql("COMMIT");
+
+    let (changes, checkpoint) = fixture.collect(&fixture.initial);
+    let expected = [(1, "before"), (3, "after")].map(|(id, note)| {
+        expected(
+            &fixture,
+            "items",
+            "insert",
+            key(id),
+            &["id", "note"],
+            None,
+            Some(json!({ "id": id, "note": note })),
+        )
+    });
+    assert_eq!(changes, expected);
+    assert!(checkpoint.position > fixture.initial.position);
+    assert!(fixture.collect(&checkpoint).0.is_empty());
+}
+
+#[test]
+#[ignore = "requires dedicated MySQL; run with --ignored --test-threads=1"]
 fn mysql_restart_from_persisted_checkpoint_only_emits_new_changes() {
     let mut fixture = Fixture::new(ITEMS);
     fixture.sql("INSERT INTO items VALUES (1,'first')");

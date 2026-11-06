@@ -88,6 +88,41 @@ fn invisible_until_commit_and_rollback_discards() {
 }
 
 #[test]
+fn logged_partial_rollback_stops_before_emitting_or_saving_the_transaction() {
+    let path = temporary("partial-rollback");
+    state().save(&path).unwrap();
+    let original = fs::read(&path).unwrap();
+    let mut processor = Processor::new(
+        state(),
+        Some(path.clone()),
+        100_000,
+        Default::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    start(&mut processor, &mut out);
+    feed(
+        &mut processor,
+        QUERY_EVENT,
+        260,
+        &query("SAVEPOINT s"),
+        &mut out,
+    )
+    .unwrap();
+    let body = rows(1, DELETE_ROWS_EVENT, 3, &[1], &[], &[0, 2, 0, 0, 0]);
+    feed(&mut processor, DELETE_ROWS_EVENT, 280, &body, &mut out).unwrap();
+    assert!(matches!(
+        feed(&mut processor, QUERY_EVENT, 300, &query("ROLLBACK TO s"), &mut out),
+        Err(Error::Statement(statement)) if statement == "ROLLBACK TO s"
+    ));
+    assert!(out.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn incomplete_transaction_and_unsupported_events_stop() {
     let mut p = setup();
     let mut out = Vec::new();
@@ -804,6 +839,8 @@ fn idle_rotation_is_saved_only_after_the_new_format_validates() {
         Err(Error::Truncated { .. })
     ));
     assert_eq!(State::read(&path).unwrap().file, "binlog.000001");
+    assert!(matches!(p.finish(), Err(Error::Invalid(message))
+        if message == "stream ended without FORMAT_DESCRIPTION"));
     feed(&mut p, FORMAT_DESCRIPTION_EVENT, 123, &format(), &mut out).unwrap();
     let saved = State::read(&path).unwrap();
     assert_eq!(

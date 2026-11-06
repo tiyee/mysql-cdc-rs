@@ -20,6 +20,8 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 
 默认测试包括事件结构适配与零拷贝、多来源线程隔离、相同 table_id 不同列序、来源身份绑定、独立位点、输出失败、版本系列选择、旧文件重选适配器、自定义事件/行解码器与注册冲突；并使用独立构造的协议字节覆盖符号扩展、稀疏 NULL、多行与主键变更、长 CHAR、多种跳读类型、超过 64 列、table_id 复用、截断、CRC32/NONE、事务可见性、位点保存顺序与文件锁。已注册的 `decode_rows` 示例测试随每个 Rust CI 目标执行，校验默认/显式模式参数、完整操作输出、拒绝稀疏输入、表映射重用与边界清理、截断 UPDATE 及输出失败。编译失败文档测试验证模式类型隔离与镜像借用生命周期。它们不是 mysqlbinlog 导出的实库 fixture。
 
+跨系列用例向原始解析器和 CDC 转换器依次输入 5.7、8.0、8.4 和 9.7 的格式描述事件。新布局被拒绝后，两者都要等到下一个有效的格式描述，才会继续解码数据。
+
 携带字段的泛型事件回归独立构造 TABLE_MAP 可选 TLV 和 ROWS 字节，覆盖列名、MSB 优先符号位图、紧凑字符列 collation 索引、主键前缀、未知/畸形元数据、未记录/NULL 字段、owned 视图保留历史定义、重映射和来源隔离。原始实库行场景还会将泛型 `next_event()` 的自动绑定结果与现有手动解码器逐项比较。
 
 Canal TABLE_MAP 回归同时覆盖两种镜像策略下的整数符号、主键元数据冲突，匹配或缺失的可选元数据、紧凑数字列序号，以及拒绝后无输出、不确认检查点。
@@ -61,10 +63,10 @@ done
 | 包 | 场景数 | 验证契约 |
 | --- | --- | --- |
 | `mysql-replication` | 4 | 主键预检、上游模式不匹配及跳过设置检查、原始与泛型稀疏/完整镜像、借用 `next_view()` 解码、宽表多行操作、精确值、NULL 及非选中表仍交付 |
-| `mysql-canal` | 12 | CDC 转换、提交事务、来源启动校验与检查点恢复 |
+| `mysql-canal` | 13 | CDC 转换、提交事务、来源启动校验与检查点恢复 |
 | `pikachu` | 3 | 在线 `check`/`init`/`run --once`、完整 JSON Lines、过滤、回滚、恢复不重复、DDL 及预检失败位点 |
 
-这 19 个场景消费服务器实际生成的 binlog 或查询真实元数据。默认 workspace 测试只编译它们，保持忽略；不使用合成事件替代实库变更。Canal 的 12 个场景通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径运行。CDC 输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk、changed 与 fields，缺失、额外或重复的事件都会失败。
+这 20 个场景消费服务器实际生成的 binlog 或查询真实元数据。默认 workspace 测试只编译它们，保持忽略；不使用合成事件替代实库变更。Canal 的 13 个场景通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径运行。CDC 输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk、changed 与 fields，缺失、额外或重复的事件都会失败。
 
 | 场景 | 校验内容 |
 | --- | --- |
@@ -76,6 +78,7 @@ done
 | 宽表稀疏位图 | 80 列、主键在第 70 列、跨 64 位边界的 NULL 与非 NULL 更新 |
 | 白名单 | 同库排除表、其他库同名表、混合事务过滤、纯过滤事务仍推进位点 |
 | 实时事务消费 | 先启动阻塞 CDC，再执行混合行操作；处理 ROWS 后仍不输出、不保存位点，XID/COMMIT 后整批可见 |
+| 保存点 | 在 InnoDB 事务中设置嵌套保存点，回滚至带引号的名称，释放后继续写入。提交时仅交付保留的行，从检查点恢复后无重复。 |
 | 回滚 | INSERT/UPDATE/DELETE 全部回滚后无输出，后续提交仍可正常监控 |
 | 位点恢复 | 重新连接并读取磁盘 checkpoint，已提交事件不重发，新变更继续输出 |
 | 输出失败 | sink 拒绝提交时不推进磁盘位点，从原位点重连能完整重放 |
@@ -83,7 +86,9 @@ done
 
 这些场景必须串行执行：fixture 创建/删除数据库会产生 DDL，而 CDC 对任何来源的 DDL 都会停止。每个 fixture 有独立 schema、复制 ID 和临时 state，结束或断言失败时尝试清理数据库与状态目录。
 
-替换 `MYSQL_IMAGE` 可分别测试 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4`、`mysql:9.7`；切换版本前须删除旧测试卷。`.github/workflows/mysql.yml` 在每个版本上运行三包全部 19 个场景，分别使用 MINIMAL 和 FULL 模式，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），系列标签跟踪补丁更新；不使用会跨系列移动的 `lts` 标签。CI 校验实际服务器系列，并记录具体补丁版本和所选 CDC 适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时须同时增加矩阵项与版本适配器。本地没有 Docker/MySQL 环境时无法执行实库测试。
+`MYSQL_IMAGE` 可选 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4.0`、`mysql:8.4`、`mysql:9.7.0` 或 `mysql:9.7`，并将 `CDC_TEST_MYSQL_SERIES` 设为对应的主、次版本号。切换版本前须删除旧测试卷。`.github/workflows/mysql.yml` 在每个版本上运行三包全部 20 个场景，分别使用 MINIMAL 和 FULL 模式，覆盖 5.7、8.0 历史基线及目前全部 LTS 系列（8.4、9.7），固定的 8.4.0 和 9.7.0 标签持续验证两个 LTS 首版，系列标签跟踪后续补丁。CI 校验服务器返回的系列号，使用固定镜像时还校验补丁号。测试日志记录实际版本和所选 CDC 适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时，同步更新原始解析器的生产者版本检查和 CDC 适配器注册表，再用首版和系列镜像验证两种模式。若 Docker 在远端，可通过 SSH 转发专用容器的回环端口，并将 `CDC_TEST_MYSQL_URL` 指向本地转发端口。
+
+2026-11-06 实测，MySQL **5.7.44、8.0.46、8.4.0、8.4.13、9.7.0、9.7.4** 均在两种行镜像模式下通过了全部 20 个场景。另在 5.7.22 和 8.0.11 上单独验证了两种模式的 InnoDB 保存点回归，均通过。另一次混合引擎测试中，8.4.0 从日志中移除了已回滚的 InnoDB 行，9.7.0 的 GTID 一致性检查在写入端拒绝了混写语句（错误 1785）。对于日志中实际保留显式 `ROLLBACK TO` 的情况，合成 QUERY 用例验证了语句报错、零输出以及磁盘检查点保持原值。
 
 ## 按模块验证
 

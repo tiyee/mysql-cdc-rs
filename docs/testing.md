@@ -20,6 +20,8 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 
 Default tests cover event adaptation and zero-copy behavior, source thread isolation, identical table IDs with different column orders, source identity binding, independent checkpoints, sink failures, version selection, historical-file adapter selection, custom parsers/decoders, and registry conflicts. Independently constructed protocol bytes cover sign extension, sparse NULL images, multiple rows, key changes, long CHAR values, mixed field encodings, more than 64 columns, table ID reuse, truncation, CRC32/NONE, transaction visibility, checkpoint ordering, and file locks. The registered `decode_rows` example tests execute default/explicit mode selection, exact operation output, sparse rejection, table remapping and boundary clearing, truncated updates, and output failures on every Rust CI target. Compile-fail doctests check mode separation and borrowed image lifetimes. These are synthetic fixtures, not mysqlbinlog exports.
 
+Cross-series fixtures feed successive 5.7, 8.0, 8.4 and 9.7 format descriptions to the raw parser and the CDC converter. After rejecting a new layout, both require a valid format description before decoding more data.
+
 CI configuration and publishing are described in the [release guide](releasing.md) (Chinese).
 
 Field-bearing generic event regressions independently construct TABLE_MAP optional TLVs and ROWS bytes. They cover column names, MSB-first signedness, compact character collation indices, primary-key prefixes, unknown/malformed metadata, absent/NULL fields, historical definitions retained by owned views, remaps and source isolation. The raw-server row scenario also compares automatic generic `next_event()` decoding against the existing manual decoder.
@@ -63,10 +65,10 @@ Each processing layer has its own registered `mysql_live` test target. The MySQL
 | Package | Scenarios | Contract |
 | --- | --- | --- |
 | `mysql-replication` | 4 | Primary-key preflight, upstream mode mismatch/unchecked selection, raw and typed sparse/full images, borrowed `next_view()` decoding, wide multirow operations, exact values, NULL and delivery of unselected tables |
-| `mysql-canal` | 12 | CDC conversion, committed transactions, source startup validation and checkpoint recovery |
+| `mysql-canal` | 13 | CDC conversion, committed transactions, source startup validation and checkpoint recovery |
 | `pikachu` | 3 | Online `check`/`init`/`run --once`, complete JSON Lines, filtering, rollback, resume without duplicates, DDL and preflight failure checkpoints, source mode overrides |
 
-These 19 scenarios consume actual server-generated binlogs or query real metadata. Default workspace tests compile them but leave them ignored; synthetic events do not replace real mutations. Canal's 12 scenarios use the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. CDC assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
+These 20 scenarios consume actual server-generated binlogs or query real metadata. Default workspace tests compile them but leave them ignored; synthetic events do not replace real mutations. Canal's 13 scenarios use the production `SourcePlugin`, `VersionAdapter`, `Processor`, and sink path. CDC assertions compare source, schema, table, operation, exact key types/values, `previous_pk`, and `changed`. Missing, extra, or duplicate changes fail the test.
 
 | Scenario | Checks |
 | --- | --- |
@@ -79,13 +81,16 @@ These 19 scenarios consume actual server-generated binlogs or query real metadat
 | Whitelists | Excluded tables, same-named tables in other databases, mixed transactions, and checkpoint advancement for fully filtered transactions |
 | Live transaction consumption | Start a blocking consumer before writes; ROWS remains invisible and unacknowledged until XID/COMMIT |
 | Rollback | Rolled-back INSERT/UPDATE/DELETE emits nothing; subsequent commits are still consumed |
+| Savepoints | Nested InnoDB savepoints, rollback to a quoted name, release and subsequent writes. Only surviving rows are delivered at commit, and resuming the checkpoint produces no duplicates. |
 | Checkpoint recovery | Reconnect from the persisted checkpoint without resending acknowledged events; new changes continue |
 | Sink failure | Rejected commits preserve disk positions and allow full replay from the original checkpoint |
 | DDL boundaries | ALTER TABLE stops consumption without decoding new-schema rows or acknowledging positions after DDL |
 
 Run these scenarios serially: fixture creation and cleanup produce DDL, and the consumer stops on DDL in any database. Each fixture uses independent schemas, a replication ID, and temporary state, and attempts cleanup on completion or assertion failure.
 
-Set `MYSQL_IMAGE` to `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4`, or `mysql:9.7` to test each series. Remove the previous test volume before switching versions. `.github/workflows/mysql.yml` runs all 19 scenarios in both MINIMAL and FULL modes across the three packages for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. Explicit series tags follow patch updates; the moving `lts` tag is not used. CI checks the actual server series and logs its patch version and selected CDC adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). Add both a matrix entry and a version adapter when supporting a new LTS series. Real-server tests require a Docker/MySQL environment.
+The `MYSQL_IMAGE` matrix entries are `mysql:5.7.44`, `mysql:8.0`, `mysql:8.4.0`, `mysql:8.4`, `mysql:9.7.0`, or `mysql:9.7`. Set `CDC_TEST_MYSQL_SERIES` to its major.minor number. Remove the previous test volume before switching versions. `.github/workflows/mysql.yml` runs all 20 scenarios in both MINIMAL and FULL modes across the three packages for the historical 5.7/8.0 baselines and all current LTS series, 8.4 and 9.7. The 8.4.0 and 9.7.0 tags retain coverage of the first LTS patches while the series tags follow patch updates. CI checks the reported server series and verifies the patch number for pinned images. Each run logs the server version and selected CDC adapter. See the [official MySQL LTS description](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html). For a new LTS series, update the raw parser’s producer checks and the CDC adapter registry, then test its first release and rolling series image in both modes. For remote Docker runs, forward the disposable server’s loopback port over SSH and point `CDC_TEST_MYSQL_URL` at the local forwarded port.
+
+On 2026-11-06, the full 20-scenario suite passed in both image modes on MySQL **5.7.44, 8.0.46, 8.4.0, 8.4.13, 9.7.0 and 9.7.4**. The InnoDB savepoint regression also passed in both modes on 5.7.22 and 8.0.11. In a separate mixed-engine probe on 8.4.0, the server removed the reverted InnoDB row from the log. On 9.7.0, GTID consistency rejected the mixed write at the server (error 1785). A synthetic QUERY fixture with an explicit `ROLLBACK TO` in the log verifies the statement error, empty output and the last acknowledged disk checkpoint.
 
 ## Focused verification
 

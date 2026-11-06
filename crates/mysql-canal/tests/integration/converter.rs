@@ -166,6 +166,14 @@ fn ddl_is_a_valid_protocol_event_and_an_explicit_cdc_error() {
 #[test]
 fn full_converter_preserves_mode_across_fde_and_borrows_utf8_keys() {
     use mysql_canal::{config::RowImageMode, protocol::mysql::file::EventView};
+    fn view(event_type: u8, data: &[u8]) -> EventView<'_> {
+        EventView {
+            event_type,
+            flags: 0,
+            log_pos: 0,
+            data,
+        }
+    }
     let mut table = basic();
     table.columns[0] = column("id", "varchar", true);
     table.columns[0].charset = Some("utf8mb4".into());
@@ -176,16 +184,10 @@ fn full_converter_preserves_mode_across_fde_and_borrows_utf8_keys() {
         None,
         RowImageMode::Full,
     );
-    for version in ["8.4.6", "5.7.44-log"] {
+    for version in ["5.7.44-log", "8.0.46", "8.4.13", "9.7.4"] {
         let mut fde = format();
         fde[2..52].fill(0);
         fde[2..2 + version.len()].copy_from_slice(version.as_bytes());
-        let view = |event_type, data| EventView {
-            event_type,
-            flags: 0,
-            log_pos: 0,
-            data,
-        };
         converter
             .convert(view(FORMAT_DESCRIPTION_EVENT, &fde), &mut |_| {
                 panic!("no change")
@@ -221,5 +223,16 @@ fn full_converter_preserves_mode_across_fde_and_borrows_utf8_keys() {
             })
             .unwrap();
         assert_eq!(emitted, 1);
+
+        // A rejected FDE must invalidate the old layout even if a caller continues.
+        fde[57 + usize::from(TABLE_MAP_EVENT) - 1] = 6;
+        assert!(matches!(
+            converter.convert(view(FORMAT_DESCRIPTION_EVENT, &fde), &mut |_| panic!("no change")),
+            Err(Error::Unsupported(message)) if message.contains("post-header length")
+        ));
+        assert!(matches!(
+            converter.convert(view(UPDATE_ROWS_EVENT, &body), &mut |_| panic!("stale row")),
+            Err(Error::Invalid(message)) if message == "event before FORMAT_DESCRIPTION"
+        ));
     }
 }

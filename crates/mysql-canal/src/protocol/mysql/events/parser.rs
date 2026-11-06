@@ -194,10 +194,42 @@ pub(crate) fn parse_query(body: &[u8], post_header: usize) -> Result<EventAction
         Ok(EventAction::Commit)
     } else if query.eq_ignore_ascii_case("ROLLBACK") {
         Ok(EventAction::Rollback)
+    } else if is_savepoint_marker(query) {
+        // InnoDB rolls back by truncating the binlog cache. Setting or releasing
+        // a savepoint changes no rows. An explicit ROLLBACK TO must still stop CDC.
+        Ok(EventAction::Ignore)
     } else {
         Err(Error::Statement(query.chars().take(200).collect()))
     }
 }
+
+fn is_savepoint_marker(query: &str) -> bool {
+    fn after_keyword<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
+        let (word, rest) = sql.split_once(|c: char| c.is_ascii_whitespace())?;
+        word.eq_ignore_ascii_case(keyword)
+            .then(|| rest.trim_ascii_start())
+    }
+
+    let statement = after_keyword(query, "RELEASE").unwrap_or(query);
+    let Some(name) = after_keyword(statement, "SAVEPOINT") else {
+        return false;
+    };
+    if name.is_empty() || name.contains('\0') || name.chars().any(|c| c > '\u{ffff}') {
+        return false;
+    }
+    for (quote, escaped) in [('`', "``"), ('"', "\"\"")] {
+        if let Some(rest) = name.strip_prefix(quote) {
+            return rest.strip_suffix(quote).is_some_and(|inner| {
+                !inner.is_empty() && inner.split(escaped).all(|part| !part.contains(quote))
+            });
+        }
+    }
+    !name.bytes().all(|b| b.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| !c.is_ascii() || c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
+}
+
 pub(crate) fn parse_rotate(body: &[u8], post_header: usize) -> Result<EventAction<'_>> {
     let mut input = Cursor::new(body);
     let position = Cursor::new(input.take(post_header)?).le(8)?;

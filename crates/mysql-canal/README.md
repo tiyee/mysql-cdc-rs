@@ -39,6 +39,8 @@ Each source owns its connection, schema and checkpoint. Initial consumption star
 
 Handlers run synchronously in registration order. All must succeed before checkpoint persistence. COMMIT/XID delivers the transaction; rollback discards it. Fully filtered commits deliver an empty slice. Failures can cause replay, so handlers must be idempotent. Register at least one handler before running; slow handlers apply backpressure.
 
+InnoDB savepoints preserve commit visibility. Canal delivers the rows MySQL retained after a partial rollback. If the binlog contains an explicit `ROLLBACK TO`, Canal returns `Error::Statement` before delivering or acknowledging that transaction.
+
 `check()` validates the upstream and tables, `initialize()` creates initial checkpoints, and `run_once()` consumes currently available events.
 
 ## Source modes and typed decoding

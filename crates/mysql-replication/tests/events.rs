@@ -491,7 +491,7 @@ fn dump_propagates_writer_errors_and_xid_rejects_trailing_bytes() {
 fn each_fde_reselects_layout_and_unknown_changes_are_rejected() {
     let mut framing = FrameDecoder::new();
     let mut parser = BinlogParser::<Minimal>::default();
-    for version in ["5.7.44", "8.0.45", "8.4.6", "9.7.2"] {
+    for version in ["5.7.44-log", "8.0.46", "8.4.13", "9.7.4"] {
         let raw = frame(FORMAT_DESCRIPTION_EVENT, &format(version), false, 0);
         let event = parser.parse(framing.decode(&raw).unwrap()).unwrap();
         let EventData::FormatDescription(description) = event.event else {
@@ -504,6 +504,10 @@ fn each_fde_reselects_layout_and_unknown_changes_are_rejected() {
     let raw = frame(FORMAT_DESCRIPTION_EVENT, &changed, false, 0);
     assert!(
         matches!(parser.parse(framing.decode(&raw).unwrap()),Err(Error::Unsupported(message)) if message.contains("post-header"))
+    );
+    let xid = frame(XID_EVENT, &1u64.to_le_bytes(), false, 0);
+    assert!(
+        matches!(parser.parse(framing.decode(&xid).unwrap()), Err(Error::Invalid(message)) if message == "event before FORMAT_DESCRIPTION")
     );
 }
 

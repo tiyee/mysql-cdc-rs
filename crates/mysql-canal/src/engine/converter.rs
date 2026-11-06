@@ -59,6 +59,8 @@ impl EventConverter {
         emit: &mut dyn FnMut(Change<'_>) -> Result<()>,
     ) -> Result<EventAction<'a>> {
         if event.event_type == event::FORMAT_DESCRIPTION_EVENT {
+            self.parser = None;
+            self.decoder = None;
             let format = FormatDescription::parse(event.data)?;
             let adapter = self
                 .registry
