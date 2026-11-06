@@ -10,7 +10,7 @@ To integrate from local source, use the dependency below; replace `/path/to/mysq
 
 ```toml
 [dependencies]
-mysql-canal = { version = "2.1.0", path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
+mysql-canal = { version = "2.2.0", path = "/path/to/mysql-cdc-rs/crates/mysql-canal" }
 ```
 
 ```rust,no_run
