@@ -140,14 +140,12 @@ fn frame(kind: u8, body: &[u8], crc: bool, flags: u16) -> Vec<u8> {
     };
     let length = (raw.len() + trailer) as u32;
     raw[9..13].copy_from_slice(&length.to_le_bytes());
-    if crc {
+    if trailer != 0 {
         let mut original = raw.clone();
         if kind == FORMAT_DESCRIPTION_EVENT {
             original[17] &= !1;
         }
         raw.extend_from_slice(&crc32fast::hash(&original).to_le_bytes());
-    } else if trailer != 0 {
-        raw.extend_from_slice(&[9, 8, 7, 6]);
     }
     raw
 }
@@ -2174,4 +2172,89 @@ fn normalized_images_and_owned_copies_preserve_columns_nulls_and_values() {
             .unwrap(),
         fields
     );
+}
+
+#[test]
+fn mapped_statement_end_rows_remain_visible_at_the_marker_id() {
+    fn check<M: BinlogMode>(id: u64) {
+        let mapping = table_body(id, &[3], &[], &[0]);
+        let mut row = rows_body(1, &[1], &[0, 42, 0, 0, 0], true);
+        row[..6].copy_from_slice(&id.to_le_bytes()[..6]);
+        row[6..8].copy_from_slice(&1u16.to_le_bytes());
+        let bytes = file_bytes(&[
+            frame(FORMAT_DESCRIPTION_EVENT, &format("8.4.6"), true, 0),
+            frame(TABLE_MAP_EVENT, &mapping, true, 0),
+            frame(WRITE_ROWS_EVENT, &row, true, 0),
+        ]);
+        let mut file = BinlogFile::<_, M>::new(&bytes[..], ParserConfig::default()).unwrap();
+        file.next_event().unwrap().unwrap();
+        file.next_event().unwrap().unwrap();
+        let event = file.next_event().unwrap().unwrap().into_owned().unwrap();
+        let EventData::Rows(rows) = event.view().unwrap().event else {
+            panic!("expected mapped row")
+        };
+        let mut decoded = rows.rows().unwrap();
+        let row = decoded.next().unwrap().unwrap();
+        let after = row.operation.after().unwrap().as_ref();
+        assert!(
+            matches!(after.fields().next().unwrap().unwrap().value, RowValue::Integer(n) if n.signed() == 42)
+        );
+        assert!(decoded.next().is_none());
+    }
+    for id in [0xfffffe, 0xffffff, 0x1000000] {
+        check::<Full>(id);
+        check::<Minimal>(id);
+    }
+}
+
+#[test]
+fn checksum_none_still_verifies_the_disk_format_event() {
+    let mut raw = frame(FORMAT_DESCRIPTION_EVENT, &format("8.4.6"), false, 1);
+    let mut decoder = FrameDecoder::new();
+    *raw.last_mut().unwrap() ^= 1;
+    assert!(matches!(decoder.decode(&raw), Err(Error::Checksum)));
+    assert!(!decoder.has_format());
+}
+
+#[test]
+fn tagged_previous_gtids_preserve_mixed_tags_intervals_and_owned_views() {
+    let mut body = ((1u64 << 56) | (2 << 8) | 1).to_le_bytes().to_vec();
+    for (sid, tag) in [(1u8, "".as_bytes()), (2u8, "tag".as_bytes())] {
+        body.extend([sid; 16]);
+        body.push((tag.len() << 1) as u8);
+        body.extend(tag);
+        body.extend(1u64.to_le_bytes());
+        body.extend(4u64.to_le_bytes());
+        body.extend(9u64.to_le_bytes());
+    }
+    let bytes = file_bytes(&[
+        frame(FORMAT_DESCRIPTION_EVENT, &format("8.4.6"), true, 0),
+        frame(PREVIOUS_GTIDS_EVENT, &body, true, 0),
+    ]);
+    let mut file = BinlogFile::<_, Minimal>::new(&bytes[..], ParserConfig::default()).unwrap();
+    file.next_event().unwrap().unwrap();
+    let owned = file.next_event().unwrap().unwrap().into_owned().unwrap();
+    let EventData::TaggedPreviousGtids(event) = owned.view().unwrap().event else {
+        panic!("expected tagged set")
+    };
+    assert_eq!(event.sid_count, 2);
+    let entries = event
+        .sids()
+        .collect::<mysql_replication::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(entries[0].tag, None);
+    assert_eq!(entries[1].tag, Some("tag"));
+    assert_eq!(entries[1].sid, &[2; 16]);
+    assert_eq!(
+        entries[1].intervals,
+        [4u64.to_le_bytes(), 9u64.to_le_bytes()].concat()
+    );
+    let mut parsed = mysql_replication::events::TaggedPreviousGtidsEvent::default();
+    assert!(matches!(
+        parsed.decode(&body[..body.len() - 1]),
+        Err(Error::Truncated { .. })
+    ));
+    let mut invalid = body.clone();
+    invalid[0] = 2;
+    assert!(matches!(parsed.decode(&invalid), Err(Error::Invalid(_))));
 }

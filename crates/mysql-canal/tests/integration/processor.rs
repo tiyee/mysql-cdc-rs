@@ -733,3 +733,180 @@ fn conflicting_optional_metadata_never_emits_or_advances_disk_checkpoint() {
         }
     }
 }
+
+#[test]
+fn mapped_marker_id_is_delivered_before_advancing_the_checkpoint() {
+    let path = temporary("mapped-marker");
+    state().save(&path).unwrap();
+    let mut p = Processor::new(
+        state(),
+        Some(path.clone()),
+        1 << 20,
+        Default::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let id = 0xffffff;
+    feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &format(), &mut out).unwrap();
+    feed(&mut p, QUERY_EVENT, 150, &query("BEGIN"), &mut out).unwrap();
+    feed(
+        &mut p,
+        TABLE_MAP_EVENT,
+        200,
+        &table_map(id, &basic(), &[3, 15, 3], &[100, 0]),
+        &mut out,
+    )
+    .unwrap();
+    let mut row = rows(id, WRITE_ROWS_EVENT, 3, &[1], &[], &[0, 42, 0, 0, 0]);
+    row[6..8].copy_from_slice(&1u16.to_le_bytes());
+    feed(&mut p, WRITE_ROWS_EVENT, 250, &row, &mut out).unwrap();
+    assert!(out.is_empty());
+    assert_eq!(State::read(&path).unwrap().position, 4);
+    feed(&mut p, XID_EVENT, 300, &1u64.to_le_bytes(), &mut out).unwrap();
+    let change: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        change,
+        with_fields(
+            serde_json::json!({
+                "source": "test", "schema": "app", "table": "users", "operation": "insert",
+                "pk":{"type":"signed","value":42}, "changed":["id"]
+            }),
+            &basic(),
+            None,
+            Some(&[(0, 42.into())])
+        )
+    );
+    assert_eq!(State::read(&path).unwrap().position, 300);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn idle_rotation_is_saved_only_after_the_new_format_validates() {
+    let path = temporary("idle-rotation");
+    state().save(&path).unwrap();
+    let mut p = Processor::new(
+        state(),
+        Some(path.clone()),
+        1024,
+        Default::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &format(), &mut out).unwrap();
+    let body = [4u64.to_le_bytes().as_slice(), b"binlog.000002"].concat();
+    feed(&mut p, ROTATE_EVENT, 150, &body, &mut out).unwrap();
+    assert!(matches!(
+        feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &[], &mut out),
+        Err(Error::Truncated { .. })
+    ));
+    assert_eq!(State::read(&path).unwrap().file, "binlog.000001");
+    feed(&mut p, FORMAT_DESCRIPTION_EVENT, 123, &format(), &mut out).unwrap();
+    let saved = State::read(&path).unwrap();
+    assert_eq!(
+        (saved.file.as_str(), saved.position),
+        ("binlog.000002", 123)
+    );
+    assert!(out.is_empty());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn concurrent_atomic_saves_only_clean_up_their_own_files() {
+    let path = temporary("atomic-saves");
+    let collision = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
+    fs::write(&collision, b"existing").unwrap();
+    let barrier = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        for i in 0..4 {
+            let (path, barrier) = (&path, &barrier);
+            scope.spawn(move || {
+                let mut state = state();
+                state.position = 100 + i;
+                barrier.wait();
+                state.save(path).unwrap();
+                assert!((100..104).contains(&State::read(path).unwrap().position));
+            });
+        }
+    });
+    assert_eq!(fs::read(&collision).unwrap(), b"existing");
+    fs::remove_file(collision).unwrap();
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn unused_capacity_from_small_rows_does_not_reject_a_large_transaction() {
+    let mut meta = basic();
+    meta.columns[1].octet_length = Some(20000);
+    let mut snapshot = state();
+    snapshot.tables = vec![meta.clone()];
+    let mut p = Processor::new(
+        snapshot,
+        None,
+        20000,
+        Default::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    feed(
+        &mut p,
+        FORMAT_DESCRIPTION_EVENT,
+        100,
+        &format(),
+        &mut output,
+    )
+    .unwrap();
+    for (tx, size) in [(0, 0usize), (1, 19000)] {
+        feed(
+            &mut p,
+            QUERY_EVENT,
+            150 + tx * 200,
+            &query("BEGIN"),
+            &mut output,
+        )
+        .unwrap();
+        feed(
+            &mut p,
+            TABLE_MAP_EVENT,
+            200 + tx * 200,
+            &table_map(7, &meta, &[3, 15, 3], &20000u16.to_le_bytes()),
+            &mut output,
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        for key in 0..if size == 0 { 20i32 } else { 1 } {
+            data.push(0);
+            data.extend(key.to_le_bytes());
+            data.extend((size as u16).to_le_bytes());
+            data.resize(data.len() + size, b'z');
+        }
+        feed(
+            &mut p,
+            WRITE_ROWS_EVENT,
+            250 + tx * 200,
+            &rows(7, WRITE_ROWS_EVENT, 3, &[3], &[], &data),
+            &mut output,
+        )
+        .unwrap();
+        feed(
+            &mut p,
+            XID_EVENT,
+            300 + tx * 200,
+            &1u64.to_le_bytes(),
+            &mut output,
+        )
+        .unwrap();
+    }
+    let lines: Vec<_> = std::str::from_utf8(&output).unwrap().lines().collect();
+    assert_eq!(lines.len(), 21);
+    let last: serde_json::Value = serde_json::from_str(lines[20]).unwrap();
+    assert_eq!(
+        last["fields"]["after"][1]["value"].as_str().unwrap().len(),
+        19000
+    );
+}

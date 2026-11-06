@@ -23,6 +23,12 @@ impl FrameDecoder {
         self.crc32.is_some()
     }
     pub fn decode<'a>(&mut self, raw: &'a [u8]) -> Result<BinlogFrame<'a>> {
+        self.decode_inner(raw, false)
+    }
+    pub(crate) fn decode_network<'a>(&mut self, raw: &'a [u8]) -> Result<BinlogFrame<'a>> {
+        self.decode_inner(raw, true)
+    }
+    fn decode_inner<'a>(&mut self, raw: &'a [u8], network: bool) -> Result<BinlogFrame<'a>> {
         let header_bytes = raw.get(..EventHeader::LEN).ok_or(Error::Truncated {
             need: EventHeader::LEN,
             have: raw.len(),
@@ -61,7 +67,7 @@ impl FrameDecoder {
             .checked_sub(trailer)
             .filter(|&end| end >= 19)
             .ok_or_else(|| invalid("missing checksum"))?;
-        if crc32 {
+        if crc32 || (is_fde && !(network && header.log_pos == 0)) {
             let mut hash = crc32fast::Hasher::new();
             let mut checksum_header = [0; 19];
             checksum_header.copy_from_slice(header_bytes);

@@ -151,7 +151,11 @@ impl<M: BinlogMode> BinlogParser<M> {
                     EventData::TaggedGtid(Default::default())
                 }
                 code::PREVIOUS_GTIDS_EVENT if self.config.decode_previous_gtids => {
-                    EventData::PreviousGtids(Default::default())
+                    if frame.body.get(7) == Some(&1) {
+                        EventData::TaggedPreviousGtids(Default::default())
+                    } else {
+                        EventData::PreviousGtids(Default::default())
+                    }
                 }
                 code::HEARTBEAT_EVENT => EventData::Heartbeat(Default::default()),
                 _ => EventData::Raw(Default::default()),
@@ -166,7 +170,9 @@ impl<M: BinlogMode> BinlogParser<M> {
                 let decoder = Arc::new(RowsDecoder::<M>::new(table)?);
                 self.tables.insert(table.table_id, decoder);
             }
-            EventData::Rows(rows) if rows.is_statement_end() => {
+            EventData::Rows(rows)
+                if rows.is_statement_end() && !self.tables.contains_key(&rows.table_id) =>
+            {
                 self.tables.clear();
                 event = EventData::RowsStatementEnd(RowsStatementEndEvent::new({
                     let mut sentinel =

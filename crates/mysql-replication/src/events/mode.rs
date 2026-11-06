@@ -18,7 +18,11 @@ pub struct Full;
 /// A sealed policy carried by the parser, event envelope and ROWS payload.
 /// Common control events retain the same representation for every policy.
 pub trait BinlogMode: sealed::Sealed + Debug + Clone + Copy + Send + Sync + 'static {
-    type Image<'a>: TryFrom<RowImage<'a>, Error = Error> + AsRef<RowImage<'a>> + Debug + Clone;
+    type Image<'a>: TryFrom<RowImage<'a>, Error = Error>
+        + AsRef<RowImage<'a>>
+        + Into<RowImage<'a>>
+        + Debug
+        + Clone;
     const ROW_IMAGE: RowImageMode;
     #[doc(hidden)]
     fn validate_event(event: &RowsEvent<'_, Self>) -> Result<()>;

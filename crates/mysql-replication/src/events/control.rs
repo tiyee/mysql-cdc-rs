@@ -236,72 +236,136 @@ pub struct PreviousGtidsEvent<'a> {
     pub sid_count: u64,
     pub encoded_sids: &'a [u8],
 }
+/// PREVIOUS_GTIDS using the MySQL 8.4 tagged TSID encoding.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaggedPreviousGtidsEvent<'a> {
+    pub sid_count: u64,
+    pub encoded_sids: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TaggedSidIntervals<'a> {
+    pub sid: &'a [u8],
+    pub tag: Option<&'a str>,
+    pub intervals: &'a [u8],
+}
+
+fn read_sid<'a>(input: &mut Cursor<'a>, tagged: bool) -> Result<TaggedSidIntervals<'a>> {
+    let sid = input.take(16)?;
+    let tag = if tagged {
+        let len =
+            usize::try_from(input.varint()?).map_err(|_| invalid("GTID tag length overflow"))?;
+        let tag = std::str::from_utf8(input.take(len)?)?;
+        if tag.is_empty() {
+            None
+        } else {
+            mysql_common::packets::Tag::new(tag).map_err(|_| invalid("invalid GTID tag"))?;
+            Some(tag)
+        }
+    } else {
+        None
+    };
+    let count = usize::try_from(input.le(8)?).map_err(|_| invalid("interval count overflow"))?;
+    let bytes = count
+        .checked_mul(16)
+        .ok_or_else(|| invalid("interval size overflow"))?;
+    Ok(TaggedSidIntervals {
+        sid,
+        tag,
+        intervals: input.take(bytes)?,
+    })
+}
+
+fn sid_entries(
+    data: &[u8],
+    count: u64,
+    tagged: bool,
+) -> impl Iterator<Item = Result<TaggedSidIntervals<'_>>> {
+    let mut input = Cursor::new(data);
+    let mut remaining = count;
+    std::iter::from_fn(move || {
+        if remaining == 0 {
+            return None;
+        }
+        remaining -= 1;
+        let entry = read_sid(&mut input, tagged);
+        if entry.is_err() {
+            remaining = 0;
+        }
+        Some(entry)
+    })
+}
+
+fn previous_gtids(data: &[u8], tagged: bool) -> Result<(u64, &[u8])> {
+    let mut input = Cursor::new(data);
+    let header = input.le(8)?;
+    let count = match (header >> 56, tagged) {
+        (0, false) => header,
+        (1, true) if header as u8 == 1 => (header >> 8) & 0x0000_ffff_ffff_ffff,
+        _ => return Err(invalid("invalid PREVIOUS_GTIDS format")),
+    };
+    let encoded = input.remaining();
+    if count > (encoded.len() / 24) as u64 {
+        return Err(invalid("PREVIOUS_GTIDS SID count exceeds body"));
+    }
+    for _ in 0..count {
+        let entry = read_sid(&mut input, tagged)?;
+        let mut intervals = Cursor::new(entry.intervals);
+        let mut previous_end = 0;
+        while !intervals.remaining().is_empty() {
+            let start = intervals.le(8)?;
+            let end = intervals.le(8)?;
+            if start == 0 || start >= end || start < previous_end || end > i64::MAX as u64 + 1 {
+                return Err(invalid("invalid GTID interval"));
+            }
+            previous_end = end;
+        }
+    }
+    input.finish()?;
+    Ok((count, encoded))
+}
 impl PreviousGtidsEvent<'_> {
     pub fn sids(&self) -> impl Iterator<Item = Result<SidIntervals<'_>>> {
-        let mut input = Cursor::new(self.encoded_sids);
-        let mut remaining = self.sid_count;
-        std::iter::from_fn(move || {
-            if remaining == 0 {
-                return None;
-            }
-            remaining -= 1;
-            let value = (|| {
-                let sid = input.take(16)?;
-                let count = usize::try_from(input.le(8)?)
-                    .map_err(|_| invalid("interval count overflow"))?;
-                let bytes = count
-                    .checked_mul(16)
-                    .ok_or_else(|| invalid("interval size overflow"))?;
-                Ok(SidIntervals {
-                    sid,
-                    intervals: input.take(bytes)?,
-                })
-            })();
-            if value.is_err() {
-                remaining = 0;
-            }
-            Some(value)
+        sid_entries(self.encoded_sids, self.sid_count, false).map(|entry| {
+            entry.map(|e| SidIntervals {
+                sid: e.sid,
+                intervals: e.intervals,
+            })
         })
+    }
+}
+impl TaggedPreviousGtidsEvent<'_> {
+    pub fn sids(&self) -> impl Iterator<Item = Result<TaggedSidIntervals<'_>>> {
+        sid_entries(self.encoded_sids, self.sid_count, true)
     }
 }
 impl<'a> Event<'a> for PreviousGtidsEvent<'a> {
     fn dump(&self, writer: &mut dyn Write) -> Result<()> {
         writeln!(writer, "SID count: {}", self.sid_count)?;
-        writeln!(writer, "Encoded SIDs: {:02x?}", self.encoded_sids)?;
+        writeln!(writer, "Encoded SIDs: {:02x?}\n", self.encoded_sids)?;
+        Ok(())
+    }
+    fn decode(&mut self, data: &'a [u8]) -> Result<()> {
+        (self.sid_count, self.encoded_sids) = previous_gtids(data, false)?;
+        Ok(())
+    }
+}
+impl<'a> Event<'a> for TaggedPreviousGtidsEvent<'a> {
+    fn dump(&self, writer: &mut dyn Write) -> Result<()> {
+        writeln!(writer, "Tagged SID count: {}", self.sid_count)?;
+        for entry in self.sids() {
+            let entry = entry?;
+            writeln!(
+                writer,
+                "SID: {:02x?}, tag: {:?}, intervals: {:02x?}",
+                entry.sid, entry.tag, entry.intervals
+            )?;
+        }
         writeln!(writer)?;
         Ok(())
     }
-
     fn decode(&mut self, data: &'a [u8]) -> Result<()> {
-        let mut input = Cursor::new(data);
-        let sid_count = input.le(8)?;
-        let encoded_sids = input.remaining();
-        if sid_count > (encoded_sids.len() / 24) as u64 {
-            return Err(invalid("PREVIOUS_GTIDS SID count exceeds body"));
-        }
-        for _ in 0..sid_count {
-            input.take(16)?;
-            let count =
-                usize::try_from(input.le(8)?).map_err(|_| invalid("interval count overflow"))?;
-            let bytes = count
-                .checked_mul(16)
-                .ok_or_else(|| invalid("interval size overflow"))?;
-            let mut intervals = Cursor::new(input.take(bytes)?);
-            let mut previous_end = 0;
-            for _ in 0..count {
-                let start = intervals.le(8)?;
-                let end = intervals.le(8)?;
-                if start == 0 || start >= end || start < previous_end || end > i64::MAX as u64 + 1 {
-                    return Err(invalid("invalid GTID interval"));
-                }
-                previous_end = end;
-            }
-        }
-        input.finish()?;
-        *self = Self {
-            sid_count,
-            encoded_sids,
-        };
+        (self.sid_count, self.encoded_sids) = previous_gtids(data, true)?;
         Ok(())
     }
 }

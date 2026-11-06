@@ -50,7 +50,7 @@ CDC 在线通道使用复制库的 `next_view()` 直接借用驱动 body，不�
 ## 性能设计
 
 - TABLE_MAP 先做精确白名单查找。非白名单 ROWS 不解析位图和列值；同一 table_id 重映射会替换旧计划。
-- 每张表预处理字段长度规则、主键索引和主键解码函数。整数解码用 const 泛型按宽度/符号实例化，运行时每个主键一次已选定的函数调用，无 `Any`、下转型或类型断言。
+- 复制层为每张表编译行读取计划。Canal 对照历史 schema 校验类型、长度、可空性与日志声明的字符集。行迭代器在校验每个镜像时取出主键列，Canal 按历史 SQL 类型解释其符号或字符编码。
 - 同一 schema 的 TABLE_MAP 内容相同时复用执行计划；每个 ROWS 事件仅生成一次稀疏镜像计划，NULL 位图按存在列的紧凑序号读取。
 - 每行扫描实际存在列以校验主键、约束并解码借用字段；不构造逐行 `Vec<RowValue>`。时间、JSON、空间和向量值保留编码表示。
 - 主键以外的值切片均借用原始缓冲区；`changed` 是一份事件内共享的 `Arc<[u16]>`，输出时映射字段名，不为每行复制字段名。
@@ -64,7 +64,7 @@ cargo bench -p mysql-canal --bench minimal_rows
 cargo bench -p mysql-canal --bench event_adapter
 ```
 
-两个基准分别测量直接调用核心 Decoder，以及 EventParser + dyn RowDecoder 的完整适配分发路径；各自测量每事件 1 / 100 / 1000 行的 MINIMAL UPDATE 解码，不含网络、JSON、事务持有与磁盘同步，不可作为端到端吞吐承诺。命令行每个事务都会 flush 输出、写 state 并 fsync；小事务密集场景下，持久化通常比解码更贵。需要更高吞吐可实现 `TransactionSink` 接批量持久化 sink，并由 sink 确认后保存提交位点。多来源同步输出用一个共享锁，每事务只获取一次；慢输出会对各来源施加背压，没有无界消息队列。总事务预算上限是所有来源预算之和，另加驱动缓冲和元数据。源传输、版本适配与行解码器按连接/事件分发，sink 按事务分发；行回调仍保持借用类型。
+两个基准分别测量直接调用核心 Decoder，以及 EventParser + dyn RowDecoder 的完整适配分发路径；分别测量每事件 1 / 100 / 1000 行的 MINIMAL UPDATE 解码。直接解码基准覆盖三列表及主键位于末列的 80 列宽表，不含网络、JSON、事务持有与磁盘同步，不可作为端到端吞吐承诺。命令行每个事务都会 flush 输出、写 state 并 fsync；小事务密集场景下，持久化通常比解码更贵。需要更高吞吐可实现 `TransactionSink` 接批量持久化 sink，并由 sink 确认后保存提交位点。多来源同步输出用一个共享锁，每事务只获取一次；慢输出会对各来源施加背压，没有无界消息队列。总事务预算上限是所有来源预算之和，另加驱动缓冲和元数据。源传输、版本适配与行解码器按连接/事件分发，sink 按事务分发；行回调仍保持借用类型。
 
 库的 `Decoder::<M>::new(Vec<TableMeta>)` 接收按列顺序排列的白名单 schema，`M` 为 `Full` 或 `Minimal`。`table_map_event(TableMapEvent)` 预处理映射，`rows_event(RowsEvent, callback)` 交付借用的 `Change`；输入是由绑定 FDE 的 `EventParser` 产生的统一视图。跨事件保存时使用 `Change::into_owned()`。`Canal` 管理来源生命周期和事务处理器，`Processor` 管理提交及持久化，`Runtime` 调度多个来源。实库路径见 `crates/mysql-canal/tests/integration/mysql_live.rs`。
 

@@ -42,21 +42,27 @@ impl TransactionBuffer {
             .bytes
             .checked_add(bytes)
             .ok_or(Error::TransactionLimit(self.limit))?;
-        let size = std::mem::size_of::<OwnedChange>();
-        let mut capacity = self.changes.capacity();
-        if self.changes.len() == capacity {
-            let maximum =
-                (self.limit.saturating_sub(total) / size).saturating_add(self.changes.len() + 1);
-            capacity = capacity.saturating_mul(2).max(8).min(maximum);
+        let spare = self
+            .limit
+            .checked_sub(total)
+            .ok_or(Error::TransactionLimit(self.limit))?;
+        let needed = self.changes.len() + 1;
+        let maximum = needed.saturating_add(spare / std::mem::size_of::<OwnedChange>());
+        if self.changes.capacity() > maximum {
+            self.changes.shrink_to(needed);
         }
-        let unused_capacity = capacity
-            .saturating_sub(self.changes.len() + 1)
-            .saturating_mul(size);
-        if total.saturating_add(unused_capacity) > self.limit {
-            return Err(Error::TransactionLimit(self.limit));
-        }
-        if capacity > self.changes.capacity() {
+        if self.changes.capacity() < needed {
+            let capacity = self
+                .changes
+                .capacity()
+                .saturating_mul(2)
+                .max(8)
+                .min(maximum);
             self.changes.reserve_exact(capacity - self.changes.len());
+        }
+        // An allocator may retain extra capacity after a shrink or reservation.
+        if self.changes.capacity() > maximum {
+            return Err(Error::TransactionLimit(self.limit));
         }
         let owned = change.into_owned();
         debug_assert!(owned.memory_bytes() <= bytes);

@@ -31,6 +31,12 @@ mod tests {
 
     const EXAMPLE: &str = include_str!("../../../examples/config/multi-source.toml");
 
+    fn standalone_example() -> String {
+        EXAMPLE
+            .replace("[mysql-canal]", "")
+            .replace("mysql-canal.sources", "sources")
+    }
+
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -89,10 +95,10 @@ mod tests {
     #[test]
     fn required_child_configs_and_layer_ownership_are_strict() {
         let fixture = Fixture::new();
-        let standalone = include_str!("../../../../mysql-canal/examples/config/multi-source.toml");
+        let standalone = standalone_example();
         assert!(matches!(fixture.read(""), Err(Error::Toml(error))
             if error.to_string().contains("missing field `mysql-canal`")));
-        assert!(matches!(fixture.read(standalone), Err(Error::Toml(error))
+        assert!(matches!(fixture.read(&standalone), Err(Error::Toml(error))
             if error.to_string().contains("unknown field `sources`")));
         assert!(
             matches!(fixture.read("[mysql-canal]\n"), Err(Error::Toml(error))
@@ -130,11 +136,7 @@ mod tests {
             if message == "replication requires nonempty url_env and nonzero server_id")
         );
         let path = fixture.0.join("canal.toml");
-        fs::write(
-            &path,
-            include_str!("../../../../mysql-canal/examples/config/multi-source.toml"),
-        )
-        .unwrap();
+        fs::write(&path, standalone_example()).unwrap();
         assert_eq!(AppConfig::read(&path).unwrap().sources.len(), 2);
         fs::write(&path, EXAMPLE).unwrap();
         assert!(matches!(AppConfig::read(&path), Err(Error::Toml(_))));

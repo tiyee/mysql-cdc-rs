@@ -34,7 +34,13 @@ pub fn connect(config: &ConnectionConfig) -> Result<Conn> {
     let url = std::env::var(&config.url_env)
         .map_err(|_| invalid(format!("missing environment variable {}", config.url_env)))?;
     let opts = Opts::from_url(&url).map_err(|_| invalid("invalid MySQL URL"))?;
+    // The status byte is part of the MySQL packet, outside the binlog frame.
+    let packet_limit = opts
+        .get_max_allowed_packet()
+        .unwrap_or(MAX_EVENT_BYTES + 1)
+        .min(MAX_EVENT_BYTES + 1);
     let mut builder = OptsBuilder::from_opts(opts)
+        .max_allowed_packet(Some(packet_limit))
         .tcp_connect_timeout(Some(config.connect_timeout))
         .read_timeout(Some(config.read_timeout));
     if let Some(ca) = &config.tls_ca {
@@ -78,25 +84,34 @@ impl ReplicationConfig {
             parser: ParserConfig::default(),
         }
     }
+    /// Checks file-position bounds for the 32-bit COM_BINLOG_DUMP command.
+    pub fn validate(&self) -> Result<()> {
+        if self.server_id == 0
+            || self.file.is_empty()
+            || !(4..=u64::from(u32::MAX)).contains(&self.position)
+        {
+            return Err(invalid(
+                "replication requires server_id, file and position in 4..=u32::MAX",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Raw network transport for adapters that own event-body parsing.
 pub struct ReplicationConnection {
-    stream: BinlogStream,
+    stream: Option<BinlogStream>,
     current: Option<DriverEvent>,
     buffer: Vec<u8>,
     framing: FrameDecoder,
 }
 impl ReplicationConnection {
     pub fn connect(connection: &ConnectionConfig, replication: ReplicationConfig) -> Result<Self> {
+        replication.validate()?;
         Self::from_connection(connect(connection)?, replication)
     }
     pub fn from_connection(mut conn: Conn, config: ReplicationConfig) -> Result<Self> {
-        if config.server_id == 0 || config.file.is_empty() || config.position < 4 {
-            return Err(invalid(
-                "replication requires server_id, file and position >= 4",
-            ));
-        }
+        config.validate()?;
         if let Some(image) = config.required_row_image {
             let actual: Option<String> = conn.query_first("SELECT @@global.binlog_row_image")?;
             if !actual
@@ -119,7 +134,7 @@ impl ReplicationConnection {
                 BinlogDumpFlags::empty()
             });
         Ok(Self {
-            stream: conn.get_binlog_stream(request)?,
+            stream: Some(conn.get_binlog_stream(request)?),
             current: None,
             buffer: Vec::new(),
             framing: FrameDecoder::new(),
@@ -128,7 +143,7 @@ impl ReplicationConnection {
     /// CDC's fast path: checksum verification and a borrowed body, with no raw
     /// frame assembly, GTID metadata decoding or row-value materialization.
     pub fn next_view(&mut self) -> Result<Option<crate::EventView<'_>>> {
-        self.current = self.stream.next().transpose()?;
+        self.current = next_driver_event(&mut self.stream)?;
         let Some(event) = &self.current else {
             return Ok(None);
         };
@@ -178,6 +193,7 @@ impl<M: BinlogMode> ReplicationStream<M> {
 }
 
 fn bind_image_mode<M: BinlogMode>(mut config: ReplicationConfig) -> Result<ReplicationConfig> {
+    config.validate()?;
     let expected = M::ROW_IMAGE.into();
     if config
         .required_row_image
@@ -191,16 +207,34 @@ fn bind_image_mode<M: BinlogMode>(mut config: ReplicationConfig) -> Result<Repli
     Ok(config)
 }
 
+// mysql_common 0.37 unwraps short reads while decoding a complete network packet.
+// Discard the driver on unwind: its parser and socket may already have advanced.
+fn next_driver_event<S>(stream: &mut Option<S>) -> Result<Option<DriverEvent>>
+where
+    S: Iterator<Item = mysql::Result<DriverEvent>>,
+{
+    let Some(reader) = stream.as_mut() else {
+        return Ok(None);
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.next()))
+        .map_err(|_| invalid("driver rejected malformed binlog packet"))
+        .and_then(|item| item.transpose().map_err(Error::from));
+    if !matches!(result, Ok(Some(_))) {
+        *stream = None;
+    }
+    result
+}
+
 fn read_frame<'a>(
-    stream: &mut BinlogStream,
+    stream: &mut Option<BinlogStream>,
     buffer: &'a mut Vec<u8>,
     framing: &mut FrameDecoder,
 ) -> Result<Option<BinlogFrame<'a>>> {
-    let Some(event) = stream.next().transpose()? else {
+    let Some(event) = next_driver_event(stream)? else {
         return Ok(None);
     };
     retain_driver_bytes(&event, buffer)?;
-    framing.decode(buffer).map(Some)
+    framing.decode_network(buffer).map(Some)
 }
 
 fn header_view(header: BinlogEventHeader) -> crate::EventHeader {
@@ -222,9 +256,16 @@ fn validate_driver(event: &DriverEvent) -> Result<()> {
         .footer()
         .get_checksum_alg()
         .map_err(|e| Error::Unsupported(e.to_string()))?;
-    if algorithm == Some(BinlogChecksumAlg::BINLOG_CHECKSUM_ALG_CRC32)
+    let crc32 = algorithm == Some(BinlogChecksumAlg::BINLOG_CHECKSUM_ALG_CRC32);
+    let disk_fde = event.header().event_type_raw() == code::FORMAT_DESCRIPTION_EVENT
+        && event.header().log_pos() != 0;
+    if (crc32 || disk_fde)
         && event.checksum().map(u32::from_le_bytes)
-            != Some(event.calc_checksum(BinlogChecksumAlg::BINLOG_CHECKSUM_ALG_CRC32))
+            != Some(
+                event.calc_checksum(
+                    algorithm.ok_or_else(|| invalid("FDE checksum algorithm missing"))?,
+                ),
+            )
     {
         return Err(Error::Checksum);
     }
@@ -278,6 +319,36 @@ fn retain_driver_bytes(event: &DriverEvent, buffer: &mut Vec<u8>) -> Result<()> 
 mod tests {
     use super::*;
     use mysql_common::binlog::{consts::BinlogVersion, events::FormatDescriptionEvent};
+    #[test]
+    fn oversized_positions_fail_before_opening_a_connection() {
+        let config = ReplicationConfig::new(1, "binlog.000001", (1u64 << 32) + 4);
+        assert!(
+            matches!(ReplicationConnection::connect(&ConnectionConfig::new("UNUSED"), config),
+            Err(Error::Invalid(message)) if message.contains("u32::MAX"))
+        );
+        assert!(
+            ReplicationConfig::new(1, "binlog.000001", u64::from(u32::MAX))
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn truncated_driver_packet_stops_the_stream() {
+        let mut header = [0u8; 19];
+        header[4] = code::XID_EVENT;
+        header[9..13].copy_from_slice(&27u32.to_le_bytes());
+        let mut stream = Some(std::iter::once_with(|| {
+            let fde = FormatDescriptionEvent::new(BinlogVersion::Version4);
+            Ok(DriverEvent::read(&fde, &header[..])?)
+        }));
+        assert!(matches!(
+            next_driver_event(&mut stream),
+            Err(Error::Invalid(_)) | Err(Error::Mysql(_))
+        ));
+        assert!(stream.is_none());
+        assert!(next_driver_event(&mut stream).unwrap().is_none());
+    }
     #[test]
     fn driver_trailer_is_retained_instead_of_recalculated() {
         let mut body = vec![0; 57 + 43];

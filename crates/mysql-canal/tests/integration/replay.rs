@@ -404,3 +404,33 @@ fn replay_full_rejects_sparse_insert_delete_and_either_update_image_without_outp
         assert!(output.is_empty(), "event {kind}, bitmaps {first}/{second}");
     }
 }
+
+#[test]
+fn replay_checks_physical_offsets_even_when_header_positions_increase() {
+    let mut log = Log::new(RowImageMode::Minimal);
+    log.delete();
+    let forged = log.bytes.len() as u32 + 4096;
+    log.bytes
+        .extend(framed(XID_EVENT, forged, &1u64.to_le_bytes(), true));
+    let mut output = Vec::new();
+    for start in [4, u64::from(forged)] {
+        log.snapshot.position = start;
+        assert!(
+            matches!(log.replay(1 << 20, &JsonLinesSink::new(&mut output)),
+           Err(Error::Invalid(s)) if s.contains("physical file offset"))
+        );
+        assert!(output.is_empty());
+    }
+}
+
+#[test]
+fn eof_after_gtid_is_an_incomplete_group() {
+    let mut log = Log::new(RowImageMode::Minimal);
+    let mut body = vec![0; 17];
+    body.extend(1u64.to_le_bytes());
+    log.append(GTID_EVENT, &body);
+    let mut output = Vec::new();
+    assert!(matches!(log.replay(1024, &JsonLinesSink::new(&mut output)),
+        Err(Error::Invalid(s)) if s.contains("inside a transaction")));
+    assert!(output.is_empty());
+}

@@ -10,7 +10,9 @@ mod value;
 pub use decoder::{ColumnDefinition, Fields, OwnedRowImage, RowImage, RowsDecoder};
 pub use metadata::{ColumnInfo, TableDefinition};
 pub use mysql_common::constants::ColumnType;
-pub use typed::{CompleteImage, Field, Row, RowOperation, Rows, SparseImage};
+pub use typed::{
+    CompleteImage, Field, ProjectedOperation, Row, RowOperation, RowReadError, Rows, SparseImage,
+};
 pub use value::{DecimalValue, IntegerValue, RowValue};
 
 /// Protocol operation, independent from a CDC change or table whitelist.
@@ -19,6 +21,30 @@ pub enum RowsKind {
     Write,
     Update,
     Delete,
+}
+
+/// Recognizes the reserved marker shape in a v1/v2 ROWS envelope.
+/// A regular mapped table may have the same numeric ID and statement-end flag.
+pub fn is_rows_statement_end_marker(id: u64, flags: u16, v2: bool, payload: &[u8]) -> bool {
+    if id != 0x00ff_ffff || flags & 1 == 0 {
+        return false;
+    }
+    if payload.is_empty() {
+        return true;
+    }
+    let image = if v2 {
+        let Some([a, b, ..]) = payload.get(..2) else {
+            return false;
+        };
+        let extra_len = usize::from(u16::from_le_bytes([*a, *b]));
+        if extra_len < 2 {
+            return false;
+        }
+        payload.get(extra_len..)
+    } else {
+        Some(payload)
+    };
+    matches!(image, Some([] | [0]))
 }
 
 /// A borrowed ROWS body. Typed parsers bind its historical TABLE_MAP plan.
@@ -40,8 +66,9 @@ pub struct RowsEvent<'a, M: BinlogMode> {
     mode: PhantomData<M>,
 }
 impl<'a, M: BinlogMode> RowsEvent<'a, M> {
-    pub(crate) fn is_statement_end(&self) -> bool {
-        self.table_id == 0x00ff_ffff && self.flags & 1 != 0
+    /// True for a statement-end marker carrying no encoded row image.
+    pub fn is_statement_end(&self) -> bool {
+        is_rows_statement_end_marker(self.table_id, self.flags, self.v2, self.encoded_images)
     }
     pub fn with_layout(kind: RowsKind, post_header: usize, v2: bool) -> Self {
         Self {

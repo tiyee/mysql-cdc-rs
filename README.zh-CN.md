@@ -20,7 +20,7 @@ mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 | [pikachu](crates/pikachu/README.zh-CN.md) | `pikachu-cdc` | 基于 Canal 的 CLI 产品，默认输出 JSON Lines |
 | [mysql-cdc-rs](crates/mysql-cdc/README.zh-CN.md) | Rust 统一入口 | 统一库入口，重导出两个底层库 |
 
-四个包当前清单版本均为 **2.0.5**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
+四个包当前清单版本均为 **2.1.0**，需要 Rust **1.89+**。内置适配器覆盖 Oracle MySQL 5.7、8.0–8.4、9.0 和 9.7；实库验证范围见[测试指南](docs/testing.zh-CN.md)。
 
 ## CLI 使用示例
 
@@ -121,7 +121,7 @@ MINIMAL 模式下，这条变更通知表示“哪条记录被修改、日志记
 
 ```toml
 [dependencies]
-mysql-cdc-rs = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
+mysql-cdc-rs = { version = "2.1.0", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run
@@ -144,7 +144,7 @@ fn main() -> Result<()> {
 }
 ```
 
-`canal.toml` 使用[独立 Canal 配置](crates/mysql-canal/examples/config/multi-source.toml)，从 `[[sources]]` 开始；不要直接传入 Pikachu 的产品配置。`mysql-cdc-rs` 仅重导出两个库模块：`canal::Canal` 管理转换、处理器和检查点，`replication` 管理原始读取器与复制流；各模块拥有自己的配置和错误类型。库必须注册处理器，才能执行 `run` / `run_once`。
+`canal.toml` 使用[独立 Canal 配置](crates/mysql-canal/examples/config/multi-source.toml)，从 `[[sources]]` 开始；不要直接传入 Pikachu 的产品配置。`mysql-cdc-rs` 仅重导出两个库模块：`canal::Canal` 管理转换、处理器和检查点，`replication` 管理原始读取器与复制流；各模块拥有自己的配置和错误类型。注册处理器后调用 `run` / `run_once`。需要按类别处理来源故障时，使用 `run_detailed` / `run_once_detailed` 获取各失败工作线程的来源 ID 和原始错误。
 
 按模式固定 Rust 类型及读取原始行值的示例见[Rust API 参考](docs/event-api.zh-CN.md)。
 

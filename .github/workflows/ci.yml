@@ -80,6 +80,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the packaged source without uploading
         run: cargo publish --workspace --dry-run --locked --registry crates-io
+      - name: Compile tests from the packaged files
+        run: |
+          stage=$(mktemp -d)
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '[.packages[].version] | unique | select(length == 1) | first')
+          for name in mysql-replication mysql-canal mysql-cdc-rs pikachu; do
+            tar -xzf "target/package/tmp-crate/$name-$version.crate" -C "$stage"
+          done
+          cp Cargo.lock "$stage/Cargo.lock"
+          cd "$stage"
+          cat > Cargo.toml <<EOF
+          [workspace]
+          members = ["mysql-*", "pikachu-*"]
+          resolver = "3"
+          [patch.crates-io]
+          mysql-replication = { path = "mysql-replication-$version" }
+          mysql-canal = { path = "mysql-canal-$version" }
+          EOF
+          cargo test --workspace --no-run --locked
 
   success:
     name: CI success

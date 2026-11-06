@@ -50,7 +50,7 @@ For raw row inspection, `mysql_replication::events::RowsDecoder<M>` returns gene
 ## Performance design
 
 - TABLE_MAP performs exact whitelist lookup first. ROWS for excluded tables bypass bitmap and value parsing. Remapping a `table_id` replaces its previous plan.
-- Each table precompiles field-length rules, the key index, and its key decoder. Integer decoding uses const generics for width and signedness. At runtime, each key calls the selected decoder once, without `Any`, downcasting, or type assertions.
+- Each table compiles a replication row plan and checks its types, lengths, nullability and available collation against the historical schema. The row iterator captures the selected key column while validating each image. Canal applies the SQL signedness or text encoding to that value.
 - Identical TABLE_MAP contents for a schema reuse the execution plan. Each ROWS event builds its sparse image plan once. NULL bits use compact present-column ordinals.
 - Each row scans present columns for key/constraint validation and borrowed field decoding. There is no per-row `Vec<RowValue>`; temporal, JSON, geometry and vector values retain their encoded representation.
 - Non-key value slices borrow the input buffer. `changed` is a shared `Arc<[u16]>` per event; output maps indices to names without copying names per row.
@@ -64,7 +64,7 @@ cargo bench -p mysql-canal --bench minimal_rows
 cargo bench -p mysql-canal --bench event_adapter
 ```
 
-These benchmarks measure direct Decoder calls and the EventParser + `dyn RowDecoder` dispatch path, respectively, using MINIMAL UPDATE events with 1, 100, or 1000 rows. They exclude networking, JSON serialization, transaction retention, and disk synchronization, and do not promise end-to-end throughput.
+These benchmarks measure direct Decoder calls and the EventParser + `dyn RowDecoder` dispatch path, respectively, using MINIMAL UPDATE events with 1, 100, or 1000 rows. The direct benchmark covers both a three-column table and an 80-column table with its key in the last column. They exclude networking, JSON serialization, transaction retention, and disk synchronization, and do not promise end-to-end throughput.
 
 The CLI flushes output, writes state, and fsyncs on every transaction. With many small transactions, persistence often costs more than decoding. For higher throughput, implement `TransactionSink` with batched durable storage and acknowledge the transaction before saving the checkpoint. Shared multi-source output takes one lock per transaction. Slow output applies backpressure without an unbounded message queue. Total transaction budgets are the sum of all source budgets, plus driver buffers and metadata. Source transport and version/row adapters dispatch per connection or event; sinks dispatch per transaction. Row callbacks keep borrowed types.
 

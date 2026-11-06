@@ -66,6 +66,11 @@ impl<'a> RowsEvent<'a> {
             parse_images,
         }
     }
+    pub(crate) fn is_statement_end_marker(self) -> bool {
+        self.table_id == 0x00ff_ffff
+            && self.flags & super::STMT_END_F != 0
+            && self.encoded_images.is_empty()
+    }
     pub fn images(self) -> Result<RowImages<'a>> {
         (self.parse_images)(self.operation, self.encoded_images)
     }

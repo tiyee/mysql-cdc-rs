@@ -341,25 +341,21 @@ fn mysql_raw_rows_preserve_sparse_images_exact_values_and_unselected_tables() {
                 );
             }
             EventData::Rows(rows) => {
-                if rows.table_id != 0x00ff_ffff || rows.flags & STMT_END_F == 0 {
-                    let (table, decoder) = tables
-                        .get(&rows.table_id)
-                        .expect("ROWS must have a current TABLE_MAP");
-                    if !full_mode() && rows.kind != RowsKind::Write {
-                        let mut full = RowsEvent::<Full>::with_layout(rows.kind, 10, true);
-                        unsupported(
-                            full.decode(body),
-                            "FULL row images must contain every table column",
-                        );
-                    }
-                    for row in decoder.rows(&rows).unwrap() {
-                        let (before, after) = row.unwrap().operation.into_images();
-                        let before =
-                            image(before.map(|image| image.as_ref().clone()), event.raw_data);
-                        let after =
-                            image(after.map(|image| image.as_ref().clone()), event.raw_data);
-                        actual.push((table.clone(), rows.kind, before, after));
-                    }
+                let (table, decoder) = tables
+                    .get(&rows.table_id)
+                    .expect("ROWS must have a current TABLE_MAP");
+                if !full_mode() && rows.kind != RowsKind::Write {
+                    let mut full = RowsEvent::<Full>::with_layout(rows.kind, 10, true);
+                    unsupported(
+                        full.decode(body),
+                        "FULL row images must contain every table column",
+                    );
+                }
+                for row in decoder.rows(&rows).unwrap() {
+                    let (before, after) = row.unwrap().operation.into_images();
+                    let before = image(before.map(|image| image.as_ref().clone()), event.raw_data);
+                    let after = image(after.map(|image| image.as_ref().clone()), event.raw_data);
+                    actual.push((table.clone(), rows.kind, before, after));
                 }
                 if rows.flags & STMT_END_F != 0 {
                     tables.clear();
@@ -545,16 +541,14 @@ fn mysql_row_image_requirement_rejects_mismatch_and_none_consumes_without_changi
                 decoder = Some(body.to_vec());
             }
             EventData::Rows(rows) => {
-                if rows.table_id != 0x00ff_ffff || rows.flags & STMT_END_F == 0 {
-                    assert_eq!(rows.kind, RowsKind::Write);
-                    actual.extend(typed_images::<Full>(
-                        body,
-                        rows.kind,
-                        true,
-                        decoder.as_ref().unwrap(),
-                        event.raw_data,
-                    ));
-                }
+                assert_eq!(rows.kind, RowsKind::Write);
+                actual.extend(typed_images::<Full>(
+                    body,
+                    rows.kind,
+                    true,
+                    decoder.as_ref().unwrap(),
+                    event.raw_data,
+                ));
                 if rows.flags & STMT_END_F != 0 {
                     decoder = None;
                 }
@@ -665,7 +659,7 @@ fn mysql_next_view_decodes_typed_wide_multirow_images_in_both_modes() {
                     true,
                 );
                 event.decode(view.body).unwrap();
-                if event.table_id != 0x00ff_ffff || event.flags & STMT_END_F == 0 {
+                if !event.is_statement_end() {
                     let decoder = tables
                         .get(&event.table_id)
                         .expect("ROWS must have a current TABLE_MAP");

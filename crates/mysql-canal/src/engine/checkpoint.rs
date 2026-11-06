@@ -63,34 +63,47 @@ impl State {
     }
     /// Atomic replacement; fsync the contents and parent directory before returning.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let mut temporary = path.as_os_str().to_owned();
-        temporary.push(format!(".{}.tmp", std::process::id()));
-        let temporary = std::path::PathBuf::from(temporary);
-        let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let (temporary, file) = loop {
+            let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
+            let mut name = path.as_os_str().to_owned();
+            name.push(format!(".{}.{suffix}.tmp", std::process::id()));
+            let temporary = std::path::PathBuf::from(name);
+            match options.open(&temporary) {
+                Ok(file) => break (temporary, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
             }
-            let mut file = options.open(&temporary)?;
+        };
+        let result = (|| {
+            let mut file = std::io::BufWriter::new(file);
             serde_json::to_writer_pretty(&mut file, self)?;
             file.write_all(b"\n")?;
-            file.sync_all()?;
+            file.flush()?;
+            file.get_ref().sync_all()?;
+            drop(file);
             std::fs::rename(&temporary, path)?;
-            File::open(
-                path.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new(".")),
-            )?
-            .sync_all()?;
             Ok(())
         })();
-        if result.is_err() {
+        if let Err(error) = result {
             let _ = std::fs::remove_file(&temporary);
+            return Err(error);
         }
-        result
+        File::open(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+        )?
+        .sync_all()?;
+        Ok(())
     }
 }
 

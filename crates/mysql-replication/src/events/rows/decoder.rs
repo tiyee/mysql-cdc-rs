@@ -50,6 +50,13 @@ impl ColumnDefinition {
     pub fn metadata(&self) -> &[u8] {
         &self.metadata[..self.metadata_len]
     }
+    /// Maximum encoded byte length for a length-prefixed column.
+    pub fn maximum_length(&self) -> Option<u64> {
+        match self.read {
+            ReadOp::Prefixed { maximum, .. } => Some(maximum),
+            ReadOp::Fixed(_) => None,
+        }
+    }
     fn value<'a>(&self, input: &mut Cursor<'a>) -> Result<RowValue<'a>> {
         use ColumnType::*;
         let data = self.read.read(input)?;
@@ -154,22 +161,21 @@ impl<M: BinlogMode> RowsDecoder<M> {
             return Err(invalid("ROWS column count differs from TABLE_MAP"));
         }
         let first = ImagePlan::new(&self.table, images.before_columns)?;
-        let (before, after) = match kind {
-            RowsKind::Write => (None, Some(first)),
-            RowsKind::Delete => (Some(first), None),
-            RowsKind::Update => (
-                Some(first),
-                Some(ImagePlan::new(&self.table, images.after_columns)?),
-            ),
+        let plans = match kind {
+            RowsKind::Write => super::RowOperation::Insert { after: first },
+            RowsKind::Delete => super::RowOperation::Delete { before: first },
+            RowsKind::Update => super::RowOperation::Update {
+                before: first,
+                after: ImagePlan::new(&self.table, images.after_columns)?,
+            },
         };
         if images.rows.is_empty() {
             return Err(invalid("ROWS event contains no rows"));
         }
         Ok(Rows::new(DecodedRows {
             input: Cursor::new(images.rows),
-            before,
-            after,
-            done: false,
+            plans,
+            column_count: images.column_count,
         }))
     }
 }
@@ -207,31 +213,36 @@ impl ImagePlan {
             columns: present,
         }))
     }
-    fn read<'a>(self: &Arc<Self>, input: &mut Cursor<'a>) -> Result<RowImage<'a>> {
+    fn read<'a>(
+        self: &Arc<Self>,
+        input: &mut Cursor<'a>,
+        selected: Option<u16>,
+    ) -> std::result::Result<(RowImage<'a>, Option<RowValue<'a>>), super::RowReadError> {
         let nulls = input.take(self.columns.len().div_ceil(8))?;
         let start = input.remaining();
+        let mut selected_value = None;
         for (i, column) in self.columns.iter().enumerate() {
-            if bit(nulls, i) {
+            let value = if bit(nulls, i) {
                 if !column.nullable {
-                    return Err(invalid("NULL in a NOT NULL column"));
+                    return Err(super::RowReadError::UnexpectedNull(self.indices[i]));
                 }
+                RowValue::Null
             } else {
-                column.value(input)?;
+                column.value(input)?
+            };
+            if selected.is_some_and(|index| index == self.indices[i]) {
+                selected_value = Some(value);
             }
         }
-        Ok(RowImage {
-            plan: Arc::clone(self),
-            nulls,
-            data: &start[..start.len() - input.remaining().len()],
-        })
+        Ok((
+            RowImage {
+                plan: Arc::clone(self),
+                nulls,
+                data: &start[..start.len() - input.remaining().len()],
+            },
+            selected_value,
+        ))
     }
-}
-
-/// One row operation. Missing images and absent columns are distinct from SQL NULL.
-#[derive(Debug, Clone)]
-pub(crate) struct DecodedRow<'a> {
-    pub before: Option<RowImage<'a>>,
-    pub after: Option<RowImage<'a>>,
 }
 
 /// An image borrowing the event and sharing its sparse column plan across rows.
@@ -362,39 +373,45 @@ impl<'image, 'event> Iterator for Fields<'image, 'event> {
 }
 impl FusedIterator for Fields<'_, '_> {}
 
-/// Streaming row operations. An invalid image yields one error, then ends iteration.
-/// Each operation is validated completely before it becomes visible to the caller.
 pub(crate) struct DecodedRows<'a> {
     input: Cursor<'a>,
-    before: Option<Arc<ImagePlan>>,
-    after: Option<Arc<ImagePlan>>,
-    done: bool,
+    plans: super::RowOperation<Arc<ImagePlan>>,
+    column_count: usize,
 }
-impl<'a> Iterator for DecodedRows<'a> {
-    type Item = Result<DecodedRow<'a>>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done || self.input.remaining().is_empty() {
+
+impl<'a> DecodedRows<'a> {
+    pub(crate) fn read<T>(
+        &mut self,
+        selected: Option<u16>,
+        map: impl Fn(RowImage<'a>, Option<RowValue<'a>>) -> Result<T>,
+    ) -> Option<std::result::Result<super::RowOperation<T>, super::RowReadError>> {
+        if self.input.remaining().is_empty() {
             return None;
         }
-        let result = (|| {
-            Ok(DecodedRow {
-                before: self
-                    .before
-                    .as_ref()
-                    .map(|p| p.read(&mut self.input))
-                    .transpose()?,
-                after: self
-                    .after
-                    .as_ref()
-                    .map(|p| p.read(&mut self.input))
-                    .transpose()?,
+        Some((|| {
+            if selected.is_some_and(|i| usize::from(i) >= self.column_count) {
+                return Err(invalid("selected column outside row image").into());
+            }
+            let mut read = |plan: &Arc<ImagePlan>| {
+                let (image, value) = plan.read(&mut self.input, selected)?;
+                map(image, value).map_err(super::RowReadError::from)
+            };
+            use super::RowOperation::*;
+            Ok(match &self.plans {
+                Insert { after } => Insert {
+                    after: read(after)?,
+                },
+                Update { before, after } => Update {
+                    before: read(before)?,
+                    after: read(after)?,
+                },
+                Delete { before } => Delete {
+                    before: read(before)?,
+                },
             })
-        })();
-        self.done = result.is_err();
-        Some(result)
+        })())
     }
 }
-impl FusedIterator for DecodedRows<'_> {}
 
 fn bit(bitmap: &[u8], index: usize) -> bool {
     bitmap[index / 8] & (1 << (index % 8)) != 0

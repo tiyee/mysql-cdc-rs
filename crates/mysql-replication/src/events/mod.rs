@@ -11,15 +11,16 @@ use crate::Result;
 pub use binlog::{BinlogEvent, OwnedBinlogEvent};
 pub use control::{
     ChecksumAlgorithm, FormatDescriptionEvent, HeartbeatEvent, PreviousGtidsEvent, QueryEvent,
-    RotateEvent, SidIntervals, XidEvent,
+    RotateEvent, SidIntervals, TaggedPreviousGtidsEvent, TaggedSidIntervals, XidEvent,
 };
 pub use gtid::{GtidEvent, TaggedGtidEvent};
 pub use header::EventHeader;
 pub use mode::{BinlogMode, Full, Minimal};
 pub use rows::{
     ColumnDefinition, ColumnInfo, ColumnType, CompleteImage, DecimalValue, Field, Fields,
-    IntegerValue, OwnedRowImage, Row, RowImage, RowImages, RowOperation, RowValue, Rows,
-    RowsDecoder, RowsEvent, RowsKind, RowsStatementEndEvent, SparseImage, TableDefinition,
+    IntegerValue, OwnedRowImage, ProjectedOperation, Row, RowImage, RowImages, RowOperation,
+    RowReadError, RowValue, Rows, RowsDecoder, RowsEvent, RowsKind, RowsStatementEndEvent,
+    SparseImage, TableDefinition, is_rows_statement_end_marker,
 };
 use std::{fmt::Debug, io::Write};
 pub use table_map::{TableColumns, TableMapEvent};
@@ -69,6 +70,7 @@ pub enum EventData<'a, M: BinlogMode> {
     AnonymousGtid(GtidEvent),
     TaggedGtid(TaggedGtidEvent<'a>),
     PreviousGtids(PreviousGtidsEvent<'a>),
+    TaggedPreviousGtids(TaggedPreviousGtidsEvent<'a>),
     Heartbeat(HeartbeatEvent<'a>),
     /// Unknown or deliberately unimplemented body; never silently discarded.
     Raw(RawEvent<'a>),
@@ -85,6 +87,7 @@ impl<'a, M: BinlogMode> Event<'a> for EventData<'a, M> {
             Self::Xid(event) => event.dump(writer),
             Self::TaggedGtid(event) => event.dump(writer),
             Self::PreviousGtids(event) => event.dump(writer),
+            Self::TaggedPreviousGtids(event) => event.dump(writer),
             Self::Heartbeat(event) => event.dump(writer),
             Self::Raw(event) => event.dump(writer),
             Self::Gtid(event) | Self::AnonymousGtid(event) => event.dump(writer),
@@ -103,6 +106,7 @@ impl<'a, M: BinlogMode> Event<'a> for EventData<'a, M> {
             Self::Gtid(v) | Self::AnonymousGtid(v) => v.decode(data),
             Self::TaggedGtid(v) => v.decode(data),
             Self::PreviousGtids(v) => v.decode(data),
+            Self::TaggedPreviousGtids(v) => v.decode(data),
             Self::Heartbeat(v) => v.decode(data),
             Self::Raw(v) => v.decode(data),
         }
@@ -132,6 +136,7 @@ impl<M: BinlogMode> EventData<'_, M> {
             Self::AnonymousGtid(_) => EventData::AnonymousGtid(Default::default()),
             Self::TaggedGtid(_) => EventData::TaggedGtid(Default::default()),
             Self::PreviousGtids(_) => EventData::PreviousGtids(Default::default()),
+            Self::TaggedPreviousGtids(_) => EventData::TaggedPreviousGtids(Default::default()),
             Self::Heartbeat(_) => EventData::Heartbeat(Default::default()),
             Self::Raw(_) => EventData::Raw(Default::default()),
         }

@@ -1,5 +1,5 @@
 use crate::{
-    Error, Result,
+    Error, Result, RunError, SourceFailure,
     config::{AppConfig, SourceEntry},
     engine::checkpoint::{State, StateLock},
     engine::processor::Processor,
@@ -27,7 +27,10 @@ struct Prepared {
     _lock: StateLock,
 }
 impl Runtime {
-    fn connect_all(&self, config: &AppConfig) -> Result<Vec<Box<dyn SourceSession>>> {
+    fn connect_all(
+        &self,
+        config: &AppConfig,
+    ) -> std::result::Result<Vec<Box<dyn SourceSession>>, RunError> {
         config.validate()?;
         let mut identities = HashSet::new();
         let mut sessions = Vec::with_capacity(config.sources.len());
@@ -36,14 +39,20 @@ impl Runtime {
                 .sources
                 .resolve(&entry.config.source.plugin)?
                 .connect(&entry.config, &self.versions)
-                .map_err(|e| Error::Sources(format!("{}: {e}", entry.id)))?;
+                .map_err(|error| {
+                    RunError::Sources(vec![SourceFailure {
+                        source_id: entry.id.clone(),
+                        error,
+                    }])
+                })?;
             let info = session.info();
             if info.uuid.is_empty()
                 || !identities.insert((info.uuid.clone(), entry.config.replication.server_id))
             {
                 return Err(Error::Schema(
                     "same upstream UUID requires distinct replication server_id values".into(),
-                ));
+                )
+                .into());
             }
             eprintln!(
                 "source {}: {} / {} / UUID {}",
@@ -64,7 +73,11 @@ impl Runtime {
         }
         Ok(())
     }
-    fn prepare(&self, config: AppConfig, initialize_only: bool) -> Result<Vec<Prepared>> {
+    fn prepare(
+        &self,
+        config: AppConfig,
+        initialize_only: bool,
+    ) -> std::result::Result<Vec<Prepared>, RunError> {
         let sessions = self.connect_all(&config)?;
         // Acquire all locks and inspect existing checkpoints before initializing.
         let locks: Vec<_> = config
@@ -74,12 +87,13 @@ impl Runtime {
             .collect::<Result<_>>()?;
         let mut saved = Vec::new();
         for (entry, session) in config.sources.iter().zip(&sessions) {
-            let state = if entry.config.state_file.exists() {
+            let state = if entry.config.state_file.try_exists().map_err(Error::from)? {
                 if initialize_only {
                     return Err(Error::Schema(format!(
                         "{}: state file exists; initialize with a new state_file",
                         entry.id
-                    )));
+                    ))
+                    .into());
                 }
                 let state = State::read(&entry.config.state_file)?;
                 state.verify_whitelist(&entry.config)?;
@@ -90,7 +104,8 @@ impl Runtime {
                     return Err(Error::Schema(format!(
                         "{}: checkpoint source UUID/id/plugin mismatch",
                         entry.id
-                    )));
+                    ))
+                    .into());
                 }
                 Some(state)
             } else {
@@ -119,7 +134,8 @@ impl Runtime {
                 return Err(Error::Schema(format!(
                     "{}: initialized checkpoint UUID/id/plugin differs from configured source",
                     entry.id
-                )));
+                ))
+                .into());
             }
             state.save(&entry.config.state_file)?;
             ready.push(Prepared {
@@ -138,6 +154,16 @@ impl Runtime {
     /// Fail fast as a process: on a worker failure, peers stop between events.
     /// Blocking socket reads are bounded by the source plugin's read timeout.
     pub fn run(&self, config: AppConfig, once: bool, sink: Arc<dyn TransactionSink>) -> Result<()> {
+        self.run_detailed(config, once, sink).map_err(Error::from)
+    }
+
+    /// Returns all worker failures with their source IDs and original errors.
+    pub fn run_detailed(
+        &self,
+        config: AppConfig,
+        once: bool,
+        sink: Arc<dyn TransactionSink>,
+    ) -> std::result::Result<(), RunError> {
         let prepared = self.prepare(config, false)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         std::thread::scope(|scope| {
@@ -146,7 +172,8 @@ impl Runtime {
                 let sink = Arc::clone(&sink);
                 let cancelled = Arc::clone(&cancelled);
                 let registry = self.versions.clone();
-                workers.push(scope.spawn(move || {
+                let source_id = prepared.entry.id.clone();
+                let worker = scope.spawn(move || {
                     let _panic_guard = CancelOnPanic(&cancelled);
                     let Prepared {
                         entry,
@@ -179,24 +206,28 @@ impl Runtime {
                         cancelled.store(true, Ordering::Release);
                         eprintln!("source {} stopped: {error}", entry.id);
                     }
-                    result.map_err(|e| format!("{}: {e}", entry.id))
-                }));
+                    result
+                });
+                workers.push((source_id, worker));
             }
             let mut failures = Vec::new();
-            for worker in workers {
+            for (source_id, worker) in workers {
                 match worker.join() {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => failures.push(error),
+                    Ok(Err(error)) => failures.push(SourceFailure { source_id, error }),
                     Err(_) => {
                         cancelled.store(true, Ordering::Release);
-                        failures.push("source worker panicked".into());
+                        failures.push(SourceFailure {
+                            source_id,
+                            error: Error::Sources("source worker panicked".into()),
+                        });
                     }
                 }
             }
             if failures.is_empty() {
                 Ok(())
             } else {
-                Err(Error::Sources(failures.join("; ")))
+                Err(RunError::Sources(failures))
             }
         })
     }

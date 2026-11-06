@@ -1,7 +1,7 @@
 //! Canal source lifecycle and committed transaction delivery.
 
 use crate::{
-    CommittedTransaction, Error, OwnedChange, Result, TransactionHandler,
+    CommittedTransaction, Error, OwnedChange, Result, RunError, TransactionHandler,
     config::AppConfig,
     engine::{Runtime, checkpoint::State},
     sink::TransactionSink,
@@ -62,19 +62,27 @@ impl Canal {
 
     /// Consumes continuously until a source or handler fails.
     pub fn run(self) -> Result<()> {
-        self.start(false)
+        self.run_detailed().map_err(Error::from)
     }
 
     /// Consumes the currently available binlog and returns at its end.
     pub fn run_once(self) -> Result<()> {
-        self.start(true)
+        self.run_once_detailed().map_err(Error::from)
     }
 
-    fn start(self, once: bool) -> Result<()> {
+    /// Consumes continuously and preserves per-source error categories.
+    pub fn run_detailed(self) -> std::result::Result<(), RunError> {
+        self.start(false)
+    }
+    /// Consumes available events and preserves per-source error categories.
+    pub fn run_once_detailed(self) -> std::result::Result<(), RunError> {
+        self.start(true)
+    }
+    fn start(self, once: bool) -> std::result::Result<(), RunError> {
         if self.handlers.is_empty() {
-            return Err(Error::Sink("register at least one event handler".into()));
+            return Err(Error::Sink("register at least one event handler".into()).into());
         }
-        self.runtime.run(
+        self.runtime.run_detailed(
             self.config,
             once,
             Arc::new(Handlers {

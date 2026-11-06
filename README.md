@@ -20,7 +20,7 @@ mysql-cdc-rs ──────────> mysql-canal + mysql-replication
 | [pikachu](crates/pikachu/README.md) | `pikachu-cdc` | CLI product built on canal, with JSON Lines output |
 | [mysql-cdc-rs](crates/mysql-cdc/README.md) | Unified Rust library | Unified library entry point re-exporting both libraries |
 
-All four package manifests specify **2.0.5** and require Rust **1.89+**. Built-in adapters cover Oracle MySQL 5.7, 8.0–8.4, 9.0 and 9.7. See the [testing guide](docs/testing.md) for real-server verification coverage.
+All four package manifests specify **2.1.0** and require Rust **1.89+**. Built-in adapters cover Oracle MySQL 5.7, 8.0–8.4, 9.0 and 9.7. See the [testing guide](docs/testing.md) for real-server verification coverage.
 
 ## CLI example
 
@@ -121,7 +121,7 @@ To integrate from local source, use the dependency below; replace `/path/to/mysq
 
 ```toml
 [dependencies]
-mysql-cdc-rs = { version = "2.0.5", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
+mysql-cdc-rs = { version = "2.1.0", path = "/path/to/mysql-cdc-rs/crates/mysql-cdc" }
 ```
 
 ```rust,no_run
@@ -144,7 +144,7 @@ fn main() -> Result<()> {
 }
 ```
 
-`canal.toml` uses the [standalone canal configuration](crates/mysql-canal/examples/config/multi-source.toml), beginning at `[[sources]]`; the Pikachu product file has a different outer layer. `mysql-cdc-rs` only re-exports the two library modules: `canal::Canal` manages conversion, handlers and checkpoints; `replication` manages raw readers and streams. Each module owns its configuration and error types. Register a handler before calling `run` or `run_once`.
+`canal.toml` uses the [standalone canal configuration](crates/mysql-canal/examples/config/multi-source.toml), beginning at `[[sources]]`; the Pikachu product file has a different outer layer. `mysql-cdc-rs` only re-exports the two library modules: `canal::Canal` manages conversion, handlers and checkpoints; `replication` manages raw readers and streams. Each module owns its configuration and error types. Register a handler before calling `run` or `run_once`. Use `run_detailed` or `run_once_detailed` to inspect the source ID and original error from each failed worker.
 
 See the [Rust API reference](docs/event-api.md) for fixing mode-specific types and inspecting raw row values.
 

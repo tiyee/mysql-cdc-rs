@@ -5,7 +5,7 @@ use crate::{
     config::RowImageMode,
     engine::{Processor, checkpoint::State},
     error::invalid,
-    protocol::mysql::{event_type as event, file::BinlogFile, version::VersionRegistry},
+    protocol::mysql::{event_type as event, version::VersionRegistry},
     sink::TransactionSink,
 };
 use std::{fs::File, io::BufReader, path::Path};
@@ -49,12 +49,19 @@ impl Replay {
             ));
         }
         let start = self.processor.state().position;
-        let mut file = BinlogFile::new(BufReader::new(File::open(path)?))?;
+        let mut file =
+            mysql_replication::file::FrameReader::new(BufReader::new(File::open(path)?))?;
         let mut offset = 4u64;
-        while let Some(event) = file.next_event()? {
+        while let Some(frame) = file.next_frame()? {
+            let event = crate::protocol::mysql::file::EventView::from(frame);
             let next = u64::from(event.log_pos);
             if next <= offset {
                 return Err(invalid("non-increasing offline event position"));
+            }
+            if next != offset + u64::from(frame.header.event_size) {
+                return Err(invalid(
+                    "offline event position differs from physical file offset",
+                ));
             }
             if offset < start && next > start {
                 return Err(invalid("state position is not an event boundary"));

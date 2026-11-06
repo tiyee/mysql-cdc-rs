@@ -1393,3 +1393,31 @@ fn canal_delivers_both_modes_with_commit_visibility_and_checkpointing() {
     run(mysql_canal::config::RowImageMode::Minimal);
     run(mysql_canal::config::RowImageMode::Full);
 }
+
+#[test]
+fn detailed_run_retains_the_source_id_and_original_error() {
+    use mysql_canal::{Canal, CommittedTransaction, RunError};
+    let temp = Temp::new();
+    let entry = temp.config("east");
+    let path = entry.config.state_file.clone();
+    let rt = runtime(FakePlugin {
+        barrier: None,
+        same_uuid: false,
+        broken: false,
+    });
+    let mut canal = Canal::with_runtime(
+        AppConfig {
+            sources: vec![entry],
+        },
+        rt,
+    )
+    .unwrap();
+    canal.add_handle(|_: CommittedTransaction<'_>| Err(Error::Sink("rejected".into())));
+    let RunError::Sources(errors) = canal.run_once_detailed().unwrap_err() else {
+        panic!("expected source error");
+    };
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].source_id, "east");
+    assert!(matches!(&errors[0].error, Error::Sink(message) if message == "rejected"));
+    assert_eq!(State::read(&path).unwrap().position, 4);
+}

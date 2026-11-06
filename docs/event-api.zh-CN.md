@@ -64,6 +64,7 @@ Rust 类型名为 `BinlogEvent<'a, M>`。`Event<'a>` 是不含字段的共用、
 | `Gtid` 和 `AnonymousGtid` / `GtidEvent` | `flags: u8`、`sid: [u8; 16]`、`gno: i64`，以及下述可选元数据 |
 | `TaggedGtid` / `TaggedGtidEvent<'a>` | `gtid: GtidEvent`、`tag: &'a str`、`unknown_fields: &'a [u8]` |
 | `PreviousGtids` / `PreviousGtidsEvent<'a>` | `sid_count: u64`、`encoded_sids: &'a [u8]` |
+| `TaggedPreviousGtids` / `TaggedPreviousGtidsEvent<'a>` | `sid_count: u64`、`encoded_sids: &'a [u8]` |
 | `Heartbeat` / `HeartbeatEvent<'a>` | `log_file: &'a [u8]` |
 | `Raw` / `RawEvent<'a>` | `data: &'a [u8]`，保留未知或有意不解码的 body |
 
@@ -367,7 +368,9 @@ fn main() -> Result<()> {
 
 结构化解析器根据每个文件的 FDE 选择声明的布局，支持已注册 MySQL 5.7、8.0–8.4、9.0、9.7 系列。生产者版本须包含完整数字 `major.minor.patch`，允许非空的 `-` 或 `+` 后缀（如 `5.7.44-log` 或 `8.0.45-0ubuntu0.24.04.1`）。畸形版本与 MariaDB 标识明确拒绝，数字版本解析规则与 CDC 共用。未知系列或布局明确失败；`next_frame()` 可交给自定义事件体解析器。混用帧/视图与结构化读取时，需要将读取到的 FDE 帧交给自己的 `BinlogParser`；内置结构化解析器只观察 `next_event()` 调用。
 
-离线文件必须保留开头 FDE，支持 CRC32/NONE，截断尾部和超过 64 MiB 的事件报错。在线传输复用 `mysql` 驱动；驱动会预解析 FDE/TABLE_MAP/ROTATE，并在本库校验事件大小之前分配内存，特殊 framing 可能需要其他传输实现。完整在线原始事件保留驱动读取的原头部字段、body、算法字节及存储的 checksum，不调用会重新计算 checksum 的序列化方法。`next_view()` 完全跳过这次原始帧组装。断线传播错误，不静默重连。
+磁盘 FDE 自身携带 CRC32，包括后续事件使用 NONE 的文件。离线回放按实际帧长核对文件偏移，GTID 组开始后遇到 EOF 会报错。离线文件必须保留开头 FDE，支持 CRC32/NONE，截断尾部和超过 64 MiB 的事件报错。在线传输复用 `mysql` 驱动；驱动会预解析 FDE/TABLE_MAP/ROTATE，并在本库校验事件大小之前分配内存，特殊 framing 可能需要其他传输实现。完整在线原始事件保留驱动读取的原头部字段、body、算法字节及存储的 checksum，不调用会重新计算 checksum 的序列化方法。`next_view()` 完全跳过这次原始帧组装。连接构造器将 MySQL 包上限设为事件上限加一个状态字节，驱动内部仍可根据包内声明长度提前分配。启用 panic 展开时，读取中的驱动 panic 会关闭该订阅并返回错误。
+
+默认解析器将带标签的 PREVIOUS_GTIDS 集合表示为 `EventData::TaggedPreviousGtids`。其 `sids()` 迭代器借用每个 UUID、可选标签及区间字节。普通集合沿用 `PreviousGtids`。
 
 ## 错误边界
 
@@ -378,6 +381,8 @@ fn main() -> Result<()> {
 | `Error::Invalid` | 畸形生产者版本等非法输入 |
 | `Error::Unsupported` | 未支持的厂商、FDE 布局或类型 |
 | `Error::Statement` | 非 BEGIN/COMMIT/ROLLBACK 的 QUERY，包括 DDL |
+
+`Canal::run_detailed()` 和 `run_once_detailed()` 通过 `RunError::Sources(Vec<SourceFailure>)` 返回工作线程的故障，每项保留 `source_id` 和原始 `Error`。准备阶段的通用错误通过 `RunError::Setup` 返回。
 
 错误停止消费，未确认事务不得推进磁盘检查点。复制库返回独立的 `mysql_replication::Error`；不要混用两层错误类型。验证这些边界的回归入口见[测试指南](testing.zh-CN.md)。
 

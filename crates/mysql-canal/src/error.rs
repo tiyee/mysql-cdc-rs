@@ -34,6 +34,41 @@ pub enum Error {
     Utf8(#[from] std::str::Utf8Error),
 }
 
+/// An error from one named source, retaining its underlying error category.
+#[derive(Debug, thiserror::Error)]
+#[error("{source_id}: {error}")]
+pub struct SourceFailure {
+    pub source_id: String,
+    #[source]
+    pub error: Error,
+}
+
+/// Detailed failure from starting or consuming a group of sources.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error(transparent)]
+    Setup(#[from] Error),
+    #[error("source failure: {}", format_source_failures(.0))]
+    Sources(Vec<SourceFailure>),
+}
+
+fn format_source_failures(failures: &[SourceFailure]) -> String {
+    failures
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+impl From<RunError> for Error {
+    fn from(error: RunError) -> Self {
+        match error {
+            RunError::Setup(error) => error,
+            RunError::Sources(failures) => Error::Sources(format_source_failures(&failures)),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn invalid(message: impl Into<String>) -> Error {

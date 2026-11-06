@@ -27,7 +27,7 @@ pub mod sink;
 pub mod source;
 
 pub use engine::Canal;
-pub use error::{Error, Result};
+pub use error::{Error, Result, RunError, SourceFailure};
 pub use model::{
     CdcImageMode, Change, ColumnMeta, CommittedTransaction, DecimalValue, Field, FieldImage,
     Fields, Full, IntegerValue, Minimal, Operation, OwnedChange, OwnedFieldImage, PrimaryKey,

@@ -14,6 +14,7 @@ use crate::{
 struct RowsLayout {
     operation: Operation,
     id_width: usize,
+    v2: bool,
     parse_images: RowImagesParser,
 }
 
@@ -57,6 +58,7 @@ impl MysqlEventParser {
             rows[usize::from(kind)] = Some(RowsLayout {
                 operation,
                 id_width: width,
+                v2,
                 parse_images: if v2 {
                     parse_v2_row_images
                 } else {
@@ -92,11 +94,19 @@ impl MysqlEventParser {
         let mut input = Cursor::new(body);
         let id = input.le(layout.id_width)?;
         let flags = input.le(2)? as u16;
+        let payload = input.remaining();
+        let payload = if mysql_replication::events::is_rows_statement_end_marker(
+            id, flags, layout.v2, payload,
+        ) {
+            &[]
+        } else {
+            payload
+        };
         Ok(RowsEvent::new(
             id,
             flags,
             layout.operation,
-            input.remaining(),
+            payload,
             layout.parse_images,
         ))
     }

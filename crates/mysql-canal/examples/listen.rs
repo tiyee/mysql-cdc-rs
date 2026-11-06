@@ -1,8 +1,8 @@
 //! Register application listeners for normalized, committed changes.
-use mysql_canal::{Canal, CommittedTransaction, Result, config::AppConfig};
+use mysql_canal::{Canal, CommittedTransaction, RunError, config::AppConfig};
 use std::path::Path;
 
-fn main() -> Result<()> {
+fn main() -> Result<(), RunError> {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: cargo run -p mysql-canal --example listen -- CONFIG.toml");
         return Ok(());
@@ -40,5 +40,5 @@ fn main() -> Result<()> {
         }
         Ok(())
     });
-    canal.run()
+    canal.run_detailed()
 }

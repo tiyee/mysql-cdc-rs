@@ -132,11 +132,8 @@ pub fn framed(ty: u8, pos: u32, body: &[u8], crc: bool) -> Vec<u8> {
     out.extend(body);
     if ty == FORMAT_DESCRIPTION_EVENT {
         out.push(u8::from(crc));
-        if !crc {
-            out.extend([0; 4]);
-        }
     }
-    if crc {
+    if crc || ty == FORMAT_DESCRIPTION_EVENT {
         let checksum = crc32fast::hash(&out);
         out.extend(checksum.to_le_bytes());
     }

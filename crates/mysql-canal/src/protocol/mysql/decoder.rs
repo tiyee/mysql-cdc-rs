@@ -1,91 +1,18 @@
 use super::events::{GENERATED_INVISIBLE_PK_F, RowsEvent, STMT_END_F, TableMapEvent};
 use crate::{
-    CdcImageMode, Change, ColumnMeta, Error, FieldImage, Operation, PrimaryKey, Result,
-    RowOperation, TableMeta,
+    CdcImageMode, Change, Error, FieldImage, Operation, Result, RowOperation, TableMeta,
     error::invalid,
     model::schema::{KeyDecoder, key_decoder},
-    protocol::mysql::wire::{Cursor, bit, set_bits},
+    protocol::mysql::wire::{bit, set_bits},
 };
 use std::{collections::BTreeMap, sync::Arc};
-
-#[derive(Clone, Copy, Debug)]
-enum ReadOp {
-    Fixed(usize),
-    Prefixed { width: usize, maximum: u64 },
-}
-impl ReadOp {
-    fn read<'a>(self, input: &mut Cursor<'a>) -> Result<&'a [u8]> {
-        let len = match self {
-            Self::Fixed(n) => n,
-            Self::Prefixed { width, maximum } => {
-                let n = input.le(width)?;
-                if n > maximum {
-                    return Err(invalid("column length exceeds TABLE_MAP maximum"));
-                }
-                usize::try_from(n).map_err(|_| invalid("column length overflows usize"))?
-            }
-        };
-        input.take(len)
-    }
-}
 
 struct TablePlan<M: CdcImageMode> {
     meta: Arc<TableMeta>,
     pk_index: usize,
     decode_pk: KeyDecoder,
-    columns: Vec<ReadOp>,
     signature: Vec<u8>,
     fields: mysql_replication::events::RowsDecoder<M>,
-}
-
-struct ReadColumn {
-    op: ReadOp,
-    is_pk: bool,
-    nullable: bool,
-}
-struct ImagePlan {
-    columns: Vec<ReadColumn>,
-}
-impl ImagePlan {
-    fn new<M: CdcImageMode>(table: &TablePlan<M>, present: &[u8]) -> Self {
-        Self {
-            columns: set_bits(present)
-                .take_while(|&i| i < table.columns.len())
-                .map(|i| ReadColumn {
-                    op: table.columns[i],
-                    is_pk: i == table.pk_index,
-                    nullable: table.meta.columns[i].nullable,
-                })
-                .collect(),
-        }
-    }
-    fn read<'a, M: CdcImageMode>(
-        &self,
-        input: &mut Cursor<'a>,
-        table: &TablePlan<M>,
-    ) -> Result<Option<PrimaryKey<'a>>> {
-        let nulls = input.bitmap(self.columns.len())?;
-        let mut pk = None;
-        for (i, col) in self.columns.iter().enumerate() {
-            if bit(nulls, i) {
-                if col.is_pk {
-                    return Err(Error::MissingPrimaryKey);
-                }
-                if !col.nullable {
-                    return Err(Error::Schema("NULL in a NOT NULL column".into()));
-                }
-                continue;
-            }
-            let data = col.op.read(input)?;
-            if col.is_pk {
-                pk = Some((table.decode_pk)(
-                    data,
-                    &table.meta.columns[table.pk_index],
-                )?);
-            }
-        }
-        Ok(pk)
-    }
 }
 
 /// TABLE_MAP preprocessing + sparse ROWS decoding. The callback borrows event bytes.
@@ -179,16 +106,14 @@ impl<M: CdcImageMode> Decoder<M> {
         let id = event.table_id;
         let flags = event.flags;
         let operation = event.operation;
-        if id == 0x00ff_ffff && flags & STMT_END_F != 0 {
-            self.clear_table_maps();
-            return Ok(());
-        }
         let i = self.index.partition_point(|(table_id, _)| *table_id < id);
-        let table = self
-            .index
-            .get(i)
-            .filter(|(table_id, _)| *table_id == id)
-            .ok_or(Error::MissingTable(id))?;
+        let Some(table) = self.index.get(i).filter(|(table_id, _)| *table_id == id) else {
+            if event.is_statement_end_marker() {
+                self.clear_table_maps();
+                return Ok(());
+            }
+            return Err(Error::MissingTable(id));
+        };
         // Excluded tables never enter column or row decoding.
         let Some(table) = table.1.as_ref() else {
             if flags & STMT_END_F != 0 {
@@ -198,29 +123,29 @@ impl<M: CdcImageMode> Decoder<M> {
         };
         let images = event.images()?;
         let count = images.column_count;
-        if count != table.columns.len() {
+        if count != table.meta.columns.len() {
             return Err(Error::Schema(
                 "ROWS column count differs from TABLE_MAP".into(),
             ));
         }
         let first = images.before_columns;
         let second = images.after_columns;
-        let mut input = Cursor::new(images.rows);
-        let before = ImagePlan::new(table, first);
-        let after = ImagePlan::new(table, second);
-        if before.columns.is_empty() {
-            return Err(invalid("empty first row image"));
+        let present_count = |bits: &[u8]| set_bits(bits).take_while(|i| *i < count).count();
+        let before_count = present_count(first);
+        let after_count = if operation == Operation::Update {
+            present_count(second)
+        } else {
+            before_count
+        };
+        if before_count == 0 || after_count == 0 {
+            return Err(invalid("empty row image"));
         }
-        if operation == Operation::Update && after.columns.is_empty() {
-            return Err(invalid("empty after row image"));
-        }
-        // Validate once per event, before the row loop and any callback.
         M::validate_image(
             operation,
             count,
             bit(first, table.pk_index),
-            before.columns.len(),
-            after.columns.len(),
+            before_count,
+            after_count,
         )?;
         let changed: Arc<[u16]> = if operation == Operation::Delete {
             Arc::from([])
@@ -230,9 +155,6 @@ impl<M: CdcImageMode> Decoder<M> {
                 .map(|i| i as u16)
                 .collect()
         };
-        if input.remaining().is_empty() {
-            return Err(invalid("ROWS event contains no rows"));
-        }
         let kind = match operation {
             Operation::Insert => mysql_replication::events::RowsKind::Write,
             Operation::Update => mysql_replication::events::RowsKind::Update,
@@ -248,33 +170,59 @@ impl<M: CdcImageMode> Decoder<M> {
                 rows: images.rows,
             },
         )?;
-        while !input.remaining().is_empty() {
-            let old = before
-                .read(&mut input, table)?
-                .ok_or(Error::MissingPrimaryKey)?;
-            let (pk, previous_pk) = if operation == Operation::Update {
-                match after.read(&mut input, table)? {
-                    Some(new) if new != old => (new, Some(old)),
-                    Some(new) => (new, None),
-                    None => (old, None),
+        let decode_key = |value| {
+            table
+                .decode_pk
+                .decode(value, &table.meta.columns[table.pk_index])
+        };
+        while let Some(result) = field_rows.next_with_column(table.pk_index as u16) {
+            use mysql_replication::events::RowReadError;
+            let row = result.map_err(|error| match error {
+                RowReadError::UnexpectedNull(i) if usize::from(i) == table.pk_index => {
+                    Error::MissingPrimaryKey
                 }
-            } else {
-                (old, None)
-            };
-            let row = field_rows
-                .next()
-                .ok_or_else(|| invalid("field rows ended before key rows"))??;
-            let fields = match row.operation {
-                RowOperation::Insert { after } => RowOperation::Insert {
-                    after: FieldImage::new(&table.meta, after.as_ref().clone()),
-                },
-                RowOperation::Update { before, after } => RowOperation::Update {
-                    before: FieldImage::new(&table.meta, before.as_ref().clone()),
-                    after: FieldImage::new(&table.meta, after.as_ref().clone()),
-                },
-                RowOperation::Delete { before } => RowOperation::Delete {
-                    before: FieldImage::new(&table.meta, before.as_ref().clone()),
-                },
+                RowReadError::UnexpectedNull(_) => {
+                    Error::Schema("NULL in a NOT NULL column".into())
+                }
+                RowReadError::Protocol(e) => e.into(),
+            })?;
+            let (pk, previous_pk, fields) = match row {
+                RowOperation::Insert {
+                    after: (image, key),
+                } => (
+                    decode_key(key.ok_or(Error::MissingPrimaryKey)?)?,
+                    None,
+                    RowOperation::Insert {
+                        after: FieldImage::new(&table.meta, image.into()),
+                    },
+                ),
+                RowOperation::Delete {
+                    before: (image, key),
+                } => (
+                    decode_key(key.ok_or(Error::MissingPrimaryKey)?)?,
+                    None,
+                    RowOperation::Delete {
+                        before: FieldImage::new(&table.meta, image.into()),
+                    },
+                ),
+                RowOperation::Update {
+                    before: (before, old),
+                    after: (after, new),
+                } => {
+                    let old = decode_key(old.ok_or(Error::MissingPrimaryKey)?)?;
+                    let (key, previous) = match new.map(decode_key).transpose()? {
+                        Some(new) if new != old => (new, Some(old)),
+                        _ => (old, None),
+                    };
+                    (
+                        key,
+                        previous,
+                        RowOperation::Update {
+                            before: FieldImage::new(&table.meta, before.into()),
+                            after: FieldImage::new(&table.meta, after.into()),
+                        },
+                    )
+                }
             };
             emit(Change {
                 table: &table.meta,
@@ -284,10 +232,6 @@ impl<M: CdcImageMode> Decoder<M> {
                 changed: &changed,
                 fields,
             })?;
-        }
-        if let Some(extra) = field_rows.next() {
-            extra?;
-            return Err(invalid("field row count differs"));
         }
         if flags & STMT_END_F != 0 {
             self.clear_table_maps();
@@ -299,63 +243,81 @@ impl<M: CdcImageMode> Decoder<M> {
 fn compile<M: CdcImageMode>(meta: Arc<TableMeta>, data: &[u8]) -> Result<TablePlan<M>> {
     let pk_index = meta.validate()?;
     let decode_pk = key_decoder(&meta.columns[pk_index])?;
-    let mut input = Cursor::new(data);
-    let count = input.lenenc()?;
-    if count != meta.columns.len() {
-        return Err(Error::Schema(format!(
-            "{}.{} column count differs",
-            meta.schema, meta.table
-        )));
-    }
-    let types = input.take(count)?;
-    let metadata_len = input.lenenc()?;
-    let mut metadata = Cursor::new(input.take(metadata_len)?);
-    let nullable = input.bitmap(count)?;
-    let mut columns = Vec::with_capacity(count);
-    for (i, (&ty, col)) in types.iter().zip(&meta.columns).enumerate() {
-        if bit(nullable, i) != col.nullable {
-            return Err(Error::Schema(format!("{} nullability differs", col.name)));
-        }
-        let (op, logical_type) = read_op(ty, &mut metadata, col)?;
-        if !compatible(&col.data_type, logical_type) {
-            return Err(Error::Schema(format!(
-                "{}: {} differs from wire type {logical_type}",
-                col.name, col.data_type
-            )));
-        }
-        columns.push(op);
-    }
-    if !metadata.remaining().is_empty() {
-        return Err(invalid("unused TABLE_MAP column metadata"));
-    }
-    // Validate optional column names when binlog_row_metadata=FULL.
-    while !input.remaining().is_empty() {
-        let ty = input.byte()?;
-        let len = input.lenenc()?;
-        let value = input.take(len)?;
-        if ty == 4 {
-            let mut names = Cursor::new(value);
-            for col in &meta.columns {
-                let len = names.lenenc()?;
-                if names.take(len)? != col.name.as_bytes() {
-                    return Err(Error::Schema(
-                        "optional TABLE_MAP column name differs".into(),
-                    ));
-                }
-            }
-            if !names.remaining().is_empty() {
-                return Err(invalid("extra optional column names"));
-            }
-        }
-    }
     // Only normalized column data is used; no transport body is reconstructed.
     let mut mapping = mysql_replication::events::TableMapEvent::with_post_header(8);
     mapping.schema = meta.schema.as_bytes();
     mapping.table = meta.table.as_bytes();
     mapping.column_data = data;
     let fields = mysql_replication::events::RowsDecoder::<M>::new(&mapping)?;
+    if fields.columns().len() != meta.columns.len() {
+        return Err(Error::Schema(format!(
+            "{}.{} column count differs",
+            meta.schema, meta.table
+        )));
+    }
     for (column, wire) in meta.columns.iter().zip(fields.columns()) {
         use mysql_replication::events::ColumnType::*;
+        let definition = wire.definition;
+        let logical = definition.column_type();
+        if !compatible(&column.data_type, logical as u8) || definition.nullable() != column.nullable
+        {
+            return Err(Error::Schema(format!(
+                "{} type or nullability differs",
+                column.name
+            )));
+        }
+        if wire.name.as_deref().is_some_and(|name| name != column.name) {
+            return Err(Error::Schema(
+                "optional TABLE_MAP column name differs".into(),
+            ));
+        }
+        match (logical, definition.metadata()) {
+            (MYSQL_TYPE_VARCHAR | MYSQL_TYPE_STRING, _)
+                if column.octet_length != definition.maximum_length() =>
+            {
+                return Err(Error::Schema(format!(
+                    "{} maximum byte length differs",
+                    column.name
+                )));
+            }
+            (MYSQL_TYPE_BIT, &[partial, bytes])
+                if column.numeric_precision != Some(u32::from(partial) + u32::from(bytes) * 8) =>
+            {
+                return Err(Error::Schema("BIT width differs".into()));
+            }
+            (MYSQL_TYPE_TIMESTAMP2 | MYSQL_TYPE_DATETIME2 | MYSQL_TYPE_TIME2, &[fsp])
+                if column.datetime_precision != Some(u32::from(fsp)) =>
+            {
+                return Err(Error::Schema("temporal precision differs".into()));
+            }
+            (MYSQL_TYPE_NEWDECIMAL, &[precision, scale])
+                if (column.numeric_precision, column.numeric_scale)
+                    != (Some(u32::from(precision)), Some(u32::from(scale))) =>
+            {
+                return Err(Error::Schema("DECIMAL precision/scale differs".into()));
+            }
+            _ => {}
+        }
+        if let Some(id) = wire.collation_id {
+            use mysql_common::collations::{Collation, CollationId};
+            let collation_id = u16::try_from(id)
+                .ok()
+                .map(CollationId::from)
+                .filter(|v| *v != CollationId::UNKNOWN_COLLATION_ID)
+                .ok_or_else(|| {
+                    Error::Unsupported(format!("unknown collation {id} for {}", column.name))
+                })?;
+            let collation = Collation::resolve(collation_id);
+            let canonical = |s| if s == "utf8" { "utf8mb3" } else { s };
+            if canonical(collation.charset())
+                != canonical(column.charset.as_deref().unwrap_or("binary"))
+            {
+                return Err(Error::Schema(format!(
+                    "{} character set differs",
+                    column.name
+                )));
+            }
+        }
         // Signedness changes integer interpretation; absent attributes stay unknown.
         if matches!(
             wire.definition.column_type(),
@@ -385,7 +347,6 @@ fn compile<M: CdcImageMode>(meta: Arc<TableMeta>, data: &[u8]) -> Result<TablePl
         meta,
         pk_index,
         decode_pk,
-        columns,
         signature: data.to_vec(),
     })
 }
@@ -436,131 +397,4 @@ fn compatible(sql: &str, ty: u8) -> bool {
                 255
             )
     )
-}
-
-fn read_op(ty: u8, m: &mut Cursor<'_>, col: &ColumnMeta) -> Result<(ReadOp, u8)> {
-    use ReadOp::*;
-    let fixed = |n| Ok((Fixed(n), ty));
-    match ty {
-        1 | 13 => fixed(1),
-        2 => fixed(2),
-        3 | 7 => fixed(4),
-        8 | 12 => fixed(8),
-        9..=11 | 14 => fixed(3),
-        4 | 5 => {
-            let width = if ty == 4 { 4 } else { 8 };
-            if usize::from(m.byte()?) != width {
-                return Err(invalid("FLOAT/DOUBLE metadata width"));
-            }
-            fixed(width)
-        }
-        15 => {
-            let maximum = m.le(2)?;
-            check_length(col, maximum)?;
-            Ok((
-                Prefixed {
-                    width: if maximum < 256 { 1 } else { 2 },
-                    maximum,
-                },
-                ty,
-            ))
-        }
-        16 => {
-            let bits = u64::from(m.byte()?) + u64::from(m.byte()?) * 8;
-            if bits == 0 || bits > 64 || col.numeric_precision.map(u64::from) != Some(bits) {
-                return Err(Error::Schema("BIT width differs".into()));
-            }
-            fixed(bits.div_ceil(8) as usize)
-        }
-        17..=19 => {
-            let fsp = m.byte()?;
-            if fsp > 6 || col.datetime_precision != Some(u32::from(fsp)) {
-                return Err(Error::Schema("temporal precision differs".into()));
-            }
-            fixed(
-                match ty {
-                    17 => 4,
-                    18 => 5,
-                    _ => 3,
-                } + usize::from(fsp).div_ceil(2),
-            )
-        }
-        246 => {
-            let precision = m.byte()?;
-            let scale = m.byte()?;
-            if precision == 0
-                || precision > 65
-                || scale > precision
-                || scale > 30
-                || col.numeric_precision != Some(u32::from(precision))
-                || col.numeric_scale != Some(u32::from(scale))
-            {
-                return Err(Error::Schema("DECIMAL precision/scale differs".into()));
-            }
-            const PART: [usize; 10] = [0, 1, 1, 2, 2, 3, 3, 4, 4, 4];
-            let int = usize::from(precision - scale);
-            let frac = usize::from(scale);
-            fixed(int / 9 * 4 + PART[int % 9] + frac / 9 * 4 + PART[frac % 9])
-        }
-        247 | 248 => {
-            m.byte()?;
-            let width = usize::from(m.byte()?);
-            if width == 0 || width > if ty == 247 { 2 } else { 8 } {
-                return Err(invalid("ENUM/SET width"));
-            }
-            fixed(width)
-        }
-        254 => {
-            let a = m.byte()?;
-            let b = m.byte()?;
-            let logical = a | 0x30;
-            if logical == 247 || logical == 248 {
-                let width = usize::from(b);
-                if width == 0 || width > if logical == 247 { 2 } else { 8 } {
-                    return Err(invalid("ENUM/SET width"));
-                }
-                Ok((Fixed(width), logical))
-            } else if logical == 254 || a == 0 {
-                let maximum = if a == 0 {
-                    u64::from(b) << 8
-                } else {
-                    u64::from(b) | (u64::from((a & 0x30) ^ 0x30) << 4)
-                };
-                check_length(col, maximum)?;
-                Ok((
-                    Prefixed {
-                        width: if maximum < 256 { 1 } else { 2 },
-                        maximum,
-                    },
-                    254,
-                ))
-            } else {
-                Err(invalid("invalid STRING real type"))
-            }
-        }
-        242 | 245 | 249..=252 | 255 => {
-            let width = usize::from(m.byte()?);
-            if !(1..=4).contains(&width) || ty == 245 && width != 4 {
-                return Err(invalid("BLOB/JSON length-prefix width"));
-            }
-            Ok((
-                Prefixed {
-                    width,
-                    maximum: (1u64 << (width * 8)) - 1,
-                },
-                ty,
-            ))
-        }
-        other => Err(Error::Unsupported(format!("wire column type {other}"))),
-    }
-}
-
-fn check_length(col: &ColumnMeta, maximum: u64) -> Result<()> {
-    if col.octet_length != Some(maximum) {
-        return Err(Error::Schema(format!(
-            "{} maximum byte length differs",
-            col.name
-        )));
-    }
-    Ok(())
 }

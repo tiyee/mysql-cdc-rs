@@ -1347,3 +1347,34 @@ fn matching_or_absent_optional_metadata_preserves_exact_field_values() {
     run::<mysql_canal::Minimal>();
     run::<mysql_canal::Full>();
 }
+
+#[test]
+fn character_keys_validate_logged_collations_before_reading_rows() {
+    let mut meta = basic();
+    meta.columns[0].data_type = "varchar".into();
+    meta.columns[0].column_type = "varchar(4)".into();
+    meta.columns[0].octet_length = Some(4);
+    meta.columns[0].charset = Some("latin1".into());
+    let mut decoder = Decoder::<mysql_canal::Minimal>::new(vec![meta.clone()]).unwrap();
+    let mapping = |collation| {
+        let mut data = table_map(7, &meta, &[15, 15, 3], &[4, 0, 100, 0]);
+        data.extend([3, 2, collation, 45]);
+        data
+    };
+    assert!(
+        matches!(decode_table(&mut decoder, &mapping(45)), Err(Error::Schema(e)) if e.contains("id character set differs"))
+    );
+    decode_table(&mut decoder, &mapping(8)).unwrap();
+    let mut keys = Vec::new();
+    decode_rows(
+        &mut decoder,
+        WRITE_ROWS_EVENT,
+        &rows(7, WRITE_ROWS_EVENT, 3, &[1], &[], &[0, 1, 0xe9]),
+        |change| {
+            keys.push(change.pk.into_owned());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(keys, [mysql_canal::PrimaryKey::Text("é".into())]);
+}

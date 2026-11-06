@@ -56,7 +56,7 @@ Each product source therefore supplies its connection through `mysql-canal → s
 
 **First start** briefly acquires a MySQL global read lock, saves selected table schemas and the current committed position, then begins consumption. Earlier data is not backfilled, and there is no full snapshot. Choose an appropriate window for this brief effect on writes.
 
-**Later starts** resume from checkpoints and interpret historical logs with the schema saved there. Source identity and selected tables are checked to prevent using one source's state for another. MySQL must retain the required logs.
+**Later starts** resume from checkpoints and interpret historical logs with the schema saved there. Source identity and selected tables are checked to prevent using one source's state for another. MySQL must retain the required logs. After a file rotation at a transaction boundary, validation of the next file’s format description also persists its recovery position. An idle source can then restart after the previous file has expired.
 
 **Offline replay** uses an existing checkpoint and matching log file without connecting to MySQL or changing the checkpoint. It is useful for examining logs and reproducing processing behavior.
 

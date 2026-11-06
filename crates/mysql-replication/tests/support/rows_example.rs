@@ -14,11 +14,16 @@ fn frame(kind: u8, body: &[u8]) -> Vec<u8> {
     bytes[5..9].copy_from_slice(&1u32.to_le_bytes());
     bytes.extend(body);
     if kind == FORMAT_DESCRIPTION_EVENT {
-        // NONE still carries the algorithm byte and four reserved trailer bytes.
+        // The FDE itself is checksummed even with checksum policy NONE.
         bytes.extend([0; 5]);
     }
     let size = bytes.len() as u32;
     bytes[9..13].copy_from_slice(&size.to_le_bytes());
+    if kind == FORMAT_DESCRIPTION_EVENT {
+        let end = bytes.len() - 4;
+        let crc = crc32fast::hash(&bytes[..end]);
+        bytes[end..].copy_from_slice(&crc.to_le_bytes());
+    }
     bytes
 }
 

@@ -120,6 +120,7 @@ impl Config {
     ) -> Result<stream::ReplicationConfig> {
         self.validate()?;
         let mut config = stream::ReplicationConfig::new(self.server_id, file, position);
+        config.validate()?;
         config.required_row_image = Some(self.row_image.into());
         Ok(config)
     }

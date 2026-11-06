@@ -45,6 +45,11 @@ impl<'a> TryFrom<RowImage<'a>> for SparseImage<'a> {
         Ok(Self { image })
     }
 }
+impl<'a> From<SparseImage<'a>> for RowImage<'a> {
+    fn from(image: SparseImage<'a>) -> Self {
+        image.image
+    }
+}
 impl<'a> AsRef<RowImage<'a>> for SparseImage<'a> {
     fn as_ref(&self) -> &RowImage<'a> {
         &self.image
@@ -90,6 +95,11 @@ impl<'a> TryFrom<RowImage<'a>> for CompleteImage<'a> {
             ));
         }
         Ok(Self { image })
+    }
+}
+impl<'a> From<CompleteImage<'a>> for RowImage<'a> {
+    fn from(image: CompleteImage<'a>) -> Self {
+        image.image
     }
 }
 impl<'a> AsRef<RowImage<'a>> for CompleteImage<'a> {
@@ -176,6 +186,19 @@ pub struct Row<'a, M: BinlogMode> {
     pub operation: RowOperation<M::Image<'a>>,
 }
 
+/// Row decoding failure with the absolute ordinal for a violated NOT NULL constraint.
+#[derive(Debug, thiserror::Error)]
+pub enum RowReadError {
+    #[error(transparent)]
+    Protocol(#[from] Error),
+    #[error("NULL in NOT NULL column {0}")]
+    UnexpectedNull(u16),
+}
+
+/// A typed image and the selected column value, or None when it was not logged.
+pub type ProjectedOperation<'a, M> =
+    RowOperation<(<M as BinlogMode>::Image<'a>, Option<RowValue<'a>>)>;
+
 /// A mode-specific streaming iterator. It yields one error and then stops.
 pub struct Rows<'a, M: BinlogMode> {
     rows: DecodedRows<'a>,
@@ -190,31 +213,41 @@ impl<'a, M: BinlogMode> Rows<'a, M> {
             mode: PhantomData,
         }
     }
+    /// Reads one operation and captures a selected value while validating each image.
+    /// The row iterator is exhausted after an error, just as for Iterator::next.
+    pub fn next_with_column(
+        &mut self,
+        index: u16,
+    ) -> Option<std::result::Result<ProjectedOperation<'a, M>, RowReadError>> {
+        self.read(Some(index), |image, value| {
+            Ok((M::Image::try_from(image)?, value))
+        })
+    }
+    fn read<T>(
+        &mut self,
+        selected: Option<u16>,
+        map: impl Fn(RowImage<'a>, Option<RowValue<'a>>) -> Result<T>,
+    ) -> Option<std::result::Result<RowOperation<T>, RowReadError>> {
+        if self.done {
+            return None;
+        }
+        let result = self.rows.read(selected, map)?;
+        self.done = result.is_err();
+        Some(result)
+    }
 }
 impl<'a, M: BinlogMode> Iterator for Rows<'a, M> {
     type Item = Result<Row<'a, M>>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        let result = self.rows.next()?.and_then(|row| {
-            let operation = match (row.before, row.after) {
-                (None, Some(after)) => RowOperation::Insert {
-                    after: M::Image::try_from(after)?,
-                },
-                (Some(before), Some(after)) => RowOperation::Update {
-                    before: M::Image::try_from(before)?,
-                    after: M::Image::try_from(after)?,
-                },
-                (Some(before), None) => RowOperation::Delete {
-                    before: M::Image::try_from(before)?,
-                },
-                (None, None) => return Err(invalid("row operation has no images")),
-            };
-            Ok(Row { operation })
-        });
-        self.done = result.is_err();
-        Some(result)
+        self.read(None, |image, _| M::Image::try_from(image))
+            .map(|result| {
+                result
+                    .map(|operation| Row { operation })
+                    .map_err(|err| match err {
+                        RowReadError::Protocol(error) => error,
+                        RowReadError::UnexpectedNull(_) => invalid("NULL in a NOT NULL column"),
+                    })
+            })
     }
 }
 impl<M: BinlogMode> FusedIterator for Rows<'_, M> {}

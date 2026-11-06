@@ -64,6 +64,7 @@ The internal `body` field is not public. `event.frame().body` exposes the borrow
 | `Gtid` and `AnonymousGtid` / `GtidEvent` | `flags: u8`, `sid: [u8; 16]`, `gno: i64`, plus the optional metadata listed below |
 | `TaggedGtid` / `TaggedGtidEvent<'a>` | `gtid: GtidEvent`, `tag: &'a str`, `unknown_fields: &'a [u8]` |
 | `PreviousGtids` / `PreviousGtidsEvent<'a>` | `sid_count: u64`, `encoded_sids: &'a [u8]` |
+| `TaggedPreviousGtids` / `TaggedPreviousGtidsEvent<'a>` | `sid_count: u64`, `encoded_sids: &'a [u8]` |
 | `Heartbeat` / `HeartbeatEvent<'a>` | `log_file: &'a [u8]` |
 | `Raw` / `RawEvent<'a>` | `data: &'a [u8]` for unknown or deliberately undecoded bodies |
 
@@ -367,7 +368,9 @@ Connection configuration controls credentials via an environment variable, TLS C
 
 The structured parser selects advertised layouts from every file's FDE and accepts the registered MySQL series 5.7, 8.0–8.4, 9.0 and 9.7. Producer versions must have numeric `major.minor.patch` components, optionally followed by a nonempty `-` or `+` suffix (such as `5.7.44-log` or `8.0.45-0ubuntu0.24.04.1`). Malformed versions and MariaDB identifiers are rejected, using the same numeric parsing rules as CDC. Unknown series/layouts fail explicitly. `next_frame()` permits custom body parsers. Raw transport and typed readers are separate interfaces. Feed every FDE and TABLE_MAP to a custom parser when using raw transport.
 
-Offline files must retain their initial FDE. CRC32/NONE are supported; truncated tails and oversized events fail, with a 64 MiB bound. Network transport uses `mysql`'s driver, which pre-parses FDE/TABLE_MAP/ROTATE and allocates before this library can check event size. Custom framing may require another transport. Full raw network events preserve the driver's original header fields, body, algorithm and stored checksum; they never call the driver's checksum-recalculating serializer. `next_view()` avoids this assembly entirely. Disconnects propagate errors without silent reconnects.
+Offline files must retain their initial FDE. The on-disk FDE itself carries a CRC32 even when subsequent events use NONE. Replay checks event positions against the physical file offsets and rejects EOF inside an open GTID group. CRC32/NONE are supported; truncated tails and oversized events fail, with a 64 MiB bound. Network transport uses `mysql`'s driver, which pre-parses FDE/TABLE_MAP/ROTATE and allocates before this library can check event size. Custom framing may require another transport. Full raw network events preserve the driver's original header fields, body, algorithm and stored checksum; they never call the driver's checksum-recalculating serializer. `next_view()` avoids this assembly entirely. The connection builder caps MySQL packets at the event limit plus the status byte. The driver can still allocate using the length declared inside a packet before returning it. With panic unwinding enabled, a driver panic during a read closes this subscription and returns an error.
+
+The default parser returns `EventData::TaggedPreviousGtids` for tagged PREVIOUS_GTIDS sets. Its `sids()` iterator borrows each UUID, optional tag and interval block. Ordinary sets retain the `PreviousGtids` variant.
 
 ## Error boundaries
 
@@ -378,6 +381,8 @@ Offline files must retain their initial FDE. CRC32/NONE are supported; truncated
 | `Error::Invalid` | Invalid input such as a malformed producer version |
 | `Error::Unsupported` | Unsupported vendor, FDE layout or type |
 | `Error::Statement` | QUERY other than BEGIN/COMMIT/ROLLBACK, including DDL |
+
+`Canal::run_detailed()` and `run_once_detailed()` return `RunError::Sources(Vec<SourceFailure>)` for worker failures. Each entry exposes `source_id` and the original `Error`. Setup errors are available through `RunError::Setup`.
 
 Errors stop consumption; unacknowledged transactions must not advance disk checkpoints. Replication returns its separate `mysql_replication::Error` type. Regression entry points for these boundaries are in the [testing guide](testing.md).
 
