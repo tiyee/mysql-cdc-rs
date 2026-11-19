@@ -31,6 +31,8 @@ fn main() -> Result<()> {
 
 `canal.toml` uses the [standalone configuration example](examples/config/multi-source.toml), beginning at `[[sources]]`. Every source requires `[sources.mysql-replication]`. Canal adds source plugins, table selection, transaction budgets and checkpoints, reusing replication-owned connection and image settings. Pikachu embeds this same configuration under `[mysql-canal]`.
 
+Call `canal.track_ddl("east")?` to track standalone column renames and appended INT columns for that source. Use `State::read_at` and `Replay::with_ddl_tracking` for replay from recorded file positions.
+
 Each source owns its connection, schema and checkpoint. Initial consumption starts at the current position without a full snapshot; recovery decodes using saved historical schema.
 
 ## Events and handlers

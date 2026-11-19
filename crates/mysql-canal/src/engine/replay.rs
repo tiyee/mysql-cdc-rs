@@ -38,6 +38,12 @@ impl Replay {
         })
     }
 
+    /// Reconstructs supported column changes while replaying without writing state.
+    pub fn with_ddl_tracking(mut self) -> Self {
+        self.processor = self.processor.with_ddl_tracking();
+        self
+    }
+
     /// Delivers committed transactions and rejects invalid or incomplete input.
     /// Earlier commits may have reached the sink when a later event fails.
     pub fn run(mut self, path: &Path, sink: &dyn TransactionSink) -> Result<()> {

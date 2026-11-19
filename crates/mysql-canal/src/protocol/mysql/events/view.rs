@@ -83,5 +83,13 @@ pub enum ParsedEvent<'a> {
     Control(EventAction<'a>),
 }
 pub trait EventParser: Send {
+    /// Returns the original statement for adapters supporting tracked MySQL DDL.
+    fn ddl_query<'a>(
+        &self,
+        _event: EventView<'a>,
+    ) -> Result<Option<mysql_replication::events::QueryEvent<'a>>> {
+        Ok(None)
+    }
+
     fn parse<'a>(&self, event: EventView<'a>) -> Result<ParsedEvent<'a>>;
 }

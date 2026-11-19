@@ -6,7 +6,10 @@ use crate::{
     engine::{Runtime, checkpoint::State},
     sink::TransactionSink,
 };
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 /// Replicates the configured sources and delivers committed changes to handlers.
 ///
@@ -18,6 +21,7 @@ pub struct Canal {
     config: AppConfig,
     runtime: Runtime,
     handlers: Vec<Box<dyn TransactionHandler>>,
+    tracked_sources: HashSet<String>,
 }
 
 impl Canal {
@@ -41,7 +45,24 @@ impl Canal {
             config,
             runtime,
             handlers: Vec::new(),
+            tracked_sources: HashSet::new(),
         })
+    }
+
+    /// Tracks supported MySQL DDL by file and position for this source.
+    pub fn track_ddl(&mut self, source_id: &str) -> Result<()> {
+        if !self
+            .config
+            .sources
+            .iter()
+            .any(|entry| entry.id == source_id)
+        {
+            return Err(Error::Invalid(format!(
+                "unknown DDL tracking source {source_id}"
+            )));
+        }
+        self.tracked_sources.insert(source_id.into());
+        Ok(())
     }
 
     /// Registers a handler or a `Fn(CommittedTransaction<'_>) -> Result<()>` closure.
@@ -82,9 +103,10 @@ impl Canal {
         if self.handlers.is_empty() {
             return Err(Error::Sink("register at least one event handler".into()).into());
         }
-        self.runtime.run_detailed(
+        self.runtime.run_with_ddl_tracking(
             self.config,
             once,
+            &self.tracked_sources,
             Arc::new(Handlers {
                 handlers: self.handlers,
                 failed: Mutex::new(false),

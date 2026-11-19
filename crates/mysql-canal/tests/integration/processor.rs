@@ -947,3 +947,121 @@ fn unused_capacity_from_small_rows_does_not_reject_a_large_transaction() {
         19000
     );
 }
+
+#[test]
+fn tracked_ddl_requires_exact_sql_a_commit_boundary_and_sink_ack() {
+    let path = temporary("tracked-ddl-rejected");
+    state().save(&path).unwrap();
+    let saved = fs::read(&path).unwrap();
+    let make = || {
+        let mut p = Processor::new(
+            state(),
+            Some(path.clone()),
+            1 << 20,
+            Default::default(),
+            None,
+            mysql_canal::config::RowImageMode::Minimal,
+        )
+        .unwrap()
+        .with_ddl_tracking();
+        feed(
+            &mut p,
+            FORMAT_DESCRIPTION_EVENT,
+            100,
+            &format(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        p
+    };
+    for sql in [
+        "ALTER TABLE app.users DROP COLUMN age",
+        "ALTER TABLE app.users ADD COLUMN x INT FIRST",
+        "ALTER TABLE app.users ADD COLUMN x INT, DROP COLUMN age",
+        "ALTER TABLE app.users ADD COLUMN x INT; ALTER TABLE app.users DROP COLUMN age",
+        "ALTER TABLE other.users RENAME COLUMN age TO years",
+        "ALTER TABLE app.users RENAME ADD COLUMN x INT",
+    ] {
+        assert!(
+            matches!(feed(&mut make(), QUERY_EVENT, 200, &query(sql), &mut Vec::new()), Err(Error::Statement(s)) if s == sql)
+        );
+    }
+    let ddl = query("ALTER TABLE app.users ADD COLUMN x INT");
+    let mut active = make();
+    feed(
+        &mut active,
+        QUERY_EVENT,
+        150,
+        &query("BEGIN"),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(
+        matches!(feed(&mut active, QUERY_EVENT, 200, &ddl, &mut Vec::new()), Err(Error::Invalid(s)) if s.contains("standalone"))
+    );
+    assert!(matches!(
+        feed(&mut make(), QUERY_EVENT, 200, &ddl, &mut FailFlush),
+        Err(Error::Io(_) | Error::Sink(_))
+    ));
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn tracked_schema_rotation_and_corrupt_history() {
+    let path = temporary("ddl-rotate");
+    let initial = state();
+    initial.save(&path).unwrap();
+    let mut p = Processor::new(
+        initial.clone(),
+        Some(path.clone()),
+        1 << 20,
+        Default::default(),
+        None,
+        mysql_canal::config::RowImageMode::Minimal,
+    )
+    .unwrap()
+    .with_ddl_tracking();
+    let mut out = Vec::new();
+    feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &format(), &mut out).unwrap();
+    feed(
+        &mut p,
+        QUERY_EVENT,
+        200,
+        &query("ALTER TABLE app.users RENAME COLUMN name TO display_name"),
+        &mut out,
+    )
+    .unwrap();
+    let before_rotate = fs::read(&path).unwrap();
+    let new_file = "binlog.000002";
+    let mut rotate = 4u64.to_le_bytes().to_vec();
+    rotate.extend_from_slice(new_file.as_bytes());
+    feed(&mut p, ROTATE_EVENT, 245, &rotate, &mut out).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before_rotate);
+    feed(&mut p, FORMAT_DESCRIPTION_EVENT, 100, &format(), &mut out).unwrap();
+    assert_eq!(
+        State::read_at(&path, new_file, 4).unwrap().tables[0].columns[1].name,
+        "display_name"
+    );
+    assert_eq!(
+        State::read_at(&path, &initial.file, 199).unwrap().tables[0].columns[1].name,
+        "name"
+    );
+    assert!(matches!(
+        State::read_at(&path, "missing-file", 4),
+        Err(Error::Invalid(_))
+    ));
+    let stored: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for (field, value) in [
+        ("position", serde_json::json!(201)),
+        ("source_uuid", serde_json::json!("other-source")),
+    ] {
+        let mut invalid = stored.clone();
+        invalid["schema_history"][0][field] = value;
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(
+            matches!(State::read(&path), Err(Error::Invalid(s)) if s.contains("schema history"))
+        );
+    }
+    fs::remove_file(path).unwrap();
+}

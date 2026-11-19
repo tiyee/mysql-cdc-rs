@@ -65,6 +65,8 @@ Pikachu 必须包含 `mysql-canal`，每个 Canal 来源必须包含 `mysql-repl
 | `pikachu-cdc run cdc.toml --once` | 消费当前可用事件后退出 |
 | `pikachu-cdc replay local-state.json /path/to/binlog.000001` | 按历史 schema 回放单个文件，不修改 state |
 
+按来源启用列改名和表尾新增 INT 列，可执行 `pikachu-cdc run cdc.toml --track-ddl local`，或在 Rust 中调用 `canal.track_ddl("local")?`。检查点按 binlog 文件和位点保存历史表结构。见[支持的 ALTER 语法和回放参数](docs/configuration.zh-CN.md#ddl-tracking)。
+
 ## 一次更新会得到什么
 
 例如来源 `local` 的 `app.users` 表使用无符号整数主键，应用修改主键 42 的记录并提交：
@@ -164,7 +166,7 @@ fn main() -> Result<()> {
 - 首次启动从当前提交位点开始，不做全量快照；后续使用检查点保存的历史 schema 恢复。
 - COMMIT 后交付完整事务，回滚丢弃。所有处理器成功后才保存检查点，故障可能导致重放，消费方须幂等。
 - InnoDB 应用可以设置、释放和回滚到保存点。MySQL 通常会在提交前从 binlog 中移除已撤销的行。若 binlog 中出现显式 `ROLLBACK TO`（例如事务还写入了非事务表），CDC 在该语句处停止，保留上次确认的检查点。
-- 支持单列整数、精确 DECIMAL 及受支持字符集的 CHAR/VARCHAR 主键。DDL、未知布局和不支持的数据会报错停止。
+- 支持单列整数、精确 DECIMAL 及受支持字符集的 CHAR/VARCHAR 主键。未启用跟踪或不支持的 DDL、未知布局和不支持的数据会报错停止。
 - 每个来源独立维护连接和检查点，跨来源没有全局顺序。
 
 ## 文档

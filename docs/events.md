@@ -593,9 +593,9 @@ If both updates changed the row, Canal delivers only the name update at commit. 
 
 CDC requires a single-column primary key: integers, exact DECIMAL, or CHAR/VARCHAR using utf8, utf8mb3, utf8mb4, ascii or latin1. Composite, missing or unsupported keys fail explicitly. Consumers of large integers should use a JSON parser that preserves their precision.
 
-Schema-changing SQL (DDL), unsupported statements/layouts, corrupt or truncated logs, missing keys and metadata mismatches stop consumption. Unacknowledged transactions do not advance disk checkpoints. NULL in a NOT NULL column also fails, including non-key columns.
+Untracked schema-changing SQL (DDL), unsupported statements/layouts, corrupt or truncated logs, missing keys and metadata mismatches stop consumption. Unacknowledged transactions do not advance disk checkpoints. NULL in a NOT NULL column also fails, including non-key columns.
 
-DDL does not automatically refresh schema and continue. Recovery interprets historical logs with the schema saved in the checkpoint. Do not delete checkpoints to skip unprocessed data.
+The default DDL policy stops consumption. Opt-in [DDL tracking](configuration.md#ddl-tracking) derives supported changes at their binlog commit positions. Recovery interprets historical logs with the schema saved in the checkpoint. Do not delete checkpoints to skip unprocessed data.
 
 ## Read next
 

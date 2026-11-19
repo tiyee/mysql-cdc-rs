@@ -1,6 +1,7 @@
 //! Source orchestration, transaction visibility and checkpoint persistence.
 mod canal;
 pub mod checkpoint;
+mod ddl;
 pub mod processor;
 pub mod replay;
 pub mod runtime;

@@ -63,10 +63,10 @@ done
 | 包 | 场景数 | 验证契约 |
 | --- | --- | --- |
 | `mysql-replication` | 4 | 主键预检、上游模式不匹配及跳过设置检查、原始与泛型稀疏/完整镜像、借用 `next_view()` 解码、宽表多行操作、精确值、NULL 及非选中表仍交付 |
-| `mysql-canal` | 13 | CDC 转换、提交事务、来源启动校验与检查点恢复 |
+| `mysql-canal` | 14 | CDC 转换、提交事务、来源启动校验与检查点恢复 |
 | `pikachu` | 3 | 在线 `check`/`init`/`run --once`、完整 JSON Lines、过滤、回滚、恢复不重复、DDL 及预检失败位点 |
 
-这 20 个场景消费服务器实际生成的 binlog 或查询真实元数据。默认 workspace 测试只编译它们，保持忽略；不使用合成事件替代实库变更。Canal 的 13 个场景通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径运行。CDC 输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk、changed 与 fields，缺失、额外或重复的事件都会失败。
+这 21 个场景消费服务器实际生成的 binlog 或查询真实元数据。默认 workspace 测试只编译它们，保持忽略；不使用合成事件替代实库变更。Canal 的 14 个场景通过正式 `SourcePlugin` / `VersionAdapter` / `Processor` / sink 路径运行。CDC 输出比较包含 source、schema、table、operation、精确主键类型/值、previous_pk、changed 与 fields，缺失、额外或重复的事件都会失败。
 
 | 场景 | 校验内容 |
 | --- | --- |
@@ -82,13 +82,13 @@ done
 | 回滚 | INSERT/UPDATE/DELETE 全部回滚后无输出，后续提交仍可正常监控 |
 | 位点恢复 | 重新连接并读取磁盘 checkpoint，已提交事件不重发，新变更继续输出 |
 | 输出失败 | sink 拒绝提交时不推进磁盘位点，从原位点重连能完整重放 |
-| DDL 边界 | ALTER TABLE 明确失败停止，不使用旧 schema 继续输出，也不确认 DDL 后位点 |
+| DDL 边界 | 默认 ALTER 在上次确认位点停止；按来源启用后校验新增列、改名、历史字段、服务器元数据和恢复不重复 |
 
 这些场景必须串行执行：fixture 创建/删除数据库会产生 DDL，而 CDC 对任何来源的 DDL 都会停止。每个 fixture 有独立 schema、复制 ID 和临时 state，结束或断言失败时尝试清理数据库与状态目录。
 
-`MYSQL_IMAGE` 可选 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4.0`、`mysql:8.4`、`mysql:9.7.0`、`mysql:9.7` 或 `mysql:26.10`，并将 `CDC_TEST_MYSQL_SERIES` 设为对应的主、次版本号。切换版本前须删除旧测试卷。`.github/workflows/mysql.yml` 在每个版本上运行三包全部 20 个场景，分别使用 MINIMAL 和 FULL 模式，覆盖 5.7、8.0 历史基线，8.4、9.7 LTS 系列和 26.10 Innovation 系列。固定的 8.4.0 和 9.7.0 标签持续验证两个 LTS 首版，系列标签跟踪后续补丁。CI 校验服务器返回的系列号，使用固定镜像时还校验补丁号。测试日志记录实际版本和所选 CDC 适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时，同步更新原始解析器的生产者版本检查和 CDC 适配器注册表，再用首版和系列镜像验证两种模式。若 Docker 在远端，可通过 SSH 转发专用容器的回环端口，并将 `CDC_TEST_MYSQL_URL` 指向本地转发端口。
+`MYSQL_IMAGE` 可选 `mysql:5.7.44`、`mysql:8.0`、`mysql:8.4.0`、`mysql:8.4`、`mysql:9.7.0`、`mysql:9.7` 或 `mysql:26.10`，并将 `CDC_TEST_MYSQL_SERIES` 设为对应的主、次版本号。切换版本前须删除旧测试卷。`.github/workflows/mysql.yml` 在每个版本上运行三包全部 21 个场景，分别使用 MINIMAL 和 FULL 模式，覆盖 5.7、8.0 历史基线，8.4、9.7 LTS 系列和 26.10 Innovation 系列。固定的 8.4.0 和 9.7.0 标签持续验证两个 LTS 首版，系列标签跟踪后续补丁。CI 校验服务器返回的系列号，使用固定镜像时还校验补丁号。测试日志记录实际版本和所选 CDC 适配器。版本范围依据 [MySQL 官方 LTS 说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)，新增 LTS 系列时，同步更新原始解析器的生产者版本检查和 CDC 适配器注册表，再用首版和系列镜像验证两种模式。若 Docker 在远端，可通过 SSH 转发专用容器的回环端口，并将 `CDC_TEST_MYSQL_URL` 指向本地转发端口。
 
-2026-11-06 实测，MySQL **5.7.44、8.0.46、8.4.0、8.4.13、9.7.0、9.7.4 和 26.10.0** 均在两种行镜像模式下通过了全部 20 个场景。另在 5.7.22 和 8.0.11 上单独验证了两种模式的 InnoDB 保存点回归，均通过。另一次混合引擎测试中，8.4.0 从日志中移除了已回滚的 InnoDB 行，9.7.0 的 GTID 一致性检查在写入端拒绝了混写语句（错误 1785）。对于日志中实际保留显式 `ROLLBACK TO` 的情况，合成 QUERY 用例验证了语句报错、零输出以及磁盘检查点保持原值。
+2026-11-06 实测，MySQL **5.7.44、8.0.46、8.4.0、8.4.13、9.7.0、9.7.4 和 26.10.0** 均在两种行镜像模式下通过了当时的全部 20 个场景。另在 5.7.22 和 8.0.11 上单独验证了两种模式的 InnoDB 保存点回归，均通过。另一次混合引擎测试中，8.4.0 从日志中移除了已回滚的 InnoDB 行，9.7.0 的 GTID 一致性检查在写入端拒绝了混写语句（错误 1785）。对于日志中实际保留显式 `ROLLBACK TO` 的情况，合成 QUERY 用例验证了语句报错、零输出以及磁盘检查点保持原值。
 
 另在 MySQL 26.10.0 上使用配置指南中的复制账户权限，写入带 GTID 标签和保存点的事务。两种模式下，原始事件读取器均能解码标签，CLI 在线订阅与同一 binlog 文件的离线回放输出一致，从已保存的检查点继续消费也没有重复。
 

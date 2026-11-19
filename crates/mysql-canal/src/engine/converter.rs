@@ -15,6 +15,7 @@ use crate::{
 pub struct EventConverter {
     row_image: RowImageMode,
     tables: Vec<TableMeta>,
+    format_body: Vec<u8>,
     decoder: Option<Box<dyn RowDecoder>>,
     parser: Option<Box<dyn EventParser>>,
     registry: VersionRegistry,
@@ -30,6 +31,7 @@ impl EventConverter {
         Self {
             row_image,
             tables,
+            format_body: Vec::new(),
             decoder: None,
             parser: None,
             registry,
@@ -44,6 +46,45 @@ impl EventConverter {
             decoder.clear_table_maps();
         }
     }
+    pub(super) fn evolved_tables(&self, event: EventView<'_>) -> Result<Option<Vec<TableMeta>>> {
+        let Some(parser) = &self.parser else {
+            return Ok(None);
+        };
+        let Some(query) = parser.ddl_query(event)? else {
+            return Ok(None);
+        };
+        let format = FormatDescription::parse(&self.format_body)?;
+        super::ddl::apply(&self.tables, query, &format.server)
+    }
+
+    pub(super) fn with_tables(&self, tables: Vec<TableMeta>) -> Result<Self> {
+        let mut next = Self::new(
+            tables,
+            self.registry.clone(),
+            self.selected_adapter.clone(),
+            self.row_image,
+        );
+        next.set_format(&self.format_body)?;
+        Ok(next)
+    }
+
+    fn set_format(&mut self, body: &[u8]) -> Result<()> {
+        self.parser = None;
+        self.decoder = None;
+        let format = FormatDescription::parse(body)?;
+        let adapter = self
+            .registry
+            .resolve(&format.server, self.selected_adapter.as_deref())?;
+        adapter.validate_format(&format)?;
+        let parser = adapter.create_event_parser(&format)?;
+        let decoder = adapter.create_decoder(self.tables.clone(), &format, self.row_image)?;
+        self.format_body.clear();
+        self.format_body.extend_from_slice(body);
+        self.parser = Some(parser);
+        self.decoder = Some(decoder);
+        Ok(())
+    }
+
     /// Converts typed binlog input while preserving custom CDC layout adapters.
     pub fn convert_binlog<'a, M: mysql_replication::events::BinlogMode>(
         &mut self,
@@ -59,17 +100,7 @@ impl EventConverter {
         emit: &mut dyn FnMut(Change<'_>) -> Result<()>,
     ) -> Result<EventAction<'a>> {
         if event.event_type == event::FORMAT_DESCRIPTION_EVENT {
-            self.parser = None;
-            self.decoder = None;
-            let format = FormatDescription::parse(event.data)?;
-            let adapter = self
-                .registry
-                .resolve(&format.server, self.selected_adapter.as_deref())?;
-            adapter.validate_format(&format)?;
-            let parser = adapter.create_event_parser(&format)?;
-            let decoder = adapter.create_decoder(self.tables.clone(), &format, self.row_image)?;
-            self.parser = Some(parser);
-            self.decoder = Some(decoder);
+            self.set_format(event.data)?;
             return Ok(EventAction::Ignore);
         }
         let parsed = if let Some(parser) = &self.parser {

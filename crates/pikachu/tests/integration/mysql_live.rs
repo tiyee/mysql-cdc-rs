@@ -222,6 +222,29 @@ fn mysql_cli_checks_initializes_consumes_resumes_and_stops_at_ddl() {
         before,
         "DDL must not advance the saved checkpoint"
     );
+    let tracked = Command::new(env!("CARGO_BIN_EXE_pikachu-cdc"))
+        .arg("run")
+        .arg(&fixture.config)
+        .args(["--once", "--track-ddl", "cli-live"])
+        .output()
+        .unwrap();
+    assert!(
+        tracked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tracked.stderr)
+    );
+    let change: Value = serde_json::from_slice(&tracked.stdout).unwrap();
+    assert_eq!(change["changed"], json!(["id", "note", "extra"]));
+    assert_eq!(change["fields"]["after"][2]["column"]["name"], "extra");
+    assert_eq!(change["fields"]["after"][2]["value"], 8);
+    let after = State::read(&fixture.state).unwrap();
+    assert_eq!(after.tables[0].columns[2].name, "extra");
+    assert!(fixture.success("run").is_empty());
+    let old: State = serde_json::from_slice(&before).unwrap();
+    assert_eq!(
+        State::read_at(&fixture.state, &old.file, old.position).unwrap(),
+        old
+    );
 }
 
 #[test]

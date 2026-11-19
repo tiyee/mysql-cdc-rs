@@ -1,3 +1,4 @@
+# Track column DDL for east: pikachu-cdc run multi-source.toml --track-ddl east
 # Pikachu composes mysql-canal; product-specific settings belong at the root.
 [mysql-canal]
 

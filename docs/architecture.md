@@ -75,7 +75,8 @@ A source failure stops the run and asks peers to stop between events. A blocked 
 | Commit handled successfully | Checkpoint saved | Process the next batch |
 | Transaction rolls back | Changes discarded | No row notifications from that transaction |
 | Exit after output but before checkpoint persistence | Restart may redeliver | Make processing safe to repeat |
-| Schema change or unsupported log | Stop without passing unacknowledged data | Diagnose and explicitly handle schema and restart position |
+| Tracked column DDL | Handlers receive an empty transaction with the new schema | Acknowledge before the schema and position are saved together |
+| Untracked schema change or unsupported log | Stop without passing unacknowledged data | Diagnose and explicitly handle schema and restart position |
 | Processing slower than writes | Backlog grows; slow handlers block further delivery | Monitor lag and retain enough upstream logs |
 
 Flushing CLI output means writing to stdout or a pipe, not downstream durable acknowledgement. Applications requiring durable delivery should confirm success only after saving their business result.

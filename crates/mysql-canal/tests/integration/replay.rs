@@ -434,3 +434,95 @@ fn eof_after_gtid_is_an_incomplete_group() {
         Err(Error::Invalid(s)) if s.contains("inside a transaction")));
     assert!(output.is_empty());
 }
+
+#[test]
+fn ddl_history_selects_the_column_at_each_position_online_and_in_replay() {
+    use mysql_canal::engine::Processor;
+    use mysql_canal::protocol::mysql::file::BinlogFile;
+    for mode in [RowImageMode::Minimal, RowImageMode::Full] {
+        let mut log = Log::new(mode);
+        let mut boundaries = vec![4];
+        for (index, name) in ["name", "display_name", "nickname"].iter().enumerate() {
+            if index > 0 {
+                let old = ["name", "display_name"][index - 1];
+                log.append(
+                    QUERY_EVENT,
+                    &query(&format!(
+                        "ALTER TABLE `app`.`users` RENAME COLUMN `{old}` TO `{name}`"
+                    )),
+                );
+                boundaries.push(log.bytes.len() as u64);
+            }
+            log.append(QUERY_EVENT, &query("BEGIN"));
+            log.append(
+                TABLE_MAP_EVENT,
+                &table_map(7, &basic(), &[3, 15, 3], &[100, 0]),
+            );
+            log.append(
+                WRITE_ROWS_EVENT,
+                &rows(
+                    7,
+                    WRITE_ROWS_EVENT,
+                    3,
+                    &[7],
+                    &[],
+                    &full_image(index as i32, Some("value"), 23),
+                ),
+            );
+            log.append(XID_EVENT, &7u64.to_le_bytes());
+        }
+        let cp = log.directory.join("state.json");
+        log.snapshot.save(&cp).unwrap();
+        let binlog = log.directory.join(&log.snapshot.file);
+        fs::write(&binlog, &log.bytes).unwrap();
+        let mut stream = BinlogFile::new(log.bytes.as_slice()).unwrap();
+        let mut online = Processor::new(
+            log.snapshot.clone(),
+            Some(cp.clone()),
+            1 << 20,
+            Default::default(),
+            None,
+            mode,
+        )
+        .unwrap()
+        .with_ddl_tracking();
+        let mut data = Vec::new();
+        while let Some(event) = stream.next_event().unwrap() {
+            online
+                .process(event, &JsonLinesSink::new(&mut data))
+                .unwrap();
+        }
+        online.finish().unwrap();
+        let expected: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&data)
+            .into_iter()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(expected.len(), 3);
+        let names = ["name", "display_name", "nickname"];
+        let durable = fs::read(&cp).unwrap();
+        for (i, &position) in boundaries.iter().enumerate() {
+            assert_eq!(
+                expected[i]["fields"]["after"][1]["column"]["name"],
+                names[i]
+            );
+            assert_eq!(
+                expected[i]["changed"],
+                serde_json::json!(["id", names[i], "age"])
+            );
+            let state = State::read_at(&cp, &log.snapshot.file, position).unwrap();
+            assert_eq!(state.tables[0].columns[1].name, names[i]);
+            let mut output = Vec::new();
+            Replay::new(state, 1 << 20, Default::default(), None, mode)
+                .unwrap()
+                .with_ddl_tracking()
+                .run(&binlog, &JsonLinesSink::new(&mut output))
+                .unwrap();
+            let actual: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&output)
+                .into_iter()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(actual, expected[i..]);
+        }
+        assert_eq!(durable, fs::read(&cp).unwrap());
+    }
+}

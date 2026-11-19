@@ -65,6 +65,8 @@ Pikachu requires a `mysql-canal` child; every canal source requires a `mysql-rep
 | `pikachu-cdc run cdc.toml --once` | Consume currently available events and exit |
 | `pikachu-cdc replay local-state.json /path/to/binlog.000001` | Replay one file using historical schema without changing state |
 
+To track column renames and appended INT columns for a named source, run `pikachu-cdc run cdc.toml --track-ddl local` or call `canal.track_ddl("local")?`. The checkpoint records schema versions by binlog file and position. See the [supported ALTER forms and replay options](docs/configuration.md#ddl-tracking).
+
 ## What an update produces
 
 Suppose source `local` has `app.users` with an unsigned integer key. An application updates record 42 and commits:
@@ -164,7 +166,7 @@ Compare the [MINIMAL JSON example](docs/events.md#minimal-json) and [FULL JSON e
 - Initial consumption starts at the current committed position without a full snapshot. Recovery uses historical schema from the checkpoint.
 - Complete transactions are delivered after COMMIT; rollback discards changes. Checkpoints are saved after every handler succeeds. Failures can cause replay, so handlers must be idempotent.
 - InnoDB applications can set, release and roll back to savepoints. MySQL normally removes reverted rows from the binlog before COMMIT. If the binlog contains an explicit `ROLLBACK TO` (for example, after a nontransactional write), CDC stops at that statement and retains the last acknowledged checkpoint.
-- Keys must be single-column integers, exact DECIMAL or CHAR/VARCHAR in supported character sets. DDL, unknown layouts and unsupported data stop consumption with an error.
+- Keys must be single-column integers, exact DECIMAL or CHAR/VARCHAR in supported character sets. Untracked DDL, unknown layouts and unsupported data stop consumption with an error.
 - Each source owns its connection and checkpoint; there is no global ordering across sources.
 
 ## Documentation

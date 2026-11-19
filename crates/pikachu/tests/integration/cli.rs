@@ -82,6 +82,32 @@ fn offline_cli_replays_from_snapshot_boundary_and_rejects_truncation() {
             .position,
         snapshot.position
     );
+    let mut evolved = bytes.clone();
+    append(
+        &mut evolved,
+        QUERY_EVENT,
+        &query("ALTER TABLE app.users RENAME COLUMN name TO display_name"),
+    );
+    fs::write(&binlog_path, &evolved).unwrap();
+    let saved_bytes = fs::read(&state_path).unwrap();
+    let tracked = Command::new(env!("CARGO_BIN_EXE_pikachu-cdc"))
+        .arg("replay")
+        .arg(&state_path)
+        .arg(&binlog_path)
+        .arg("--from-position")
+        .arg(snapshot.position.to_string())
+        .arg("--track-ddl")
+        .output()
+        .unwrap();
+    assert!(
+        tracked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tracked.stderr)
+    );
+    assert_eq!(tracked.stdout, result.stdout);
+    assert_eq!(fs::read(&state_path).unwrap(), saved_bytes);
+
+    fs::write(&binlog_path, &bytes).unwrap();
     for field in ["source_id", "source_plugin"] {
         let mut invalid = serde_json::to_value(&snapshot).unwrap();
         invalid.as_object_mut().unwrap().remove(field);

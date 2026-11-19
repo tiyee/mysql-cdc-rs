@@ -19,7 +19,7 @@
 
 所有矩阵独立执行，单项失败不会取消其他项。`CI success` 汇总所有任务，可设为分支保护的必需检查。MySQL 矩阵由 `mysql.yml` 统一维护，也可单独手动运行。当前运行时的位点持久化依赖 Unix 文件/目录同步语义，因此测试系统先覆盖 Linux 与 macOS。
 
-MySQL 矩阵按每个系列的 MINIMAL / FULL 两种模式启动专用容器，串行执行 replication、canal 和 CLI 的实库目标。完整场景与本地命令集中维护在[测试指南](testing.zh-CN.md)。合成协议回归和实库验证分别执行，不能互相替代。
+MySQL 矩阵按每个系列的 MINIMAL / FULL 两种模式启动专用容器，串行执行 replication、canal 和 CLI 的实库目标。完整场景与本地命令集中维护在[测试指南](testing.zh-CN.md)。合成协议回归和实库验证分别执行，不能互相替代。发布前的 workspace 测试覆盖默认 DDL 停止和按位点跟踪 DDL 的历史回放。
 
 截至 2026-11，MySQL 矩阵保留 5.7 与 8.0 历史基线，并覆盖其后全部已发布 LTS 系列 8.4、9.7，依据 [MySQL 官方版本说明](https://dev.mysql.com/doc/refman/9.7/en/mysql-releases.html)。5.7 固定最终版 `mysql:5.7.44`，其余分别使用 `mysql:8.0`、`mysql:8.4`、`mysql:9.7` 系列标签跟踪可用补丁；不用 `latest` 或 `lts` 替代显式系列。两个 LTS 系列还固定测试首版 `mysql:8.4.0` 和 `mysql:9.7.0`，包括 InnoDB 保存点回滚后的输出与恢复。实际补丁版本会写入测试日志，并用 `CDC_TEST_MYSQL_SERIES` 校验镜像确实属于对应系列。新增 LTS 系列时，同步更新复制库的生产者版本检查和 Canal 的 `VersionRegistry`，并在矩阵中加入首版及系列标签。26.10 Innovation 单独使用 `mysql:26.10` 系列标签，在相同的两种镜像模式下执行完整实库测试。9.0 保留内置适配器，实库矩阵不单列该系列。
 

@@ -112,6 +112,16 @@ impl MysqlEventParser {
     }
 }
 impl EventParser for MysqlEventParser {
+    fn ddl_query<'a>(
+        &self,
+        raw: EventView<'a>,
+    ) -> Result<Option<mysql_replication::events::QueryEvent<'a>>> {
+        if raw.event_type != event::QUERY_EVENT {
+            return Ok(None);
+        }
+        decode_query(raw.data, self.query_post_header).map(Some)
+    }
+
     fn parse<'a>(&self, raw: EventView<'a>) -> Result<ParsedEvent<'a>> {
         Ok(match raw.event_type {
             event::TABLE_MAP_EVENT => ParsedEvent::TableMap(self.table_map(raw.data)?),
@@ -177,13 +187,21 @@ pub fn parse_v2_row_images(operation: Operation, body: &[u8]) -> Result<RowImage
     )?;
     parse_row_images(operation, input.remaining())
 }
-pub(crate) fn parse_query(body: &[u8], post_header: usize) -> Result<EventAction<'_>> {
+fn decode_query(
+    body: &[u8],
+    post_header: usize,
+) -> Result<mysql_replication::events::QueryEvent<'_>> {
     use mysql_replication::events::{Event, QueryEvent};
     let mut event = QueryEvent::with_post_header(post_header);
     event.decode(body)?;
     if event.error_code != 0 {
         return Err(invalid("QUERY event contains server error"));
     }
+    Ok(event)
+}
+
+pub(crate) fn parse_query(body: &[u8], post_header: usize) -> Result<EventAction<'_>> {
+    let event = decode_query(body, post_header)?;
     let query = std::str::from_utf8(event.query)?
         .trim()
         .trim_end_matches(';')

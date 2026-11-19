@@ -141,3 +141,18 @@ export MYSQL_EAST_URL='mysql://cdc:password@127.0.0.1:3306'
 ## 在应用中直接使用库
 
 只使用 Canal 时，[独立配置](../crates/mysql-canal/examples/config/multi-source.toml)从 `[[sources]]` 开始，省去最外面的 `mysql-canal` 包装。原始连接与解析接口、在其他产品中嵌入配置的方式见[Rust API 参考](event-api.zh-CN.md#replication-连接与解析-api)。
+
+<a id="ddl-tracking"></a>
+
+## 按位点跟踪 DDL
+
+每次运行通过 `pikachu-cdc run cdc.toml --track-ddl east` 或 `canal.track_ddl("east")?` 按来源启用，连续消费和 `--once` 均可使用。默认遇到 DDL 停止。内置 MySQL 解析器支持白名单表的以下独立语句。
+
+- `ALTER TABLE [db.]table RENAME COLUMN old TO new`
+- `ALTER TABLE [db.]table ADD [COLUMN] name INT [UNSIGNED] [NULL | NOT NULL]`，仅支持追加到表尾，也接受 `INTEGER`。
+
+未指定库名时使用 QUERY 事件记录的默认库。标识符支持 ASCII 字母、数字、下划线和美元符号，可加反引号。其余语法、一次 ALTER 的多个操作，以及白名单外的 DDL 均会停止消费。来源仍须满足单列受支持主键的要求。
+
+支持的 ALTER 会向处理器交付一个带新表结构的空变更事务。全部处理器确认后，新结构、生效文件和位点与恢复检查点一起原子保存。新版文件包含 `checkpoint` 和 `schema_history`，旧版消费者只能读取原有格式。历史从首次开启跟踪时的检查点开始，受支持的 DDL 和日志轮转都会留下该来源的完整表结构快照，检查点文件会随记录数增长。
+
+例如，`pikachu-cdc replay east-state.json /logs/binlog.000042 --from-position 1800 --track-ddl` 从该文件位点 1800 当时生效的表结构开始，按顺序处理后续受支持的 ALTER。起点应为历史记录覆盖的事务边界，日志文件需完整保留。Rust 对应入口为 `State::read_at` 和 `Replay::with_ddl_tracking`。回放只读取磁盘检查点。

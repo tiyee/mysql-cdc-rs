@@ -36,6 +36,8 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 [配置示例](examples/config/multi-source.toml) 使用具名来源，各自维护凭据、白名单和检查点。变更包含来源、库名、表名、操作、精确主键、变动字段名以及携带列元数据和日志值的 `fields.before` / `fields.after`。仅在事务提交后输出，回滚丢弃缓冲。输出失败会停止消费；检查点持久化前发生崩溃可能导致重放。
 
+按来源运行 `pikachu-cdc run cdc.toml --track-ddl east` 可跟踪列改名和表尾增加 INT 列。回放时使用 `--from-position N --track-ddl` 从历史记录覆盖的事务边界读取。
+
 使用检查点保存的历史 schema 回放本地 binlog：
 
 ```sh
@@ -44,7 +46,7 @@ export MYSQL_WEST_URL='mysql://cdc:password@127.0.0.1:3307'
 
 文件名须与 `state.file` 一致，文件须保留开头的 FORMAT_DESCRIPTION；从保存的事件边界开始回放，截断或未完成事务会报错。每次命令只读取一个来源的一个文件。
 
-消费错误写入 stderr，并返回非零退出码；变更记录使用 stdout。默认处理器在保存检查点前 flush stdout，但这不代表下游持久化确认，消费方须容忍重放。CDC 可以继续处理 InnoDB 事务中的 `SAVEPOINT` 和 `RELEASE SAVEPOINT` 标记。若 binlog 中出现显式 `ROLLBACK TO`、DDL 或其他不支持的语句，CDC 在确认该事务前以 `Error::Statement` 停止。
+消费错误写入 stderr，并返回非零退出码；变更记录使用 stdout。默认处理器在保存检查点前 flush stdout，但这不代表下游持久化确认，消费方须容忍重放。CDC 可以继续处理 InnoDB 事务中的 `SAVEPOINT` 和 `RELEASE SAVEPOINT` 标记。若 binlog 中出现显式 `ROLLBACK TO`、未跟踪的 DDL 或其他不支持的语句，CDC 在确认该事务前以 `Error::Statement` 停止。
 
 按上文从源码构建，命令名为 `pikachu-cdc`。嵌入式 CDC 与原始复制可统一依赖 `mysql-cdc-rs`（`mysql_cdc_rs`）；`mysql-canal` 和 `mysql-replication` 仍可单独使用。配置步骤、输出契约、兼容矩阵和限制见[项目说明](https://github.com/tiyee/mysql-cdc-rs/blob/master/README.zh-CN.md)。
 

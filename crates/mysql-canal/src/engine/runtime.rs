@@ -164,6 +164,16 @@ impl Runtime {
         once: bool,
         sink: Arc<dyn TransactionSink>,
     ) -> std::result::Result<(), RunError> {
+        self.run_with_ddl_tracking(config, once, &HashSet::new(), sink)
+    }
+
+    pub(super) fn run_with_ddl_tracking(
+        &self,
+        config: AppConfig,
+        once: bool,
+        tracked_sources: &HashSet<String>,
+        sink: Arc<dyn TransactionSink>,
+    ) -> std::result::Result<(), RunError> {
         let prepared = self.prepare(config, false)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         std::thread::scope(|scope| {
@@ -173,6 +183,7 @@ impl Runtime {
                 let cancelled = Arc::clone(&cancelled);
                 let registry = self.versions.clone();
                 let source_id = prepared.entry.id.clone();
+                let track_ddl = tracked_sources.contains(&source_id);
                 let worker = scope.spawn(move || {
                     let _panic_guard = CancelOnPanic(&cancelled);
                     let Prepared {
@@ -190,6 +201,9 @@ impl Runtime {
                             entry.config.source.adapter.clone(),
                             entry.config.replication.row_image,
                         )?;
+                        if track_ddl {
+                            processor = processor.with_ddl_tracking();
+                        }
                         let mut stream = session.start(&entry.config, processor.state(), once)?;
                         while !cancelled.load(Ordering::Acquire) {
                             let Some(event) = stream.next_event()? else {

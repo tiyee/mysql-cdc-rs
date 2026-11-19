@@ -29,6 +29,8 @@ fn main() -> Result<()> {
 }
 ```
 
+调用 `canal.track_ddl("east")?` 可为该来源跟踪单列改名和表尾追加 INT 列。从已记录的文件位点回放可使用 `State::read_at` 和 `Replay::with_ddl_tracking`。
+
 `canal.toml` 使用[独立配置示例](examples/config/multi-source.toml)，从 `[[sources]]` 开始，每个来源必须包含 `[sources.mysql-replication]`。Canal 仅增加来源插件、表白名单、事务预算及检查点配置；连接和行镜像设置复用复制库类型。Pikachu 将相同配置嵌入 `[mysql-canal]`。
 
 每个来源独立维护连接、schema 和检查点。初次从当前位点开始，不做全量快照；恢复按保存的历史 schema 解码。

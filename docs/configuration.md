@@ -141,3 +141,16 @@ Before switching, pause writes, consume through a commit boundary using the curr
 ## Use the library directly
 
 A standalone canal [configuration](../crates/mysql-canal/examples/config/multi-source.toml) begins at `[[sources]]`, without the outer `mysql-canal` wrapper. See the [Rust API reference](event-api.md#replication-connection-and-parser-apis) for raw connections, parser interfaces and embedding configuration in another product.
+
+## DDL tracking
+
+Use `pikachu-cdc run cdc.toml --track-ddl east` or `canal.track_ddl("east")?` to opt in separately for each source on each run. Both continuous consumption and `--once` support this option. The default stops on DDL. The built-in MySQL parser accepts these standalone operations on a whitelisted table.
+
+- `ALTER TABLE [db.]table RENAME COLUMN old TO new`
+- `ALTER TABLE [db.]table ADD [COLUMN] name INT [UNSIGNED] [NULL | NOT NULL]` at the end of the table. `INTEGER` is also accepted.
+
+Unqualified tables use the QUERY event's database. Supported identifiers use ASCII letters, digits, underscores or dollar signs, optionally enclosed in backticks. Other SQL forms, multiple alterations and DDL on other tables stop consumption. The source must supply a single supported primary key as usual.
+
+A supported ALTER delivers an empty committed transaction with the new schema. After the handlers acknowledge it, the source atomically saves the new schema, its effective file/position and the resume checkpoint. A versioned checkpoint contains `checkpoint` and `schema_history`. Older consumers require their original checkpoint format. History begins at the checkpoint where tracking was enabled. Tracking keeps complete source schema snapshots for each supported DDL and binlog rotation, so the checkpoint grows with their number.
+
+For example, `pikachu-cdc replay east-state.json /logs/binlog.000042 --from-position 1800 --track-ddl` selects the last recorded schema at or before position 1800 in that file and applies subsequent supported ALTER statements. Supply a known transaction boundary covered by the history and retain the complete binlog file. The Rust equivalents are `State::read_at` and `Replay::with_ddl_tracking`. Replay leaves the checkpoint file untouched.

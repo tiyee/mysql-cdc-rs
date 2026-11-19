@@ -885,3 +885,76 @@ fn mysql_ddl_stops_without_acknowledging_new_schema() {
         (checkpoint.file.as_str(), checkpoint.position)
     );
 }
+
+#[test]
+#[ignore = "requires dedicated MySQL; run with --ignored --test-threads=1"]
+fn mysql_tracked_ddl_uses_positioned_schema_after_restart() {
+    let mut fixture = Fixture::new(ITEMS);
+    let version = fixture.connection().server_version();
+    let can_rename = version.0 >= 8;
+    fixture.sql("INSERT INTO items VALUES (1,'before')");
+    fixture.sql("ALTER TABLE items ADD COLUMN age INT UNSIGNED NULL");
+    fixture.sql("INSERT INTO items VALUES (2,'added',4294967295)");
+    fixture.sql("FLUSH BINARY LOGS");
+    if can_rename {
+        fixture.sql("ALTER TABLE items RENAME COLUMN age TO years");
+        fixture.sql("INSERT INTO items VALUES (3,'renamed',7)");
+    }
+    let output = CapturedOutput::default();
+    let consume = |fixture: &Fixture, start: &State| {
+        let mut processor = fixture.processor(start).with_ddl_tracking();
+        let mut stream = fixture.stream(start, true);
+        while let Some(event) = stream.next_event().unwrap() {
+            processor
+                .process(event, &JsonLinesSink::new(output.clone()))
+                .unwrap();
+        }
+        processor.finish().unwrap();
+    };
+    consume(&fixture, &fixture.initial);
+    let latest = fixture.saved();
+    let expected_tables = mysql_canal::source::mysql::load_tables(
+        &mut mysql_canal::source::mysql::connect(&fixture.config).unwrap(),
+        &fixture.config,
+    )
+    .unwrap();
+    assert_eq!(latest.tables, expected_tables);
+    assert_eq!(
+        State::read_at(
+            &fixture.config.state_file,
+            &fixture.initial.file,
+            fixture.initial.position
+        )
+        .unwrap(),
+        fixture.initial
+    );
+    let changes = output.changes();
+    assert_eq!(changes.len(), if can_rename { 3 } else { 2 });
+    assert_eq!(changes[0]["changed"], json!(["id", "note"]));
+    assert_eq!(changes[1]["changed"], json!(["id", "note", "age"]));
+    assert_eq!(changes[1]["fields"]["after"][2]["column"]["name"], "age");
+    assert_eq!(changes[1]["fields"]["after"][2]["value"], 4294967295_u64);
+    if can_rename {
+        assert_eq!(changes[2]["changed"], json!(["id", "note", "years"]));
+        assert_eq!(changes[2]["fields"]["after"][2]["column"]["name"], "years");
+        assert_eq!(changes[2]["fields"]["after"][2]["value"], 7);
+    }
+    assert_ne!(latest.file, fixture.initial.file);
+    let rotated = State::read_at(&fixture.config.state_file, &latest.file, 4).unwrap();
+    assert_eq!(rotated.tables[0].columns[2].name, "age");
+    consume(&fixture, &latest);
+    assert_eq!(fixture.saved(), latest);
+    assert_eq!(output.changes(), changes);
+    fixture.sql("INSERT INTO items VALUES (4,'after restart',8)");
+    consume(&fixture, &latest);
+    let resumed = output.changes();
+    assert_eq!(resumed.len(), changes.len() + 1);
+    let last = resumed.last().unwrap();
+    assert_eq!(last["pk"], key(4));
+    assert_eq!(
+        last["fields"]["after"][2]["column"]["name"],
+        if can_rename { "years" } else { "age" }
+    );
+    assert_eq!(last["fields"]["after"][2]["value"], 8);
+    assert!(fixture.saved().position > latest.position);
+}
